@@ -1,0 +1,434 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+// PlatformGatewayClient provides access to all platform services through the
+// Platform Access Gateway. It handles authentication, token refresh, and
+// request routing.
+type PlatformGatewayClient struct {
+	baseURL   string
+	tokenPath string
+	tenantID  string
+	client    *http.Client
+
+	mu    sync.RWMutex
+	token string
+}
+
+// NewPlatformGatewayClient creates a new gateway client.
+func NewPlatformGatewayClient(baseURL, tokenPath, tenantID string) *PlatformGatewayClient {
+	return &PlatformGatewayClient{
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		tokenPath: tokenPath,
+		tenantID:  tenantID,
+		client: &http.Client{
+			Timeout: 120 * time.Second,
+		},
+	}
+}
+
+// CallTool invokes an MCP tool via the Platform Access Gateway.
+func (c *PlatformGatewayClient) CallTool(ctx context.Context, tool string, params any) (json.RawMessage, error) {
+	body := map[string]any{
+		"tool":   tool,
+		"params": params,
+	}
+	resp, err := c.post(ctx, "/mcp/tools/call", body)
+	if err != nil {
+		return nil, fmt.Errorf("call tool %s: %w", tool, err)
+	}
+	return resp, nil
+}
+
+// ChatCompletionRequest is the request for LLM chat completion.
+type ChatCompletionRequest struct {
+	Messages  []ChatMessage `json:"messages"`
+	Model     string        `json:"model,omitempty"`
+	MaxTokens int           `json:"max_tokens,omitempty"`
+	Stream    bool          `json:"stream,omitempty"`
+	RequestID string        `json:"-"`
+}
+
+// ChatMessage is a single message in a chat completion request.
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// ChatCompletionResponse is the response from LLM chat completion.
+type ChatCompletionResponse struct {
+	ID      string       `json:"id"`
+	Choices []ChatChoice `json:"choices"`
+	Usage   *Usage       `json:"usage,omitempty"`
+}
+
+// ChatChoice is a single choice in a chat completion response.
+type ChatChoice struct {
+	Index   int         `json:"index"`
+	Message ChatMessage `json:"message"`
+}
+
+// Usage reports token usage.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// ChatCompletion performs a synchronous LLM chat completion via the gateway.
+func (c *PlatformGatewayClient) ChatCompletion(ctx context.Context, req *ChatCompletionRequest) (*ChatCompletionResponse, error) {
+	body := map[string]any{
+		"messages": req.Messages,
+		"stream":   false,
+	}
+	if req.Model != "" {
+		body["model"] = req.Model
+	}
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
+	}
+
+	respData, err := c.post(ctx, "/llm/v1/chat/completions", body)
+	if err != nil {
+		return nil, fmt.Errorf("chat completion: %w", err)
+	}
+
+	var resp ChatCompletionResponse
+	if err := json.Unmarshal(respData, &resp); err != nil {
+		return nil, fmt.Errorf("parse chat response: %w", err)
+	}
+	return &resp, nil
+}
+
+// ChatCompletionStream performs a streaming LLM chat completion.
+// Returns a channel that receives chunks as they arrive.
+func (c *PlatformGatewayClient) ChatCompletionStream(ctx context.Context, req *ChatCompletionRequest) (<-chan *ChatChunk, error) {
+	body := map[string]any{
+		"messages": req.Messages,
+		"stream":   true,
+	}
+	if req.Model != "" {
+		body["model"] = req.Model
+	}
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/llm/v1/chat/completions", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("streaming request failed: %s", resp.Status)
+	}
+
+	ch := make(chan *ChatChunk, 16)
+	go func() {
+		defer func() { _ = resp.Body.Close() }()
+		defer close(ch)
+		dec := json.NewDecoder(resp.Body)
+		for {
+			var chunk ChatChunk
+			if err := dec.Decode(&chunk); err != nil {
+				return
+			}
+			select {
+			case ch <- &chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// ChatChunk is a single chunk in a streaming chat completion.
+type ChatChunk struct {
+	ID      string            `json:"id"`
+	Choices []ChatChunkChoice `json:"choices"`
+}
+
+// ChatChunkChoice is a choice within a streaming chunk.
+type ChatChunkChoice struct {
+	Index int       `json:"index"`
+	Delta ChatDelta `json:"delta"`
+}
+
+// ChatDelta is the incremental content in a streaming chunk.
+type ChatDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// SubmitWorkflow submits a workflow for execution (e.g., HITL approval).
+func (c *PlatformGatewayClient) SubmitWorkflow(ctx context.Context, workflowType string, input any) (string, error) {
+	body := map[string]any{
+		"type":  workflowType,
+		"input": input,
+	}
+	respData, err := c.post(ctx, "/workflow", body)
+	if err != nil {
+		return "", fmt.Errorf("submit workflow: %w", err)
+	}
+
+	var result struct {
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.Unmarshal(respData, &result); err != nil {
+		return "", fmt.Errorf("parse workflow response: %w", err)
+	}
+	return result.WorkflowID, nil
+}
+
+// AgentCard is the A2A agent card returned by GetAgentCard.
+type AgentCard struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	Version     string `json:"version"`
+}
+
+// GetAgentCard retrieves another agent's A2A card via the gateway.
+func (c *PlatformGatewayClient) GetAgentCard(ctx context.Context, agentName string) (*AgentCard, error) {
+	path := fmt.Sprintf("/agents/%s/.well-known/agent-card.json", agentName)
+	respData, err := c.get(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("get agent card %s: %w", agentName, err)
+	}
+
+	var card AgentCard
+	if err := json.Unmarshal(respData, &card); err != nil {
+		return nil, fmt.Errorf("parse agent card: %w", err)
+	}
+	return &card, nil
+}
+
+// A2AInvokeRequest is the request for invoking another agent.
+type A2AInvokeRequest struct {
+	Method  string          `json:"method"`
+	Message json.RawMessage `json:"message"`
+}
+
+// InvokeAgent sends a message/send request to another agent via the gateway.
+func (c *PlatformGatewayClient) InvokeAgent(ctx context.Context, agentName string, msg any) (json.RawMessage, error) {
+	body := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "message/send",
+		"params":  map[string]any{"message": msg},
+	}
+	path := fmt.Sprintf("/agents/%s", agentName)
+	resp, err := c.post(ctx, path, body)
+	if err != nil {
+		return nil, fmt.Errorf("invoke agent %s: %w", agentName, err)
+	}
+	return resp, nil
+}
+
+// InvokeAgentStream sends a message/stream request to another agent.
+func (c *PlatformGatewayClient) InvokeAgentStream(ctx context.Context, agentName string, msg any) (<-chan *json.RawMessage, error) {
+	body := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "message/stream",
+		"params":  map[string]any{"message": msg},
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	path := fmt.Sprintf("/agents/%s", agentName)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(httpReq)
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("agent stream request failed: %s", resp.Status)
+	}
+
+	ch := make(chan *json.RawMessage, 16)
+	go func() {
+		defer func() { _ = resp.Body.Close() }()
+		defer close(ch)
+		dec := json.NewDecoder(resp.Body)
+		for {
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return
+			}
+			select {
+			case ch <- &raw:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// RegistrationRequest is the request for self-registration.
+type RegistrationRequest struct {
+	AgentID      string   `json:"agent_id"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	URL          string   `json:"url"`
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+// RegisterSelf registers this agent in the Agent Registry.
+func (c *PlatformGatewayClient) RegisterSelf(ctx context.Context, reg *RegistrationRequest) error {
+	_, err := c.post(ctx, "/registry/register", reg)
+	if err != nil {
+		return fmt.Errorf("register self: %w", err)
+	}
+	return nil
+}
+
+// DeregisterSelf removes this agent from the Agent Registry.
+func (c *PlatformGatewayClient) DeregisterSelf(ctx context.Context) error {
+	_, err := c.post(ctx, "/registry/deregister", nil)
+	if err != nil {
+		return fmt.Errorf("deregister self: %w", err)
+	}
+	return nil
+}
+
+// post sends a POST request to the gateway and returns the response body.
+func (c *PlatformGatewayClient) post(ctx context.Context, path string, body any) (json.RawMessage, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		bodyReader = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return respBody, nil
+}
+
+// get sends a GET request to the gateway and returns the response body.
+func (c *PlatformGatewayClient) get(ctx context.Context, path string) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setHeaders(req)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return respBody, nil
+}
+
+func (c *PlatformGatewayClient) setHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Tenant-ID", c.tenantID)
+
+	token := c.loadToken()
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func (c *PlatformGatewayClient) loadToken() string {
+	c.mu.RLock()
+	if c.token != "" {
+		defer c.mu.RUnlock()
+		return c.token
+	}
+	c.mu.RUnlock()
+
+	if c.tokenPath == "" {
+		return ""
+	}
+
+	data, err := os.ReadFile(c.tokenPath)
+	if err != nil {
+		return ""
+	}
+
+	token := strings.TrimSpace(string(data))
+
+	c.mu.Lock()
+	c.token = token
+	c.mu.Unlock()
+
+	return token
+}
+
+// InvalidateToken clears the cached token, forcing a reload on next request.
+func (c *PlatformGatewayClient) InvalidateToken() {
+	c.mu.Lock()
+	c.token = ""
+	c.mu.Unlock()
+}
