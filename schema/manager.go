@@ -81,15 +81,16 @@ type PropertyDef struct {
 type PropertyType string
 
 const (
-	PropertyTypeString   PropertyType = "STRING"
-	PropertyTypeInteger  PropertyType = "INTEGER"
-	PropertyTypeLong     PropertyType = "LONG"
-	PropertyTypeFloat    PropertyType = "FLOAT"
-	PropertyTypeDouble   PropertyType = "DOUBLE"
-	PropertyTypeBoolean  PropertyType = "BOOLEAN"
-	PropertyTypeDatetime PropertyType = "DATETIME"
-	PropertyTypeEmbedded PropertyType = "EMBEDDED"
-	PropertyTypeList     PropertyType = "LIST"
+	PropertyTypeString      PropertyType = "STRING"
+	PropertyTypeInteger     PropertyType = "INTEGER"
+	PropertyTypeLong        PropertyType = "LONG"
+	PropertyTypeFloat       PropertyType = "FLOAT"
+	PropertyTypeDouble      PropertyType = "DOUBLE"
+	PropertyTypeBoolean     PropertyType = "BOOLEAN"
+	PropertyTypeDatetime    PropertyType = "DATETIME"
+	PropertyTypeEmbedded    PropertyType = "EMBEDDED"
+	PropertyTypeList        PropertyType = "LIST"
+	PropertyTypeListOfFloat PropertyType = "LIST OF FLOAT"
 )
 
 // IndexDef defines an index on a type.
