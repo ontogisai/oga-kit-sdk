@@ -1,0 +1,24 @@
+# Stub: calls reusable workflow in oga-platform-shared-tools
+# To update behavior, bump the @version pin below.
+name: Plane Sync
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  sync:
+    if: github.event.pull_request.merged == true
+    uses: ontogisai/oga-platform-shared-tools/.github/workflows/plane-sync.yml@v1.1.0
+    with:
+      project_identifier: OGA
+    secrets:
+      PLANE_API_KEY:        ${{ secrets.PLANE_API_KEY }}
+      PLANE_WORKSPACE_SLUG: ${{ secrets.PLANE_WORKSPACE_SLUG }}
+      PLANE_PROJECT_ID:     ${{ secrets.PLANE_PROJECT_ID }}
+      PLANE_DONE_STATE_ID:  ${{ secrets.PLANE_DONE_STATE_ID }}
