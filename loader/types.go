@@ -2,6 +2,60 @@ package loader
 
 import "time"
 
+// LoaderKind identifies what type of loader this sidecar is. The platform
+// uses this to wire the loader into the correct lifecycle stage:
+//
+//   - KindOntology — runs at kit install time. The platform invokes the
+//     loader's POST /load with a customer-supplied ontology source (e.g.,
+//     a Brick RDF file, an Excel mapping sheet) and the loader translates
+//     it into the platform's ontology types via the gateway. Without this
+//     step the customer's data has no schema to attach to.
+//
+//   - KindData — runs at oga-admin import time. By then the active
+//     ontology already exists; the loader parses source data into vertices
+//     and edges and persists them through the gateway.
+//
+// Both flavors implement the same HTTP contract (this package). The kit
+// manifest distinguishes them via the `kind:` field on each loader spec.
+// The platform's data-import workflow filters by KindData so it can never
+// accidentally re-trigger an ontology loader during data ingest.
+//
+// When the field is missing from a kit manifest the platform defaults to
+// KindData (this is the common case for older kits authored before the
+// distinction was made explicit).
+type LoaderKind string
+
+const (
+	// KindOntology declares a loader that produces ontology type
+	// definitions (entity types, relationship types). Invoked at kit
+	// install time.
+	KindOntology LoaderKind = "ontology"
+
+	// KindData declares a loader that produces vertices and edges. Invoked
+	// when an operator runs oga-admin import.
+	KindData LoaderKind = "data"
+)
+
+// IsValid reports whether k is one of the recognized kinds.
+func (k LoaderKind) IsValid() bool {
+	switch k {
+	case KindOntology, KindData:
+		return true
+	default:
+		return false
+	}
+}
+
+// OrDefault returns k if non-empty, otherwise KindData. Use this when
+// reading a kit manifest where the field is optional for backward
+// compatibility with kits authored before the kind distinction existed.
+func (k LoaderKind) OrDefault() LoaderKind {
+	if k == "" {
+		return KindData
+	}
+	return k
+}
+
 // JobStatus describes the lifecycle state of a load job. The same values are
 // returned both inline from POST /load (synchronous loaders) and from
 // GET /jobs/{id} (asynchronous loaders).

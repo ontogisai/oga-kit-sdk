@@ -127,8 +127,25 @@ func TestAgentToolCall(t *testing.T) {
 
 ### 4. Build a loader sidecar
 
-Loader sidecars run inside a kit's tar.gz bundle. The platform's
-`DataImportWorkflow` calls them over HTTP using the contract in `loader/`.
+Loader sidecars run inside a kit's tar.gz bundle. The platform calls them
+over HTTP using the contract in `loader/`. The platform recognises **two
+kinds** of loaders, distinguished by the `kind:` field on the loader spec
+in your kit's `manifest.yaml`:
+
+| Kind | When invoked | Produces |
+|------|-------------|----------|
+| `ontology` | At kit install time, by the `domain-kit-installer` Temporal worker | Entity / relationship type definitions persisted via the gateway's `OntologyService` |
+| `data` | At `oga-admin import` time, by the `DataImportWorkflow` | Vertices and edges persisted via the gateway's ingest tools (against the active ontology) |
+
+The HTTP contract is identical for both kinds — the same `LoaderHandler`
+interface, the same `POST /load` and `GET /jobs/{id}` endpoints. The kind
+only changes **when** the platform calls the loader and **what kind of
+work** the kit author is expected to do inside the handler. Use the
+constants `loader.KindOntology` and `loader.KindData` when you need to
+reason about kind in code.
+
+When the field is missing from a kit manifest, the platform defaults to
+`data`. Always set it explicitly on new kits.
 
 ```go
 package main
@@ -139,32 +156,39 @@ import (
     "github.com/ontogisai/oga-kit-sdk/loader"
 )
 
-type myLoader struct{}
+type myDataLoader struct{}
 
-func (l *myLoader) Load(ctx context.Context, req *loader.LoadRequest) (*loader.LoadResponse, error) {
-    // Parse req.SourceURI, produce vertices/edges, return stats.
+func (l *myDataLoader) Load(ctx context.Context, req *loader.LoadRequest) (*loader.LoadResponse, error) {
+    // Data loader: parse req.SourceURI, write vertices/edges via the gateway,
+    // return stats. The active ontology already exists at this point.
     return &loader.LoadResponse{
         Status: loader.StatusCompleted,
         Stats:  &loader.LoadStats{VerticesCreated: 1234, EdgesCreated: 5678},
     }, nil
 }
 
-func (l *myLoader) Job(ctx context.Context, jobID string) (*loader.LoadResponse, error) {
+func (l *myDataLoader) Job(ctx context.Context, jobID string) (*loader.LoadResponse, error) {
     return nil, &loader.ErrJobNotFound{JobID: jobID}
 }
 
-func (l *myLoader) Formats(ctx context.Context) ([]string, error) {
+func (l *myDataLoader) Formats(ctx context.Context) ([]string, error) {
     return []string{"my-format-v1"}, nil
 }
 
-func (l *myLoader) Health(ctx context.Context) (*loader.HealthResponse, error) {
+func (l *myDataLoader) Health(ctx context.Context) (*loader.HealthResponse, error) {
     return &loader.HealthResponse{Status: "ok"}, nil
 }
 
 func main() {
-    _ = loader.ListenAndServe(context.Background(), &loader.ServerConfig{Port: "8400"}, &myLoader{})
+    _ = loader.ListenAndServe(context.Background(), &loader.ServerConfig{Port: "8400"}, &myDataLoader{})
 }
 ```
+
+An ontology loader follows the exact same shape — its `Load` method
+parses the customer's ontology source (RDF, Excel, custom JSON) and
+writes type definitions through the gateway instead of vertices/edges.
+The corresponding manifest entry sets `kind: ontology` and points
+`data_path` at the customer-supplied ontology file inside the bundle.
 
 ## Package Structure
 
