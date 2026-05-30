@@ -125,13 +125,55 @@ func TestAgentToolCall(t *testing.T) {
 }
 ```
 
+### 4. Build a loader sidecar
+
+Loader sidecars run inside a kit's tar.gz bundle. The platform's
+`DataImportWorkflow` calls them over HTTP using the contract in `loader/`.
+
+```go
+package main
+
+import (
+    "context"
+
+    "github.com/ontogisai/oga-kit-sdk/loader"
+)
+
+type myLoader struct{}
+
+func (l *myLoader) Load(ctx context.Context, req *loader.LoadRequest) (*loader.LoadResponse, error) {
+    // Parse req.SourceURI, produce vertices/edges, return stats.
+    return &loader.LoadResponse{
+        Status: loader.StatusCompleted,
+        Stats:  &loader.LoadStats{VerticesCreated: 1234, EdgesCreated: 5678},
+    }, nil
+}
+
+func (l *myLoader) Job(ctx context.Context, jobID string) (*loader.LoadResponse, error) {
+    return nil, &loader.ErrJobNotFound{JobID: jobID}
+}
+
+func (l *myLoader) Formats(ctx context.Context) ([]string, error) {
+    return []string{"my-format-v1"}, nil
+}
+
+func (l *myLoader) Health(ctx context.Context) (*loader.HealthResponse, error) {
+    return &loader.HealthResponse{Status: "ok"}, nil
+}
+
+func main() {
+    _ = loader.ListenAndServe(context.Background(), &loader.ServerConfig{Port: "8400"}, &myLoader{})
+}
+```
+
 ## Package Structure
 
 | Package | Purpose |
 |---------|---------|
 | `schema/` | `SchemaManager` interface, `VertexTypeDef`, `EdgeTypeDef`, `PropertyType`, `IndexDef` |
 | `ontology/` | `OntologyRegistrar` interface, `EntityTypeDef`, `TypeHierarchyEntry` |
-| `ingest/` | `DataLoader` interface, `Vertex`, `Edge`, `LoadResult` |
+| `ingest/` | `DataLoader` in-process interface, `Vertex`, `Edge`, `LoadResult` |
+| `loader/` | HTTP loader-sidecar contract: `LoaderHandler`, `Client`, `ListenAndServe`, types for `/load`, `/jobs/{id}`, `/formats`, `/healthz` |
 | `manifest/` | `KitManifest` types, `Parse`, `Validate` |
 | `agent/` | `AgentRuntime` interface, `DefaultRuntime`, `ListenAndServe` |
 | `gateway/` | `PlatformGatewayClient` (MCP, LLM, workflows, inter-agent, registry) |
@@ -139,6 +181,7 @@ func TestAgentToolCall(t *testing.T) {
 | `testing/mcpmock` | Mock MCP server |
 | `testing/schemamock` | Mock `SchemaManager` |
 | `testing/ontologymock` | Mock `OntologyRegistrar` |
+| `testing/loadermock` | Programmable mock loader sidecar |
 
 ## Design Principles
 
