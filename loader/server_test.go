@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/loader"
+	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
 
 // stubHandler is a minimal LoaderHandler used to drive server tests.
@@ -23,10 +24,10 @@ type stubHandler struct {
 	loadCalls atomic.Int64
 }
 
-func (s *stubHandler) Load(ctx context.Context, req *loader.LoadRequest) (*loader.LoadResponse, error) {
+func (s *stubHandler) Load(ctx context.Context, lc *loader.LoadContext) (*loader.LoadResponse, error) {
 	s.loadCalls.Add(1)
 	if s.loadFn != nil {
-		return s.loadFn(ctx, req)
+		return s.loadFn(ctx, lc.Request)
 	}
 	return &loader.LoadResponse{
 		Status:      loader.StatusCompleted,
@@ -56,7 +57,13 @@ func (s *stubHandler) Health(ctx context.Context) (*loader.HealthResponse, error
 
 func newTestClient(t *testing.T, h loader.LoaderHandler) (*loader.Client, *httptest.Server) {
 	t.Helper()
-	srv := httptest.NewServer(loader.Handler(h))
+	// Default tests get a no-op writer factory so the handler can run
+	// without standing up a real platform commit client. Tests that
+	// want to exercise transfer behavior use newTestClientWithWriter.
+	factory := func(_ context.Context, _ transfer.LoadKind, _ *loader.LoadRequest) (transfer.Writer, error) {
+		return transfer.NewNopWriter(""), nil
+	}
+	srv := httptest.NewServer(loader.Handler(h, loader.WithWriterFactory(factory)))
 	t.Cleanup(srv.Close)
 	c, err := loader.NewClient(srv.URL)
 	if err != nil {
@@ -101,11 +108,20 @@ func TestLoad_Async_Returns202(t *testing.T) {
 	}
 	// Test the raw HTTP response directly to verify the 202 status code,
 	// since the client treats both 200 and 202 as success.
-	srv := httptest.NewServer(loader.Handler(stub))
+	factory := func(_ context.Context, _ transfer.LoadKind, _ *loader.LoadRequest) (transfer.Writer, error) {
+		return transfer.NewNopWriter(""), nil
+	}
+	srv := httptest.NewServer(loader.Handler(stub, loader.WithWriterFactory(factory)))
 	t.Cleanup(srv.Close)
 
-	resp, err := http.Post(srv.URL+"/load", "application/json",
-		strings.NewReader(`{"tenant_id":"t","source_uri":"file:///x"}`))
+	httpReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		srv.URL+"/load", strings.NewReader(`{"tenant_id":"t","source_uri":"file:///x"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Tenant-ID", "t")
+	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		t.Fatalf("POST /load: %v", err)
 	}
@@ -120,8 +136,13 @@ func TestLoad_Async_Returns202(t *testing.T) {
 	if body.Status != loader.StatusRunning {
 		t.Errorf("status = %q, want running", body.Status)
 	}
-	if body.JobID != "job-123" {
-		t.Errorf("job_id = %q, want job-123", body.JobID)
+	// Note: with the new contract the kit's job_id is overwritten by
+	// the platform-issued transfer job_id when the transfer.Writer
+	// closes. The stub's "job-123" lives on but the wire response
+	// returns the writer's job_id. Either is acceptable proof the
+	// async path works; we only assert the response was non-empty.
+	if body.JobID == "" {
+		t.Errorf("job_id was empty, expected platform-issued id")
 	}
 }
 
@@ -148,9 +169,13 @@ func TestLoad_MissingTenantID_Returns400(t *testing.T) {
 func TestLoad_MissingTenantID_ServerSide_Returns400(t *testing.T) {
 	t.Parallel()
 	stub := &stubHandler{}
-	srv := httptest.NewServer(loader.Handler(stub))
+	factory := func(_ context.Context, _ transfer.LoadKind, _ *loader.LoadRequest) (transfer.Writer, error) {
+		return transfer.NewNopWriter(""), nil
+	}
+	srv := httptest.NewServer(loader.Handler(stub, loader.WithWriterFactory(factory)))
 	t.Cleanup(srv.Close)
 
+	// No X-Tenant-ID header — server rejects with missing_tenant_header.
 	resp, err := http.Post(srv.URL+"/load", "application/json",
 		strings.NewReader(`{"source_uri":"file:///x"}`))
 	if err != nil {
@@ -164,8 +189,43 @@ func TestLoad_MissingTenantID_ServerSide_Returns400(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if er.Code != "missing_tenant_id" {
-		t.Errorf("code = %q, want missing_tenant_id", er.Code)
+	if er.Code != "missing_tenant_header" {
+		t.Errorf("code = %q, want missing_tenant_header", er.Code)
+	}
+}
+
+func TestLoad_TenantMismatch_Returns400(t *testing.T) {
+	t.Parallel()
+	stub := &stubHandler{}
+	factory := func(_ context.Context, _ transfer.LoadKind, _ *loader.LoadRequest) (transfer.Writer, error) {
+		return transfer.NewNopWriter(""), nil
+	}
+	srv := httptest.NewServer(loader.Handler(stub, loader.WithWriterFactory(factory)))
+	t.Cleanup(srv.Close)
+
+	// Header says tenant-A, body claims tenant-B → reject.
+	httpReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		srv.URL+"/load",
+		strings.NewReader(`{"tenant_id":"tenant-B","source_uri":"file:///x"}`))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Tenant-ID", "tenant-A")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	var er loader.ErrorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if er.Code != "tenant_mismatch" {
+		t.Errorf("code = %q, want tenant_mismatch", er.Code)
+	}
+	if stub.loadCalls.Load() != 0 {
+		t.Errorf("load called %d times, want 0", stub.loadCalls.Load())
 	}
 }
 
@@ -291,11 +351,18 @@ func TestHealth_Unhealthy_Returns503(t *testing.T) {
 func TestLoad_InvalidJSON_Returns400(t *testing.T) {
 	t.Parallel()
 	stub := &stubHandler{}
-	srv := httptest.NewServer(loader.Handler(stub))
+	factory := func(_ context.Context, _ transfer.LoadKind, _ *loader.LoadRequest) (transfer.Writer, error) {
+		return transfer.NewNopWriter(""), nil
+	}
+	srv := httptest.NewServer(loader.Handler(stub, loader.WithWriterFactory(factory)))
 	t.Cleanup(srv.Close)
 
-	resp, err := http.Post(srv.URL+"/load", "application/json",
-		strings.NewReader(`{not json}`))
+	// Use real header so we hit the JSON decode path, not tenant rejection.
+	httpReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		srv.URL+"/load", strings.NewReader(`{not json}`))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Tenant-ID", "tenant-1")
+	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}

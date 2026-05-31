@@ -103,6 +103,10 @@ func (c *Client) Load(ctx context.Context, req *LoadRequest) (*LoadResponse, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
+	// Tenant boundary: the loader server treats X-Tenant-ID as
+	// authoritative. Mirror the request's TenantID into the header
+	// so server-side validation passes.
+	httpReq.Header.Set("X-Tenant-ID", req.TenantID)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
