@@ -1,6 +1,10 @@
 package loader
 
-import "time"
+import (
+	"time"
+
+	"github.com/ontogisai/oga-kit-sdk/transfer"
+)
 
 // LoaderKind identifies what type of loader this sidecar is. The platform
 // uses this to wire the loader into the correct lifecycle stage:
@@ -222,4 +226,58 @@ type ErrorResponse struct {
 
 	// Details optionally carries structured context.
 	Details map[string]any `json:"details,omitempty"`
+}
+
+// LoadContext is what kit handlers receive on every Load / Pass call.
+// It bundles the request together with a streaming [transfer.Writer]
+// so the kit can emit records (vertices, edges, entity types) without
+// constructing platform clients itself.
+//
+// LoadContext is not safe for concurrent use across goroutines. Kits
+// that fan out parsing should funnel record emission back through a
+// single goroutine.
+type LoadContext struct {
+	// Request is the original LoadRequest the platform sent to this
+	// loader. The TenantID field on Request is populated from the
+	// X-Tenant-ID gateway header (authoritative); any tenant claim
+	// in the original JSON body is overwritten by the SDK server
+	// before the handler runs.
+	Request *LoadRequest
+
+	// Transfer is the streaming writer the kit emits records through.
+	// Always non-nil when the SDK serves the request through
+	// [ListenAndServe]. Tests using [Handler] directly may pass nil
+	// when they're not exercising the write path.
+	Transfer transfer.Writer
+}
+
+// LoadPlan describes the passes a [StreamingLoaderHandler] will run
+// for a single load. Returned from Plan and consumed by the SDK's
+// driver loop, which calls Pass once per entry.
+//
+// Order matters — passes execute in slice order. Most loaders that
+// need multi-pass use exactly two: pass 1 emits vertices and builds
+// any source-id → platform-id resolution map; pass 2 emits edges
+// using the resolved IDs.
+type LoadPlan struct {
+	Passes []PassSpec
+}
+
+// PassSpec names one pass and declares which entry kinds it produces.
+// The EntryKinds slice is informational — used by the SDK for logging
+// and by the platform's status tool to render progress — but the
+// loader handler is free to emit any record type during any pass.
+// Most loaders stick to the declared kinds for clarity.
+type PassSpec struct {
+	// Name identifies the pass for logs and progress reporting.
+	// Conventional names: "vertices", "edges", "entity_types",
+	// "hierarchy". Kits may use domain-specific names.
+	Name string
+
+	// EntryKinds lists the record types this pass writes.
+	EntryKinds []string
+
+	// Description is an operator-facing one-liner shown in
+	// oga-admin import status output.
+	Description string
 }

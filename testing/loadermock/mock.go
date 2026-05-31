@@ -124,13 +124,13 @@ func (m *Server) JobCallCount() int {
 // --- LoaderHandler ---
 
 // Load implements loader.LoaderHandler.
-func (m *Server) Load(_ context.Context, req *loader.LoadRequest) (*loader.LoadResponse, error) {
+func (m *Server) Load(_ context.Context, lc *loader.LoadContext) (*loader.LoadResponse, error) {
 	m.mu.Lock()
-	m.loadReqs = append(m.loadReqs, req)
+	m.loadReqs = append(m.loadReqs, lc.Request)
 	fn := m.loadFn
 	m.mu.Unlock()
 	if fn != nil {
-		return fn(req)
+		return fn(lc.Request)
 	}
 	return &loader.LoadResponse{Status: loader.StatusCompleted}, nil
 }

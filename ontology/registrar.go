@@ -1,102 +1,125 @@
 package ontology
 
-import "context"
+import (
+	"context"
+	"errors"
 
-// OntologyRegistrar provides type registration that hides the complexity of
-// versioning, activation, and embedding generation. Kit developers call
-// RegisterTypes once during installation; the platform handles the rest.
-type OntologyRegistrar interface {
-	// RegisterTypes registers entity and relationship types in the platform's
-	// ontology layer. The platform will:
-	//   1. Create or update the ontology version
-	//   2. Activate the version (generating embeddings for semantic search)
-	//   3. Publish events to refresh the schema cache
-	//
-	// This operation is idempotent — re-registering the same types is safe.
-	RegisterTypes(ctx context.Context, req RegisterTypesRequest) error
+	"github.com/ontogisai/oga-kit-sdk/transfer"
+)
 
-	// GetRegisteredTypes returns all types previously registered by a kit.
-	GetRegisteredTypes(ctx context.Context, kitID string) ([]RegisteredType, error)
+// Registrar is a small convenience layer over transfer.Writer for
+// kit authors who think in "register a batch of types" terms rather
+// than "stream entries to a writer." The registrar collapses the
+// per-type WriteEntityType + WriteHierarchy calls into a single
+// RegisterTypes invocation so the kit code stays declarative.
+//
+// Internally the registrar uses transfer.Writer; kit authors can mix
+// freely with direct lc.Transfer.* calls when they need finer control
+// (interleaved writes, custom record ordering, etc.).
+type Registrar struct {
+	writer transfer.Writer
 }
 
-// RegisterTypesRequest contains the types to register in the ontology.
+// NewRegistrar wraps a transfer.Writer with the convenience surface.
+// The supplied writer is consumed by the registrar but NOT closed —
+// the SDK's loader server closes the writer for the kit at the end
+// of the request, so RegisterTypes leaves the writer open for any
+// follow-up entries the kit may want to emit.
+func NewRegistrar(writer transfer.Writer) *Registrar {
+	return &Registrar{writer: writer}
+}
+
+// RegisterTypes streams every entity-type definition and hierarchy
+// entry in req through the underlying writer. The platform-side
+// dispatch (atomic DDL + EntityTypeDef + activation) happens when
+// the writer is later closed.
+//
+// Idempotency: the platform key is (tenant, kit_id, content_hash).
+// Calling RegisterTypes with the same input on the same kit produces
+// the same content_hash and is a no-op on the server.
+func (r *Registrar) RegisterTypes(ctx context.Context, req RegisterTypesRequest) error {
+	if r == nil || r.writer == nil {
+		return errors.New("ontology.Registrar: nil writer")
+	}
+	if len(req.EntityTypes) == 0 {
+		return errors.New("ontology.RegisterTypes: at least one entity type is required")
+	}
+	for i := range req.EntityTypes {
+		t := req.EntityTypes[i]
+		if err := r.writer.WriteEntityType(ctx, transfer.EntityTypeDef{
+			Name:        t.Name,
+			DisplayName: t.DisplayName,
+			Description: t.Description,
+			ParentType:  t.ParentType,
+			Category:    t.Category,
+			Properties:  toTransferProperties(t.Properties),
+		}); err != nil {
+			return err
+		}
+	}
+	for i := range req.TypeHierarchy {
+		h := req.TypeHierarchy[i]
+		if err := r.writer.WriteHierarchy(ctx, transfer.HierarchyEntry{
+			TypeName:   h.TypeName,
+			ParentType: h.ParentType,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RegisterTypesRequest is the input to [Registrar.RegisterTypes].
 type RegisterTypesRequest struct {
-	// KitID identifies the kit that owns these types.
-	KitID string
-
-	// TenantID is the tenant for which types are being registered.
-	TenantID string
-
-	// EntityTypes are the entity type definitions to register.
+	// EntityTypes is the type catalog this call registers. Required.
 	EntityTypes []EntityTypeDef
 
-	// TypeHierarchy defines parent-child relationships between types.
+	// TypeHierarchy declares parent-child relationships among
+	// EntityTypes. Optional — hierarchy can also be encoded on
+	// EntityTypeDef.ParentType, but providing the explicit
+	// hierarchy lets the platform validate the graph for cycles
+	// and missing parents before activating.
 	TypeHierarchy []TypeHierarchyEntry
 }
 
-// EntityTypeDef defines an entity type for the semantic ontology layer.
-// This is the logical definition used for type discovery and semantic search,
-// distinct from the physical DDL schema (which is handled by SchemaManager).
+// EntityTypeDef is the kit-author-facing entity type definition.
+// Mirrors transfer.EntityTypeDef but lives in the ontology package
+// so kit code reads as "this is an entity type, not a wire record."
 type EntityTypeDef struct {
-	// Name is the stable identifier for this type (e.g., "brick_Equipment").
-	// Must match the DDL type name (without tenant prefix).
-	Name string
-
-	// DisplayName is the human-readable name, keyed by locale.
-	// Example: {"en": "Equipment (Brick)", "vi": "Thiết Bị (Brick)"}
+	Name        string
 	DisplayName map[string]string
-
-	// Description is a detailed description, keyed by locale.
-	// The en-US description is used for embedding generation.
 	Description map[string]string
-
-	// ParentType is the name of the parent type in the hierarchy.
-	// Empty string means this is a root type.
-	ParentType string
-
-	// Properties lists the domain-specific properties of this type.
-	// Used to build the embedding text: "{Name}: {Description} (properties: ...)"
-	Properties []TypeProperty
-
-	// Category classifies this type (e.g., "equipment", "location", "custom").
-	Category string
+	ParentType  string
+	Category    string
+	Properties  []TypeProperty
 }
 
-// TypeProperty describes a property for ontology registration purposes.
+// TypeProperty mirrors transfer.TypeProperty.
 type TypeProperty struct {
-	// Name is the property identifier (snake_case).
-	Name string
-
-	// Description is a human-readable description, keyed by locale.
+	Name        string
 	Description map[string]string
-
-	// Type is the data type (string, integer, float, boolean, datetime).
-	Type string
-
-	// Required indicates whether this property is mandatory.
-	Required bool
+	Type        string
+	Required    bool
 }
 
-// TypeHierarchyEntry defines a parent-child relationship between types.
+// TypeHierarchyEntry mirrors transfer.HierarchyEntry.
 type TypeHierarchyEntry struct {
-	// TypeName is the child type.
-	TypeName string
-
-	// ParentType is the parent type.
+	TypeName   string
 	ParentType string
 }
 
-// RegisteredType represents a type that has been registered in the ontology.
-type RegisteredType struct {
-	// Name is the type identifier.
-	Name string
-
-	// KitID is the kit that registered this type.
-	KitID string
-
-	// IsActive indicates whether this type is currently active.
-	IsActive bool
-
-	// HasEmbedding indicates whether an embedding has been generated.
-	HasEmbedding bool
+func toTransferProperties(props []TypeProperty) []transfer.TypeProperty {
+	if len(props) == 0 {
+		return nil
+	}
+	out := make([]transfer.TypeProperty, len(props))
+	for i, p := range props {
+		out[i] = transfer.TypeProperty{
+			Name:        p.Name,
+			Description: p.Description,
+			Type:        p.Type,
+			Required:    p.Required,
+		}
+	}
+	return out
 }
