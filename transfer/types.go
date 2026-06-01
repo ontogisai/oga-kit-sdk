@@ -9,7 +9,15 @@ const (
 	// InlineBodyLimit is the maximum encoded payload size that may be
 	// committed inline through loader.complete. Above this size, the
 	// writer switches to a presigned-URL upload path.
-	InlineBodyLimit = 1 << 20 // 1 MiB
+	//
+	// Set to 10 MiB to accommodate real production datasets without
+	// requiring presigned uploads (which are not wired in the v1
+	// release). The SJ campus dataset produces ~3-5 MiB of NDJSON
+	// for 876 vertices + 965 edges with full property bags.
+	//
+	// The platform's MaxInlineBodySize must be >= this value; both
+	// are bumped together in a coordinated SDK + platform release.
+	InlineBodyLimit = 10 << 20 // 10 MiB
 
 	// MultiPassThreshold is the source-file size above which kit
 	// authors should adopt the multi-pass loader.StreamingLoaderHandler
