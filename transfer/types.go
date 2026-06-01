@@ -10,12 +10,15 @@ const (
 	// committed inline through loader.complete. Above this size, the
 	// writer switches to a presigned-URL upload path.
 	//
-	// 1 MiB is the threshold: small artifacts (ontology type defs,
-	// small campus files) go inline for simplicity; larger artifacts
-	// (SJ campus data, IFC imports) use the presigned upload path
-	// which streams directly to object storage without buffering in
-	// the gateway or MCP server.
-	InlineBodyLimit = 1 << 20 // 1 MiB
+	// 700 KiB is the threshold. The MCP server's request body limit is
+	// 1 MiB and the JSON-RPC inline_body field is base64-encoded
+	// (~1.333× expansion), so a raw NDJSON body up to 700 KiB stays
+	// safely under the wire limit (~933 KiB encoded plus envelope).
+	// Larger artifacts (SJ campus data, IFC imports, ontologies with
+	// many type defs) use the presigned upload path which streams
+	// directly to object storage without buffering in the gateway or
+	// MCP server.
+	InlineBodyLimit = 700 << 10 // 700 KiB
 
 	// MultiPassThreshold is the source-file size above which kit
 	// authors should adopt the multi-pass loader.StreamingLoaderHandler

@@ -27,7 +27,7 @@
 //
 // Most kits stream every entry in a single pass: parse the source,
 // call WriteVertex / WriteEdge / WriteEntityType, then Close. The
-// writer buffers in memory up to [InlineBodyLimit] (1 MiB) and switches
+// writer buffers in memory up to [InlineBodyLimit] (700 KiB) and switches
 // to a presigned-upload streaming path when the buffer fills.
 //
 // Kits whose source format requires more than one pass over the input
