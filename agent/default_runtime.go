@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/google/uuid"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
@@ -74,6 +73,7 @@ type DefaultRuntime struct {
 	profile *DomainAgentProfile
 	deps    *RuntimeDeps
 	card    *AgentCard
+	planner PlannerConfig
 
 	mu    sync.RWMutex
 	ready bool
@@ -81,6 +81,11 @@ type DefaultRuntime struct {
 
 // NewDefaultRuntime creates a new DefaultRuntime with the given profile and deps.
 func NewDefaultRuntime(profile *DomainAgentProfile, deps *RuntimeDeps) *DefaultRuntime {
+	return NewDefaultRuntimeWithPlanner(profile, deps, DefaultPlannerConfig())
+}
+
+// NewDefaultRuntimeWithPlanner creates a runtime with a custom planner config.
+func NewDefaultRuntimeWithPlanner(profile *DomainAgentProfile, deps *RuntimeDeps, planner PlannerConfig) *DefaultRuntime {
 	skills := make([]Skill, 0, len(profile.Skills))
 	for _, s := range profile.Skills {
 		skills = append(skills, Skill(s))
@@ -111,6 +116,7 @@ func NewDefaultRuntime(profile *DomainAgentProfile, deps *RuntimeDeps) *DefaultR
 		profile: profile,
 		deps:    deps,
 		card:    card,
+		planner: planner,
 		ready:   true,
 	}
 
@@ -204,27 +210,26 @@ func (rt *DefaultRuntime) Readyz(_ context.Context) error {
 	return nil
 }
 
-// reason performs LLM reasoning via the Platform Gateway.
+// reason performs LLM reasoning via the Platform Gateway, with MCP tool
+// calling when the profile declares tools the LLM can use.
 func (rt *DefaultRuntime) reason(ctx context.Context, userText string) (string, error) {
-	systemPrompt := "You are a helpful domain agent."
-	if rt.profile.ProactiveReasoning != nil && rt.profile.ProactiveReasoning.SystemPrompt != "" {
-		systemPrompt = rt.profile.ProactiveReasoning.SystemPrompt
-	}
-
-	resp, err := rt.deps.Gateway.ChatCompletion(ctx, &gateway.ChatCompletionRequest{
-		Messages: []gateway.ChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userText},
-		},
-		RequestID: uuid.New().String(),
-	})
+	answer, results, err := PlanAndExecute(ctx, rt.deps.Gateway, rt.profile, userText, rt.planner)
 	if err != nil {
 		return "", err
 	}
-
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("no choices in LLM response")
+	if len(results) > 0 {
+		successful := 0
+		for _, r := range results {
+			if r.Success {
+				successful++
+			}
+		}
+		slog.Info("agent: plan executed",
+			"agent_id", rt.profile.AgentID,
+			"tenant_id", rt.deps.TenantID,
+			"steps_total", len(results),
+			"steps_succeeded", successful,
+		)
 	}
-
-	return resp.Choices[0].Message.Content, nil
+	return answer, nil
 }
