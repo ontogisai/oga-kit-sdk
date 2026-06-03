@@ -1,12 +1,104 @@
 name: Release
 
+# Publishes the oga-kit-sdk Go module when a PR is merged to main that
+# bumps the version in the VERSION file.
+#
+# A merged PR is a `push` to main. This workflow runs on every such
+# push but is *version-gated*: it reads the version from the VERSION
+# file at the repo root and only cuts a release when a GitHub Release
+# for the matching `v{version}` tag does not already exist. So:
+#   - ordinary merges (no version change) → no-op
+#   - a merge that bumps VERSION           → tag + release
+#
+# To ship a new version: bump the value in `VERSION` in your PR.
+# When it merges, this workflow tags `v{version}` and creates the
+# GitHub Release. Prerelease versions (containing a/b/rc/dev/alpha/beta,
+# e.g. 0.5.1-beta) are marked as GitHub pre-releases automatically.
+#
+# Mirrors the shape of oga-kit-sdk-python's release.yml so both SDKs
+# follow the same release ritual.
+
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+
+# Avoid two releases racing if pushes land close together.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
-  release:
+  # ---------------------------------------------------------------------
+  # Decide whether this push should produce a release.
+  # ---------------------------------------------------------------------
+  check:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from VERSION file
+        id: version
+        run: |
+          if [ ! -f VERSION ]; then
+            echo "::error::VERSION file is missing at the repo root"
+            exit 1
+          fi
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          if [ -z "$VERSION" ]; then
+            echo "::error::VERSION file is empty"
+            exit 1
+          fi
+          # Sanity-check the format: strict semver — no leading 'v', the
+          # prerelease (when present) is separated by '-' per Go module
+          # versioning rules. Go's `go mod verify` rejects non-semver
+          # tags, so this gate matches what the toolchain enforces.
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::VERSION '${VERSION}' is not a valid Go module semver"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          # Mark a/b/rc/dev versions as GitHub pre-releases.
+          if echo "$VERSION" | grep -Eiq '(a|b|rc|dev|alpha|beta)'; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG} prerelease=${PRERELEASE}"
+
+      - name: Decide whether a release is needed
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Release only when no GitHub Release already exists for this tag.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — skipping."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release for $TAG yet — will release."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------
+  # Quality gate — never ship a broken main.
+  # ---------------------------------------------------------------------
+  verify:
+    name: Verify
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,13 +107,47 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Verify build
+      - name: Build
         run: go build ./...
 
-      - name: Run tests
+      - name: Test
         run: go test -race -count=1 ./...
 
       - name: Verify module
+        run: GOFLAGS=-mod=mod go mod verify
+
+  # ---------------------------------------------------------------------
+  # Tag + publish the GitHub Release.
+  #
+  # Go modules don't ship build artifacts — `go get` resolves directly
+  # against the git tag. So this job tags the commit and creates the
+  # Release object (with auto-generated notes) so the tag has a proper
+  # human-facing release page.
+  # ---------------------------------------------------------------------
+  release:
+    name: Tag + Release
+    needs: [check, verify]
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create tags + releases
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create tag + GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
         run: |
-          GOFLAGS=-mod=mod go mod verify
-          echo "Module published at tag: ${{ github.ref_name }}"
+          PRERELEASE_FLAG=""
+          if [ "$PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          # gh release create implicitly creates the tag at --target.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes \
+            $PRERELEASE_FLAG
