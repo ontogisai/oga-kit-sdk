@@ -75,14 +75,59 @@ type KitSpec struct {
 	// Translations lists paths to i18n translation bundle files.
 	Translations []string `yaml:"translations,omitempty"`
 
-	// RendererPrompts lists paths to LLM renderer prompt files.
-	RendererPrompts []string `yaml:"renderer_prompts,omitempty"`
+	// PromptFragments lists per-tenant LLM prompt fragments that augment
+	// platform built-in agents (Frontier, Knowledge). Each entry MUST specify
+	// both the target agent and the file path. The platform composes the
+	// agent's system prompt from a neutral base + these fragments + dynamic
+	// runtime context — see oga-platform spec
+	// platform-agent-prompt-composition for the full design.
+	PromptFragments []PromptFragmentEntry `yaml:"prompt_fragments,omitempty"`
 
 	// Extensibility defines namespace policies for extension kits.
 	Extensibility *Extensibility `yaml:"extensibility,omitempty"`
 
 	// Workflows lists workflow configurations.
 	Workflows []WorkflowConfig `yaml:"workflows,omitempty"`
+}
+
+// PromptFragmentEntry declares a prompt fragment file targeting a specific
+// platform built-in agent. Both fields are required.
+//
+// Recognized targets:
+//   - "frontier"  — augments the Frontier intent-classification + system prompt
+//   - "knowledge" — augments the Knowledge tool planner + assembly prompt
+//   - "analytics" — reserved for kit-supplied analytics agents (the platform
+//     ships no built-in for this target)
+type PromptFragmentEntry struct {
+	// Target identifies the built-in agent the fragment augments.
+	Target string `yaml:"target"`
+
+	// File is the path (relative to the kit root) of the fragment text file.
+	File string `yaml:"file"`
+}
+
+// PromptFragmentTarget enumerates the recognized values for
+// PromptFragmentEntry.Target.
+type PromptFragmentTarget = string
+
+// Recognized prompt fragment targets.
+const (
+	PromptFragmentTargetFrontier  PromptFragmentTarget = "frontier"
+	PromptFragmentTargetKnowledge PromptFragmentTarget = "knowledge"
+	PromptFragmentTargetAnalytics PromptFragmentTarget = "analytics"
+)
+
+// IsValidPromptFragmentTarget reports whether t is one of the recognized
+// prompt fragment target values.
+func IsValidPromptFragmentTarget(t string) bool {
+	switch t {
+	case PromptFragmentTargetFrontier,
+		PromptFragmentTargetKnowledge,
+		PromptFragmentTargetAnalytics:
+		return true
+	default:
+		return false
+	}
 }
 
 // Dependency declares a required kit dependency.
@@ -161,6 +206,21 @@ func Validate(m *KitManifest) error {
 	}
 	if m.Spec.PlatformVersion == "" {
 		return fmt.Errorf("spec.platform_version is required")
+	}
+	for i, e := range m.Spec.PromptFragments {
+		if e.Target == "" {
+			return fmt.Errorf("spec.prompt_fragments[%d]: target is required", i)
+		}
+		if !IsValidPromptFragmentTarget(e.Target) {
+			return fmt.Errorf(
+				"spec.prompt_fragments[%d]: target %q is not recognized "+
+					"(valid: frontier, knowledge, analytics)",
+				i, e.Target,
+			)
+		}
+		if e.File == "" {
+			return fmt.Errorf("spec.prompt_fragments[%d]: file is required", i)
+		}
 	}
 	return nil
 }
