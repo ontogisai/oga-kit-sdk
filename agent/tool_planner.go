@@ -45,12 +45,15 @@ type ToolPlan struct {
 
 // ToolStepResult is the result of executing one ToolStep.
 type ToolStepResult struct {
-	ToolName  string          `json:"tool_name"`
-	Success   bool            `json:"success"`
-	Content   string          `json:"content,omitempty"`
-	Result    json.RawMessage `json:"result,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	LatencyMS int64           `json:"latency_ms"`
+	ToolName      string          `json:"tool_name"`
+	Success       bool            `json:"success"`
+	Content       string          `json:"content,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	ErrorCode     string          `json:"error_code,omitempty"`
+	ErrorCategory string          `json:"error_category,omitempty"`
+	ErrorDetails  map[string]any  `json:"error_details,omitempty"`
+	LatencyMS     int64           `json:"latency_ms"`
 }
 
 // PlannerConfig configures the tool-calling loop.
@@ -276,7 +279,16 @@ func executeStep(ctx context.Context, gw gatewayClient, step ToolStep) ToolStepR
 	res.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		res.Success = false
-		res.Error = err.Error()
+		// Check for structured ToolError — preserve the structured fields
+		// so the assembler can provide actionable error messages.
+		if toolErr, ok := err.(*gateway.ToolError); ok {
+			res.Error = toolErr.Error()
+			res.ErrorCode = toolErr.Code
+			res.ErrorCategory = toolErr.Category
+			res.ErrorDetails = toolErr.Details
+		} else {
+			res.Error = err.Error()
+		}
 		return res
 	}
 	res.Success = true
@@ -299,7 +311,20 @@ func assembleAnswer(
 		if r.Success {
 			fmt.Fprintf(&resultCtx, "Tool %d: %s\nResult:\n%s\n\n", i+1, r.ToolName, r.Content)
 		} else {
-			fmt.Fprintf(&resultCtx, "Tool %d: %s\nError: %s\n\n", i+1, r.ToolName, r.Error)
+			fmt.Fprintf(&resultCtx, "Tool %d: %s\nError: %s\n", i+1, r.ToolName, r.Error)
+			// Include structured error context so the LLM can give actionable advice.
+			if r.ErrorCode != "" {
+				fmt.Fprintf(&resultCtx, "  Error Code: %s\n", r.ErrorCode)
+			}
+			if r.ErrorCategory != "" {
+				fmt.Fprintf(&resultCtx, "  Error Category: %s\n", r.ErrorCategory)
+			}
+			if len(r.ErrorDetails) > 0 {
+				for k, v := range r.ErrorDetails {
+					fmt.Fprintf(&resultCtx, "  %s: %v\n", k, v)
+				}
+			}
+			resultCtx.WriteString("\n")
 		}
 	}
 

@@ -39,6 +39,8 @@ func NewPlatformGatewayClient(baseURL, tokenPath, tenantID string) *PlatformGate
 }
 
 // CallTool invokes an MCP tool via the Platform Access Gateway.
+// Returns a ToolError (which implements error) when the tool returns a structured
+// error response, allowing callers to inspect the error code, category, and details.
 func (c *PlatformGatewayClient) CallTool(ctx context.Context, tool string, params any) (json.RawMessage, error) {
 	body := map[string]any{
 		"tool":   tool,
@@ -46,9 +48,83 @@ func (c *PlatformGatewayClient) CallTool(ctx context.Context, tool string, param
 	}
 	resp, err := c.post(ctx, "/mcp/tools/call", body)
 	if err != nil {
+		// Try to parse as a structured tool error from the gateway
+		if toolErr := ParseToolError(err); toolErr != nil {
+			toolErr.ToolName = tool
+			return nil, toolErr
+		}
 		return nil, fmt.Errorf("call tool %s: %w", tool, err)
 	}
 	return resp, nil
+}
+
+// ToolError represents a structured error returned by an MCP tool.
+// It provides programmatic access to the error code, category, and details
+// so callers can handle specific error types (e.g., distinguish "entity type
+// not in ontology" from "PBAC denied" from "internal error").
+type ToolError struct {
+	Code       string         `json:"code"`
+	Message    string         `json:"message"`
+	Category   string         `json:"category"`
+	Service    string         `json:"service"`
+	Details    map[string]any `json:"details,omitempty"`
+	DocURL     string         `json:"doc_url,omitempty"`
+	Retry      bool           `json:"retry"`
+	HTTPStatus int            `json:"http_status"`
+	ToolName   string         `json:"-"`
+}
+
+// Error implements the error interface.
+func (e *ToolError) Error() string {
+	if e.ToolName != "" {
+		return fmt.Sprintf("tool %s: [%s] %s", e.ToolName, e.Code, e.Message)
+	}
+	return fmt.Sprintf("[%s] %s", e.Code, e.Message)
+}
+
+// IsValidationError returns true if this is a schema/input validation error.
+func (e *ToolError) IsValidationError() bool {
+	return e.Category == "VAL"
+}
+
+// IsPermissionError returns true if this is a PBAC/access denial.
+func (e *ToolError) IsPermissionError() bool {
+	return e.Category == "DENY"
+}
+
+// IsNotFound returns true if the requested resource was not found.
+func (e *ToolError) IsNotFound() bool {
+	return e.Category == "NFND"
+}
+
+// ParseToolError attempts to extract a structured ToolError from a gateway
+// error response. Returns nil if the error is not a structured tool error.
+func ParseToolError(err error) *ToolError {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	// Gateway errors come as: "gateway error {status}: {json_body}"
+	idx := indexOf(msg, ": {")
+	if idx < 0 {
+		return nil
+	}
+	jsonPart := msg[idx+2:]
+	var toolErr ToolError
+	if json.Unmarshal([]byte(jsonPart), &toolErr) == nil && toolErr.Code != "" {
+		return &toolErr
+	}
+	return nil
+}
+
+// indexOf returns the index of substr in s, or -1.
+func indexOf(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
 }
 
 // ChatCompletionRequest is the request for LLM chat completion.
