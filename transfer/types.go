@@ -1,6 +1,13 @@
 package transfer
 
-import "time"
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"golang.org/x/text/language"
+)
 
 // Limits and identifiers for the on-disk transfer format. These are part
 // of the kit-platform contract — changing them requires a coordinated
@@ -155,12 +162,18 @@ type EntityTypeDef struct {
 	// adds the prefix during persistence.
 	Name string `json:"name"`
 
-	// DisplayName is the human-readable name keyed by locale.
-	// Example: {"en": "Equipment (Brick)", "vi": "Thiết Bị (Brick)"}.
+	// DisplayName is the human-readable name keyed by full BCP-47
+	// locale tag (e.g., "en-US", "vi-VN"). Short-form keys ("en",
+	// "vi") are rejected by ValidateLocaleKeys — kit authors must
+	// be explicit about the region so the platform's locale parser
+	// cannot silently disagree on the intended tag.
+	// Example: {"en-US": "Equipment (Brick)", "vi-VN": "Thiết Bị (Brick)"}.
 	DisplayName map[string]string `json:"display_name,omitempty"`
 
-	// Description is a detailed description keyed by locale. The en
-	// entry is used for embedding generation.
+	// Description is a detailed description keyed by full BCP-47
+	// locale tag — same convention as DisplayName. The en-US entry
+	// is the canonical input for embedding generation on the
+	// platform side.
 	Description map[string]string `json:"description,omitempty"`
 
 	// ParentType is the parent type's Name. Empty means this type is
@@ -179,7 +192,10 @@ type EntityTypeDef struct {
 
 // TypeProperty describes a property on an EntityTypeDef.
 type TypeProperty struct {
-	Name        string            `json:"name"`
+	Name string `json:"name"`
+	// Description is keyed by full BCP-47 locale tag (e.g. "en-US",
+	// "vi-VN"). Short-form keys ("en", "vi") are rejected by
+	// ValidateLocaleKeys.
 	Description map[string]string `json:"description,omitempty"`
 	Type        string            `json:"type,omitempty"`
 	Required    bool              `json:"required,omitempty"`
@@ -231,4 +247,53 @@ const (
 type Envelope struct {
 	Kind  EntryKind `json:"kind"`
 	Value any       `json:"value"`
+}
+
+// ValidateLocaleKeys reports whether every key in m is a valid full
+// BCP-47 language tag (e.g., "en-US", "vi-VN", "zh-CN"). Short-form
+// language-only tags ("en", "vi") are rejected — kit code that
+// constructs EntityTypeDef.DisplayName / .Description /
+// TypeProperty.Description maps must use the full form so the
+// platform's locale parser cannot silently disagree on which tag the
+// kit means. The fieldName argument prefixes any error returned so
+// the kit author can find the offending map quickly. Empty or nil
+// maps are always valid.
+//
+// This mirrors manifest.ValidateLocaleKeys and lives in the transfer
+// package as a convenience for ontology loaders that don't import
+// the manifest package.
+func ValidateLocaleKeys(fieldName string, m map[string]string) error {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if k == "" {
+			return fmt.Errorf(
+				"%s: locale key is empty (use full BCP-47 like \"en-US\", \"vi-VN\")",
+				fieldName,
+			)
+		}
+		if _, err := language.Parse(k); err != nil {
+			return fmt.Errorf(
+				"%s: locale key %q is not a valid BCP-47 tag: %w",
+				fieldName, k, err,
+			)
+		}
+		// See manifest.validateLocaleKeys for the rationale on why
+		// short-form tags are rejected even when the language parser
+		// would happily infer a likely region.
+		if !strings.Contains(k, "-") {
+			return fmt.Errorf(
+				"%s: locale key %q must be a full BCP-47 tag with a region "+
+					"(e.g., %q-US, %q-GB) — short-form language-only tags are rejected",
+				fieldName, k, k, k,
+			)
+		}
+	}
+	return nil
 }
