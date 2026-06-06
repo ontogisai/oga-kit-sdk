@@ -319,6 +319,45 @@ factory := func(_ context.Context, _ transfer.LoadKind, _ *loader.LoadRequest) (
 }
 ```
 
+## Locale keys (BCP-47, OGA-51)
+
+Every locale-keyed map a kit emits — `KitMetadata.DisplayName`,
+`KitMetadata.Description`, `EntityTypeDef.DisplayName`,
+`EntityTypeDef.Description`, `TypeProperty.Description` — MUST use full
+BCP-47 tags (`en-US`, `vi-VN`, `zh-CN`). Short-form language-only tags
+(`en`, `vi`, `zh`) are rejected at parse / validation time so the
+platform's locale matcher cannot silently disagree on the kit's
+intended locale.
+
+Manifest YAML:
+
+```yaml
+metadata:
+  display_name:
+    en-US: "My Kit"
+    vi-VN: "Bộ Khởi Động"
+  description:
+    en-US: "..."
+    vi-VN: "..."
+```
+
+Programmatic validation for kit-side type definitions:
+
+```go
+import "github.com/ontogisai/oga-kit-sdk/transfer"
+
+if err := transfer.ValidateLocaleKeys(
+    "entity_type.display_name",
+    typeDef.DisplayName,
+); err != nil {
+    return err // names the offending field + key
+}
+```
+
+The `manifest.Validate` function automatically calls the same helper
+on `KitMetadata.DisplayName` and `KitMetadata.Description` — kits that
+ship a malformed manifest get a clear error during install.
+
 ## Package Structure
 
 | Package | Purpose |

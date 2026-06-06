@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 
+	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,10 +27,15 @@ type KitMetadata struct {
 	// Version is the semantic version of this kit release.
 	Version string `yaml:"version"`
 
-	// DisplayName is the human-readable name, keyed by locale.
+	// DisplayName is the human-readable name, keyed by full BCP-47 locale
+	// tag (e.g., "en-US", "vi-VN"). Short-form keys ("en", "vi") are
+	// rejected by Validate so kit authors can never silently disagree
+	// with the platform's locale parsing. The convention is enforced
+	// in OGA-51.
 	DisplayName map[string]string `yaml:"display_name"`
 
-	// Description is a detailed description, keyed by locale.
+	// Description is a detailed description, keyed by full BCP-47 locale
+	// tag — same convention as DisplayName.
 	Description map[string]string `yaml:"description"`
 
 	// Authors lists the kit authors.
@@ -204,6 +212,12 @@ func Validate(m *KitManifest) error {
 	if m.Metadata.Version == "" {
 		return fmt.Errorf("metadata.version is required")
 	}
+	if err := validateLocaleKeys("metadata.display_name", m.Metadata.DisplayName); err != nil {
+		return err
+	}
+	if err := validateLocaleKeys("metadata.description", m.Metadata.Description); err != nil {
+		return err
+	}
 	if m.Spec.PlatformVersion == "" {
 		return fmt.Errorf("spec.platform_version is required")
 	}
@@ -220,6 +234,71 @@ func Validate(m *KitManifest) error {
 		}
 		if e.File == "" {
 			return fmt.Errorf("spec.prompt_fragments[%d]: file is required", i)
+		}
+	}
+	return nil
+}
+
+// ValidateLocaleKeys reports whether every key in m is a valid full
+// BCP-47 language tag (e.g., "en-US", "vi-VN", "zh-CN"). Short-form
+// language-only tags ("en", "vi") are rejected — kit manifests must
+// use the full form so the platform's locale parser cannot silently
+// disagree on which tag the kit means.
+//
+// The fieldName argument prefixes any error returned so the kit
+// author can find the offending map quickly. An empty or nil map is
+// always valid.
+//
+// This is the kit-facing entry point for validating any locale-keyed
+// map a kit author maintains (display names on entity types, property
+// descriptions, etc.). The transfer package re-exports the same
+// helper as transfer.ValidateLocaleKeys so kit code that does not
+// import manifest still has access.
+func ValidateLocaleKeys(fieldName string, m map[string]string) error {
+	return validateLocaleKeys(fieldName, m)
+}
+
+// validateLocaleKeys is the package-internal implementation behind
+// the public ValidateLocaleKeys. Iteration order is sorted so error
+// messages are stable across map random ordering.
+func validateLocaleKeys(fieldName string, m map[string]string) error {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if k == "" {
+			return fmt.Errorf(
+				"%s: locale key is empty (use full BCP-47 like \"en-US\", \"vi-VN\")",
+				fieldName,
+			)
+		}
+		if _, err := language.Parse(k); err != nil {
+			return fmt.Errorf(
+				"%s: locale key %q is not a valid BCP-47 tag: %w",
+				fieldName, k, err,
+			)
+		}
+		// Reject short-form language-only tags. golang.org/x/text/language
+		// will happily *infer* a likely region for "en" / "vi" with Low
+		// confidence — that's useful at runtime but unsafe for a
+		// declarative manifest. Kit authors must spell out the region
+		// (en-US vs en-GB; vi-VN vs zh-Hant-VN; etc.) so the kit's
+		// intent is unambiguous when the supported-locale list grows.
+		// Reject anything missing a "-" since every full BCP-47 tag has
+		// at least one subtag separator (language-region or
+		// language-script-region). Anything more nuanced is overkill —
+		// the platform also enforces the same constraint at lookup time.
+		if !strings.Contains(k, "-") {
+			return fmt.Errorf(
+				"%s: locale key %q must be a full BCP-47 tag with a region "+
+					"(e.g., %q-US, %q-GB) — short-form language-only tags are rejected",
+				fieldName, k, k, k,
+			)
 		}
 	}
 	return nil

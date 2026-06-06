@@ -13,10 +13,10 @@ metadata:
   name: built-environment
   version: "1.0.0"
   display_name:
-    en: "Built Environment"
-    vi: "Môi Trường Xây Dựng"
+    en-US: "Built Environment"
+    vi-VN: "Môi Trường Xây Dựng"
   description:
-    en: "Construction, FM, Smart Buildings"
+    en-US: "Construction, FM, Smart Buildings"
 spec:
   platform_version: ">=1.0.0"
   ontology_files:
@@ -44,6 +44,12 @@ spec:
 	if m.Metadata.Version != "1.0.0" {
 		t.Errorf("Metadata.Version = %q, want %q", m.Metadata.Version, "1.0.0")
 	}
+	if got := m.Metadata.DisplayName["en-US"]; got != "Built Environment" {
+		t.Errorf("display_name[en-US] = %q, want %q", got, "Built Environment")
+	}
+	if got := m.Metadata.DisplayName["vi-VN"]; got != "Môi Trường Xây Dựng" {
+		t.Errorf("display_name[vi-VN] = %q", got)
+	}
 	if len(m.Spec.OntologyFiles) != 2 {
 		t.Errorf("OntologyFiles count = %d, want 2", len(m.Spec.OntologyFiles))
 	}
@@ -52,6 +58,11 @@ spec:
 	}
 	if len(m.Spec.Tools) != 1 {
 		t.Errorf("Tools count = %d, want 1", len(m.Spec.Tools))
+	}
+
+	// Validate must accept the full-form locale keys.
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 }
 
@@ -280,4 +291,185 @@ func TestIsValidPromptFragmentTarget(t *testing.T) {
 			t.Errorf("IsValidPromptFragmentTarget(%q) = %v, want %v", tt.in, got, tt.want)
 		}
 	}
+}
+
+// TestValidate_RejectsShortFormLocaleKeys verifies the OGA-51 contract:
+// kit manifests MUST use full BCP-47 locale tags (en-US, vi-VN). Short
+// forms (en, vi) are silently routed by the platform's matcher at
+// runtime, but a manifest is a declarative artifact — kit authors must
+// spell out the region so intent is unambiguous.
+func TestValidate_RejectsShortFormLocaleKeys(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		m     *KitManifest
+	}{
+		{
+			name:  "display_name short en",
+			field: "metadata.display_name",
+			m: &KitManifest{
+				APIVersion: "ontogis.ai/v1",
+				Kind:       "DomainKitManifest",
+				Metadata: KitMetadata{
+					Name:        "k",
+					Version:     "1.0.0",
+					DisplayName: map[string]string{"en": "Kit"},
+				},
+				Spec: KitSpec{PlatformVersion: ">=1.0.0"},
+			},
+		},
+		{
+			name:  "display_name short vi",
+			field: "metadata.display_name",
+			m: &KitManifest{
+				APIVersion: "ontogis.ai/v1",
+				Kind:       "DomainKitManifest",
+				Metadata: KitMetadata{
+					Name:        "k",
+					Version:     "1.0.0",
+					DisplayName: map[string]string{"vi": "Bộ Khởi Động"},
+				},
+				Spec: KitSpec{PlatformVersion: ">=1.0.0"},
+			},
+		},
+		{
+			name:  "description short zh",
+			field: "metadata.description",
+			m: &KitManifest{
+				APIVersion: "ontogis.ai/v1",
+				Kind:       "DomainKitManifest",
+				Metadata: KitMetadata{
+					Name:        "k",
+					Version:     "1.0.0",
+					Description: map[string]string{"zh": "套件"},
+				},
+				Spec: KitSpec{PlatformVersion: ">=1.0.0"},
+			},
+		},
+		{
+			name:  "mixed short and full",
+			field: "metadata.display_name",
+			m: &KitManifest{
+				APIVersion: "ontogis.ai/v1",
+				Kind:       "DomainKitManifest",
+				Metadata: KitMetadata{
+					Name:    "k",
+					Version: "1.0.0",
+					DisplayName: map[string]string{
+						"en-US": "Kit",
+						"vi":    "Bộ Khởi Động", // short — should fail
+					},
+				},
+				Spec: KitSpec{PlatformVersion: ">=1.0.0"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Validate(tt.m)
+			if err == nil {
+				t.Fatal("expected error for short-form locale key, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.field) {
+				t.Errorf("error %q does not name the offending field %q", err, tt.field)
+			}
+			if !strings.Contains(err.Error(), "short-form") {
+				t.Errorf("error %q does not mention short-form rejection", err)
+			}
+		})
+	}
+}
+
+// TestValidate_AcceptsFullBCP47 covers the happy path: full-form locale
+// keys (with explicit region or script-region) pass validation across
+// the manifest's locale-keyed fields.
+func TestValidate_AcceptsFullBCP47(t *testing.T) {
+	m := &KitManifest{
+		APIVersion: "ontogis.ai/v1",
+		Kind:       "DomainKitManifest",
+		Metadata: KitMetadata{
+			Name:    "k",
+			Version: "1.0.0",
+			DisplayName: map[string]string{
+				"en-US": "Kit",
+				"vi-VN": "Bộ Khởi Động",
+				"zh-CN": "套件",
+			},
+			Description: map[string]string{
+				"en-US": "A test kit",
+				"vi-VN": "Bộ thử nghiệm",
+			},
+		},
+		Spec: KitSpec{PlatformVersion: ">=1.0.0"},
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestValidate_RejectsMalformedLocaleKeys covers values that aren't
+// even valid BCP-47.
+func TestValidate_RejectsMalformedLocaleKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"empty key", ""},
+		{"contains underscore", "en_US"},
+		{"trailing dash", "en-"},
+		{"random garbage", "!!!"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &KitManifest{
+				APIVersion: "ontogis.ai/v1",
+				Kind:       "DomainKitManifest",
+				Metadata: KitMetadata{
+					Name:        "k",
+					Version:     "1.0.0",
+					DisplayName: map[string]string{tt.key: "Kit"},
+				},
+				Spec: KitSpec{PlatformVersion: ">=1.0.0"},
+			}
+			err := Validate(m)
+			if err == nil {
+				t.Fatal("expected error for malformed locale key, got nil")
+			}
+			if !strings.Contains(err.Error(), "metadata.display_name") {
+				t.Errorf("error should name the field, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateLocaleKeys_PublicHelper exercises the exported helper
+// the transfer package re-exports for kit-author use.
+func TestValidateLocaleKeys_PublicHelper(t *testing.T) {
+	t.Run("nil map ok", func(t *testing.T) {
+		if err := ValidateLocaleKeys("test.field", nil); err != nil {
+			t.Errorf("nil map should pass, got %v", err)
+		}
+	})
+	t.Run("empty map ok", func(t *testing.T) {
+		if err := ValidateLocaleKeys("test.field", map[string]string{}); err != nil {
+			t.Errorf("empty map should pass, got %v", err)
+		}
+	})
+	t.Run("full BCP-47 ok", func(t *testing.T) {
+		if err := ValidateLocaleKeys("test.field", map[string]string{
+			"en-US": "x", "vi-VN": "y",
+		}); err != nil {
+			t.Errorf("full BCP-47 should pass, got %v", err)
+		}
+	})
+	t.Run("short rejected with field name", func(t *testing.T) {
+		err := ValidateLocaleKeys("ontology.entity_type.display_name", map[string]string{"en": "x"})
+		if err == nil {
+			t.Fatal("short-form should fail")
+		}
+		if !strings.Contains(err.Error(), "ontology.entity_type.display_name") {
+			t.Errorf("error %q should mention the field name", err)
+		}
+	})
 }
