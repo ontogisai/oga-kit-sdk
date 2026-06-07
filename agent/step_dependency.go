@@ -143,7 +143,8 @@ func extractPriorValues(content string) *extractedValues {
 // extracted value.
 func resolveFromExtracted(key string, ev *extractedValues) string {
 	switch key {
-	case "entity_id", "start_entity_id", "source_id", "document_id":
+	case "entity_id", "start_entity_id", "source_id", "document_id",
+		"source_entity_id", "target_entity_id":
 		return ev.firstEntityID
 	case "entity_type":
 		return ev.entityType
