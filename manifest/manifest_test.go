@@ -473,3 +473,257 @@ func TestValidateLocaleKeys_PublicHelper(t *testing.T) {
 		}
 	})
 }
+
+// TestParse_KitPolicies covers the happy path: a manifest carrying a valid
+// spec.policies block with both routing-level and data-level entries
+// parses cleanly, the values round-trip into the typed structure, and
+// Validate accepts them.
+func TestParse_KitPolicies(t *testing.T) {
+	input := `
+api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: built-environment
+  version: "1.0.0"
+spec:
+  platform_version: ">=1.0.0"
+  policies:
+    - id_suffix: fm-operator-allow-fm-operations
+      level: routing
+      name: "FM operator can invoke FM operations agent"
+      description: "Routing-level gate for FM operators."
+      target_roles: [fm_operator, tenant_admin]
+      target_agent_ids: [fm-operations-agent]
+      expression: '"fm_operator" in principal_roles'
+      priority: 200
+    - id_suffix: fm-write-restricted-to-operator
+      level: data
+      name: "Only FM operators write WorkOrder"
+      target_entity_types: [WorkOrder, MaintenanceSchedule]
+      target_actions: [write, delete]
+      expression: '"fm_operator" in principal_roles'
+      priority: 150
+`
+	m, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := len(m.Spec.Policies); got != 2 {
+		t.Fatalf("Policies count = %d, want 2", got)
+	}
+	p0 := m.Spec.Policies[0]
+	if p0.IDSuffix != "fm-operator-allow-fm-operations" {
+		t.Errorf("[0].IDSuffix = %q", p0.IDSuffix)
+	}
+	if p0.Level != PolicyLevelRouting {
+		t.Errorf("[0].Level = %q, want %q", p0.Level, PolicyLevelRouting)
+	}
+	if p0.Priority != 200 {
+		t.Errorf("[0].Priority = %d, want 200", p0.Priority)
+	}
+	if len(p0.TargetRoles) != 2 || p0.TargetRoles[0] != "fm_operator" {
+		t.Errorf("[0].TargetRoles = %v", p0.TargetRoles)
+	}
+	if len(p0.TargetAgentIDs) != 1 || p0.TargetAgentIDs[0] != "fm-operations-agent" {
+		t.Errorf("[0].TargetAgentIDs = %v", p0.TargetAgentIDs)
+	}
+
+	p1 := m.Spec.Policies[1]
+	if p1.Level != PolicyLevelData {
+		t.Errorf("[1].Level = %q, want %q", p1.Level, PolicyLevelData)
+	}
+	if len(p1.TargetEntityTypes) != 2 {
+		t.Errorf("[1].TargetEntityTypes count = %d", len(p1.TargetEntityTypes))
+	}
+	if len(p1.TargetActions) != 2 || p1.TargetActions[0] != "write" {
+		t.Errorf("[1].TargetActions = %v", p1.TargetActions)
+	}
+
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestValidate_KitPolicies_MissingFields covers the per-entry rules:
+// every KitPolicySpec MUST have id_suffix, level, name, expression. The
+// id_suffix MUST match the platform's regex, and id_suffix values must be
+// unique within the kit.
+//
+// Error messages are checked verbatim against the platform's
+// internal/domainkit.validateKitPolicies wording so kit authors get
+// identical feedback whether they fail SDK Validate locally or fail at
+// install time on a tenant's platform.
+func TestValidate_KitPolicies_MissingFields(t *testing.T) {
+	base := KitManifest{
+		APIVersion: "ontogis.ai/v1",
+		Kind:       "DomainKitManifest",
+		Metadata:   KitMetadata{Name: "k", Version: "1.0.0"},
+		Spec:       KitSpec{PlatformVersion: ">=1.0.0"},
+	}
+
+	tests := []struct {
+		name     string
+		policies []KitPolicySpec
+		wantErr  string
+	}{
+		{
+			name: "missing id_suffix",
+			policies: []KitPolicySpec{
+				{Level: "routing", Name: "x", Expression: "true"},
+			},
+			wantErr: "spec.policies[0]: id_suffix is required",
+		},
+		{
+			name: "id_suffix too short",
+			policies: []KitPolicySpec{
+				{IDSuffix: "ab", Level: "routing", Name: "x", Expression: "true"},
+			},
+			wantErr: `id_suffix = "ab" does not match`,
+		},
+		{
+			name: "id_suffix has uppercase",
+			policies: []KitPolicySpec{
+				{IDSuffix: "FM-Operator", Level: "routing", Name: "x", Expression: "true"},
+			},
+			wantErr: `id_suffix = "FM-Operator" does not match`,
+		},
+		{
+			name: "id_suffix starts with digit",
+			policies: []KitPolicySpec{
+				{IDSuffix: "1-leading-digit", Level: "routing", Name: "x", Expression: "true"},
+			},
+			wantErr: `id_suffix = "1-leading-digit" does not match`,
+		},
+		{
+			name: "id_suffix ends with hyphen",
+			policies: []KitPolicySpec{
+				{IDSuffix: "trailing-hyphen-", Level: "routing", Name: "x", Expression: "true"},
+			},
+			wantErr: `id_suffix = "trailing-hyphen-" does not match`,
+		},
+		{
+			name: "missing level",
+			policies: []KitPolicySpec{
+				{IDSuffix: "valid-id", Name: "x", Expression: "true"},
+			},
+			wantErr: "spec.policies[0]: level is required",
+		},
+		{
+			name: "invalid level",
+			policies: []KitPolicySpec{
+				{IDSuffix: "valid-id", Level: "advisory", Name: "x", Expression: "true"},
+			},
+			wantErr: `level = "advisory" is invalid`,
+		},
+		{
+			name: "missing name",
+			policies: []KitPolicySpec{
+				{IDSuffix: "valid-id", Level: "data", Expression: "true"},
+			},
+			wantErr: "spec.policies[0]: name is required",
+		},
+		{
+			name: "missing expression",
+			policies: []KitPolicySpec{
+				{IDSuffix: "valid-id", Level: "data", Name: "x"},
+			},
+			wantErr: "spec.policies[0]: expression is required",
+		},
+		{
+			name: "duplicate id_suffix",
+			policies: []KitPolicySpec{
+				{IDSuffix: "duplicate", Level: "routing", Name: "first", Expression: "true"},
+				{IDSuffix: "duplicate", Level: "data", Name: "second", Expression: "true"},
+			},
+			wantErr: `spec.policies[1]: id_suffix = "duplicate" duplicates spec.policies[0]`,
+		},
+		{
+			name: "second entry invalid (positional error)",
+			policies: []KitPolicySpec{
+				{IDSuffix: "first-ok", Level: "routing", Name: "first", Expression: "true"},
+				{IDSuffix: "second", Level: "", Name: "second", Expression: "true"},
+			},
+			wantErr: "spec.policies[1]: level is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := base
+			m.Spec.Policies = tt.policies
+			err := Validate(&m)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidate_KitPolicies_AcceptsBothLevels verifies that policies with
+// either routing or data level pass validation.
+func TestValidate_KitPolicies_AcceptsBothLevels(t *testing.T) {
+	m := &KitManifest{
+		APIVersion: "ontogis.ai/v1",
+		Kind:       "DomainKitManifest",
+		Metadata:   KitMetadata{Name: "k", Version: "1.0.0"},
+		Spec: KitSpec{
+			PlatformVersion: ">=1.0.0",
+			Policies: []KitPolicySpec{
+				{
+					IDSuffix:   "routing-policy",
+					Level:      PolicyLevelRouting,
+					Name:       "routing example",
+					Expression: `"role" in principal_roles`,
+					Priority:   200,
+				},
+				{
+					IDSuffix:   "data-policy",
+					Level:      PolicyLevelData,
+					Name:       "data example",
+					Expression: `resource_classification != "secret"`,
+					Priority:   100,
+				},
+			},
+		},
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestValidate_KitPolicies_EmptyIsValid confirms the absence of a policies
+// block is not an error — kits don't have to declare PBAC policies.
+func TestValidate_KitPolicies_EmptyIsValid(t *testing.T) {
+	m := &KitManifest{
+		APIVersion: "ontogis.ai/v1",
+		Kind:       "DomainKitManifest",
+		Metadata:   KitMetadata{Name: "k", Version: "1.0.0"},
+		Spec:       KitSpec{PlatformVersion: ">=1.0.0"},
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestIsValidPolicyLevel exercises the helper directly.
+func TestIsValidPolicyLevel(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"routing", true},
+		{"data", true},
+		{"", false},
+		{"advisory", false},
+		{"Routing", false}, // case-sensitive
+		{" routing", false},
+	}
+	for _, tt := range tests {
+		if got := IsValidPolicyLevel(tt.in); got != tt.want {
+			t.Errorf("IsValidPolicyLevel(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
