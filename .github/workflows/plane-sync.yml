@@ -1,5 +1,11 @@
-# Stub: calls reusable workflow in oga-platform-shared-tools
-# To update behavior, bump the @version pin below.
+# Plane Sync: marks the corresponding Plane work item as Done when a PR
+# is merged into main. Extracts the work item number from the PR title
+# (e.g., [OGA-42]).
+#
+# Previously called a reusable workflow in oga-platform-shared-tools, but
+# GitHub validates reusable workflow references at parse time on ALL PRs
+# (even unrelated ones), causing spurious failures when the cross-repo
+# reference can't be resolved. Inlined to avoid that.
 name: Plane Sync
 
 on:
@@ -13,12 +19,82 @@ permissions:
 
 jobs:
   sync:
+    name: Mark Plane Work Item Done
     if: github.event.pull_request.merged == true
-    uses: ontogisai/oga-platform-shared-tools/.github/workflows/plane-sync.yml@v1.1.0
-    with:
-      project_identifier: OGA
-    secrets:
-      PLANE_API_KEY:        ${{ secrets.PLANE_API_KEY }}
-      PLANE_WORKSPACE_SLUG: ${{ secrets.PLANE_WORKSPACE_SLUG }}
-      PLANE_PROJECT_ID:     ${{ secrets.PLANE_PROJECT_ID }}
-      PLANE_DONE_STATE_ID:  ${{ secrets.PLANE_DONE_STATE_ID }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract work item number from PR title
+        id: extract
+        env:
+          PROJECT_ID: OGA
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          ISSUE_NUM=$(echo "$TITLE" | grep -oP "(?<=\[$PROJECT_ID-)\d+(?=\])" || true)
+          if [ -z "$ISSUE_NUM" ]; then
+            echo "No $PROJECT_ID issue number found in PR title, skipping."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Found $PROJECT_ID-$ISSUE_NUM in PR title"
+          fi
+
+      - name: Look up Plane work item by identifier
+        if: steps.extract.outputs.found == 'true'
+        id: lookup
+        env:
+          PROJECT_ID: OGA
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "https://api.plane.so/api/v1/workspaces/${{ secrets.PLANE_WORKSPACE_SLUG }}/work-items/$PROJECT_ID-${{ steps.extract.outputs.issue_num }}/" \
+            -H "X-API-Key: ${{ secrets.PLANE_API_KEY }}" \
+            -H "Content-Type: application/json")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::Plane API returned $HTTP_CODE when looking up $PROJECT_ID-${{ steps.extract.outputs.issue_num }}"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          WORK_ITEM_ID=$(echo "$BODY" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+
+          if [ -z "$WORK_ITEM_ID" ]; then
+            echo "::warning::Could not extract work item ID from response"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "work_item_id=$WORK_ITEM_ID" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Found work item ID: $WORK_ITEM_ID"
+          fi
+
+      - name: Update work item state to Done
+        if: steps.lookup.outputs.found == 'true'
+        env:
+          PROJECT_ID: OGA
+        run: |
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PATCH \
+            "https://api.plane.so/api/v1/workspaces/${{ secrets.PLANE_WORKSPACE_SLUG }}/projects/${{ secrets.PLANE_PROJECT_ID }}/work-items/${{ steps.lookup.outputs.work_item_id }}/" \
+            -H "X-API-Key: ${{ secrets.PLANE_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"state": "${{ secrets.PLANE_DONE_STATE_ID }}"}')
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ $PROJECT_ID-${{ steps.extract.outputs.issue_num }} marked as Done in Plane"
+          else
+            echo "::error::Failed to update Plane work item (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+      - name: Attach PR link to work item
+        if: steps.lookup.outputs.found == 'true'
+        run: |
+          curl -s -o /dev/null \
+            -X POST \
+            "https://api.plane.so/api/v1/workspaces/${{ secrets.PLANE_WORKSPACE_SLUG }}/projects/${{ secrets.PLANE_PROJECT_ID }}/work-items/${{ steps.lookup.outputs.work_item_id }}/links/" \
+            -H "X-API-Key: ${{ secrets.PLANE_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\": \"${{ github.event.pull_request.html_url }}\", \"title\": \"Merged PR #${{ github.event.pull_request.number }}\"}" || true

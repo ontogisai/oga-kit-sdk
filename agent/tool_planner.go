@@ -163,9 +163,44 @@ func PlanAndExecute(
 		plan.Steps = plan.Steps[:cfg.MaxSteps]
 	}
 
-	// Step 2: execute each step in order via the gateway.
+	// Step 2: execute each step in order via the gateway, resolving
+	// inter-step dependencies from prior results.
 	results := make([]ToolStepResult, 0, len(plan.Steps))
 	for i, step := range plan.Steps {
+		// Short-circuit: if this step depends on a prior step that produced
+		// empty or error results, skip execution to avoid cascade failures.
+		if step.DependsOn >= 0 && step.DependsOn < len(results) {
+			prior := results[step.DependsOn]
+			if !prior.Success || prior.Content == "" {
+				slog.InfoContext(ctx, "agent: skipping step: upstream returned no results",
+					"agent_id", profile.AgentID,
+					"step_index", i,
+					"tool_name", step.ToolName,
+					"depends_on", step.DependsOn,
+				)
+				results = append(results, ToolStepResult{
+					ToolName:  step.ToolName,
+					Success:   false,
+					Error:     "skipped: upstream step returned no results",
+					LatencyMS: 0,
+				})
+				continue
+			}
+		}
+
+		// Resolve placeholder arguments from prior step results.
+		args := step.Arguments
+		if args == nil {
+			args = make(map[string]any)
+		}
+		if step.DependsOn >= 0 && step.DependsOn < len(results) {
+			prior := results[step.DependsOn]
+			if prior.Success && prior.Content != "" {
+				args = resolveDependentArgs(args, prior.Content)
+			}
+		}
+		step.Arguments = args
+
 		stepCtx, stepCancel := context.WithTimeout(ctx, cfg.ToolTimeout)
 		res := executeStep(stepCtx, gw, step)
 		stepCancel()
