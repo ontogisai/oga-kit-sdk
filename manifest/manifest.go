@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -96,6 +97,22 @@ type KitSpec struct {
 
 	// Workflows lists workflow configurations.
 	Workflows []WorkflowConfig `yaml:"workflows,omitempty"`
+
+	// Policies lists kit-scoped PBAC policies the platform installer
+	// registers at install time (OGA-277). Each entry produces one Policy
+	// record under the tenant's namespace with the deterministic ID
+	//
+	//   kit-{kit_id}-{tenant_id}-{id_suffix}
+	//
+	// Re-installs upsert via the same ID; uninstall archives (does NOT hard-
+	// delete) so audit trails survive. The shape mirrors the platform's
+	// internal/domainkit.KitPolicySpec exactly so YAML authored against
+	// either type round-trips through the other without translation.
+	//
+	// See the platform's pbac-enhancements design doc (Component K3 —
+	// Domain Kit Manifest Schema) for authoring guidance and the full set
+	// of CEL activation variables expressions can reference.
+	Policies []KitPolicySpec `yaml:"policies,omitempty"`
 }
 
 // PromptFragmentEntry declares a prompt fragment file targeting a specific
@@ -174,6 +191,104 @@ type WorkflowConfig struct {
 	Config map[string]any `yaml:"config,omitempty"`
 }
 
+// KitPolicySpec declares one PBAC policy that the platform installer should
+// register at install time (OGA-277). The shape mirrors the platform-side
+// internal/domainkit.KitPolicySpec exactly, plus the same Level field, so a
+// single YAML body works for both routing-level and data-level policies.
+//
+// Required fields: IDSuffix, Level, Name, Expression.
+//
+// All Target* fields are optional and follow the matcher semantics
+// implemented by the platform's PBAC engine — empty list = match all.
+//
+// At install time the deterministic policy ID is computed as
+//
+//	kit-{kit_id}-{tenant_id}-{id_suffix}
+//
+// (see the platform's domainkit.KitPolicyID). The "kit-" prefix lets
+// operator tooling distinguish kit-installed policies from operator-authored
+// ones (no prefix) and platform tenant defaults (which use "tenant-default-").
+type KitPolicySpec struct {
+	// IDSuffix is the kebab-case unique identifier within this kit's
+	// policy set. Combined with the kit ID and tenant ID at install time
+	// to produce the policy's deterministic ID. Must match the regex
+	// ^[a-z][a-z0-9-]{1,40}[a-z0-9]$.
+	IDSuffix string `yaml:"id_suffix"`
+
+	// Level controls which evaluation tier the policy participates in:
+	//   - "routing" — agent invocation gate (Level 1). The AccessRequest's
+	//     Resource.EntityType is set to "agent" and EntityID to the target
+	//     agent_id; resource_classification / resource_h3_* are empty.
+	//   - "data" — entity access gate (Level 2). The AccessRequest carries
+	//     real entity properties (classification, h3_cells, valid_from/to)
+	//     populated by the MCP handler's loadResourceContext.
+	Level string `yaml:"level"`
+
+	// Name is a short human-readable label shown in operator tooling.
+	Name string `yaml:"name"`
+
+	// Description is a longer rationale explaining what the policy gates
+	// and why. Optional but strongly recommended for operator clarity.
+	Description string `yaml:"description"`
+
+	// Priority orders policy evaluation: lower values evaluate first. The
+	// first applicable DENY wins; otherwise the first applicable PERMIT
+	// decides. Tenant-default policies typically use 100..300; kit
+	// policies usually slot below the tenant defaults (e.g., 30..200).
+	Priority int `yaml:"priority"`
+
+	// Expression is the CEL boolean expression evaluated against the
+	// request. It must evaluate to TRUE for access to be granted (kit
+	// policies are permit-by-default). Available activation variables —
+	// see the platform's pbac-enhancements design doc for the full list:
+	//   principal_id           string
+	//   principal_roles        list<string>
+	//   principal_clearance    string
+	//   principal_h3_cells     list<string>
+	//   resource_entity_type   string
+	//   resource_entity_id     string
+	//   resource_classification string
+	//   resource_h3_cell       string
+	//   resource_h3_cells      list<string>
+	//   resource_valid_from    timestamp
+	//   resource_valid_to      timestamp
+	//   action                 string  ("read"|"write"|"delete"|"traverse"|"invoke")
+	Expression string `yaml:"expression"`
+
+	// TargetRoles, TargetAgentIDs, TargetEntityTypes, TargetActions are
+	// optional scope filters. An empty list matches all values; otherwise
+	// the policy applies only when the request's corresponding field
+	// intersects the list. Compile-time syntax + type-check of Expression
+	// is left for the engine's CreatePolicy call at install time so the
+	// SDK manifest validator does not need to import cel-go.
+	TargetRoles       []string `yaml:"target_roles,omitempty"`
+	TargetAgentIDs    []string `yaml:"target_agent_ids,omitempty"`
+	TargetEntityTypes []string `yaml:"target_entity_types,omitempty"`
+	TargetActions     []string `yaml:"target_actions,omitempty"`
+}
+
+// PolicyLevelRouting and PolicyLevelData are the recognized values of
+// KitPolicySpec.Level. Mirrors internal/domainkit.PolicyLevelRouting /
+// PolicyLevelData on the platform side.
+const (
+	PolicyLevelRouting = "routing"
+	PolicyLevelData    = "data"
+)
+
+// kitPolicyIDSuffixPattern is the canonical id_suffix shape: kebab-case,
+// 3-42 characters, lowercase letters/digits/hyphens, must start with a
+// letter and end with a letter or digit. Mirrors the platform's
+// internal/domainkit.kitPolicyIDSuffixPattern exactly.
+const kitPolicyIDSuffixPattern = `^[a-z][a-z0-9-]{1,40}[a-z0-9]$`
+
+var kitPolicyIDSuffixRegex = regexp.MustCompile(kitPolicyIDSuffixPattern)
+
+// IsValidPolicyLevel reports whether s is one of the recognized policy
+// level values (routing | data).
+func IsValidPolicyLevel(s string) bool {
+	return s == PolicyLevelRouting || s == PolicyLevelData
+}
+
 // Parse reads and parses a manifest from the given reader.
 func Parse(r io.Reader) (*KitManifest, error) {
 	var m KitManifest
@@ -235,6 +350,9 @@ func Validate(m *KitManifest) error {
 		if e.File == "" {
 			return fmt.Errorf("spec.prompt_fragments[%d]: file is required", i)
 		}
+	}
+	if err := validateKitPolicies(m.Spec.Policies); err != nil {
+		return err
 	}
 	return nil
 }
@@ -299,6 +417,62 @@ func validateLocaleKeys(fieldName string, m map[string]string) error {
 					"(e.g., %q-US, %q-GB) — short-form language-only tags are rejected",
 				fieldName, k, k, k,
 			)
+		}
+	}
+	return nil
+}
+
+// validateKitPolicies enforces the per-entry rules of spec.policies (OGA-277):
+// id_suffix matches the canonical regex, level is "routing" or "data", name
+// and expression are non-empty, and id_suffix is unique within the kit.
+//
+// The CEL expression's syntax + type-check is left for the platform
+// installer's CreatePolicy call at install time so we don't pull cel-go
+// into the SDK's manifest-only path.
+//
+// Mirrors the platform's internal/domainkit.validateKitPolicies exactly so
+// kit authors get the same field-level error messages whether they validate
+// locally with this SDK or fail at install time on a tenant's platform.
+func validateKitPolicies(entries []KitPolicySpec) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	seen := make(map[string]int, len(entries))
+	for i := range entries {
+		e := &entries[i]
+		if e.IDSuffix == "" {
+			return fmt.Errorf("spec.policies[%d]: id_suffix is required", i)
+		}
+		if !kitPolicyIDSuffixRegex.MatchString(e.IDSuffix) {
+			return fmt.Errorf(
+				"spec.policies[%d]: id_suffix = %q does not match %s",
+				i, e.IDSuffix, kitPolicyIDSuffixPattern,
+			)
+		}
+		if prev, ok := seen[e.IDSuffix]; ok {
+			return fmt.Errorf(
+				"spec.policies[%d]: id_suffix = %q duplicates spec.policies[%d]",
+				i, e.IDSuffix, prev,
+			)
+		}
+		seen[e.IDSuffix] = i
+
+		switch e.Level {
+		case PolicyLevelRouting, PolicyLevelData:
+		case "":
+			return fmt.Errorf("spec.policies[%d]: level is required", i)
+		default:
+			return fmt.Errorf(
+				"spec.policies[%d]: level = %q is invalid; must be %q or %q",
+				i, e.Level, PolicyLevelRouting, PolicyLevelData,
+			)
+		}
+
+		if e.Name == "" {
+			return fmt.Errorf("spec.policies[%d]: name is required", i)
+		}
+		if e.Expression == "" {
+			return fmt.Errorf("spec.policies[%d]: expression is required", i)
 		}
 	}
 	return nil
