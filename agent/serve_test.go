@@ -30,8 +30,10 @@ func (s *stubRuntime) HandleMessage(_ context.Context, msg *A2AMessage) (*A2ARes
 	}, nil
 }
 func (s *stubRuntime) HandleStream(_ context.Context, _ *A2AMessage, stream StreamWriter) error {
-	data, _ := json.Marshal(Message{Role: "agent", Parts: []Part{{Text: s.reply}}})
-	_ = stream.WriteEvent(context.Background(), &StreamEvent{Type: "message", Data: data})
+	_ = stream.WriteEvent(context.Background(), &StreamEvent{
+		Type:    EventTypeArtifact,
+		Payload: &ArtifactPayload{Parts: []ArtifactPart{{Text: s.reply}}},
+	})
 	return stream.Close()
 }
 func (s *stubRuntime) Healthz(_ context.Context) error {

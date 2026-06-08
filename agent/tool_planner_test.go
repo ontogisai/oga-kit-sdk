@@ -81,7 +81,7 @@ func sampleProfile() *DomainAgentProfile {
 
 func TestUniqueTools_Dedup(t *testing.T) {
 	profile := sampleProfile()
-	tools := uniqueTools(profile)
+	tools := UniqueTools(profile)
 	if len(tools) != 3 {
 		t.Fatalf("expected 3 unique tools, got %d (%v)", len(tools), tools)
 	}
@@ -95,18 +95,18 @@ func TestUniqueTools_Dedup(t *testing.T) {
 }
 
 func TestUniqueTools_NilOrEmpty(t *testing.T) {
-	if got := uniqueTools(nil); got != nil {
+	if got := UniqueTools(nil); got != nil {
 		t.Errorf("nil profile should yield nil, got %v", got)
 	}
 	empty := &DomainAgentProfile{}
-	if got := uniqueTools(empty); got != nil {
+	if got := UniqueTools(empty); got != nil {
 		t.Errorf("profile without capabilities should yield nil, got %v", got)
 	}
 }
 
 func TestParsePlan_ValidJSON(t *testing.T) {
 	content := `{"steps":[{"tool_name":"kg_search","arguments":{"q":"chiller"},"depends_on":-1,"rationale":"find equipment"}]}`
-	plan, err := parsePlan(content)
+	plan, err := ParsePlan(content)
 	if err != nil {
 		t.Fatalf("parsePlan: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestParsePlan_ValidJSON(t *testing.T) {
 
 func TestParsePlan_StripsMarkdownFences(t *testing.T) {
 	content := "```json\n{\"steps\":[]}\n```"
-	plan, err := parsePlan(content)
+	plan, err := ParsePlan(content)
 	if err != nil {
 		t.Fatalf("parsePlan: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestParsePlan_StripsMarkdownFences(t *testing.T) {
 }
 
 func TestParsePlan_InvalidJSON(t *testing.T) {
-	if _, err := parsePlan("not json"); err == nil {
+	if _, err := ParsePlan("not json"); err == nil {
 		t.Error("expected error for invalid JSON")
 	}
 }

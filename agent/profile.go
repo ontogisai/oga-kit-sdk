@@ -61,6 +61,48 @@ type ProactiveConfig struct {
 	ToolCategories       []string `yaml:"tool_categories,omitempty"`
 	ContextGatherTimeout string   `yaml:"context_gather_timeout,omitempty"`
 	ReasoningTimeout     string   `yaml:"reasoning_timeout,omitempty"`
+
+	// GroundingStrategy is the optional declarative tool-call plan.
+	// When non-empty, DefaultRuntime.HandleStream uses GroundingStrategyPlanner
+	// (deterministic, no LLM planning call). When empty, falls back to
+	// LLMToolPlanner (dynamic per-request planning). See OGA-303.
+	GroundingStrategy []GroundingStep `yaml:"grounding_strategy,omitempty"`
+}
+
+// GroundingStep is one step in a kit-declared grounding strategy. Each step
+// runs a specific MCP tool with named-placeholder substitution from prior step
+// results. Conditional execution (When) and required-step semantics (Required)
+// preserve the kit author's declarative intent.
+type GroundingStep struct {
+	// Name is the human-readable identifier and placeholder key.
+	Name string `yaml:"name"`
+
+	// Tool is the MCP tool to invoke (e.g., "kg_search").
+	Tool string `yaml:"tool"`
+
+	// Arguments is the parameter map passed to the tool. Values may contain
+	// {placeholder} tokens resolved from prior step results.
+	Arguments map[string]any `yaml:"arguments,omitempty"`
+
+	// Condition is a CEL expression evaluated at runtime. When false, the
+	// step is skipped (a tool_call event with Skipped:true is emitted).
+	// "true" / empty / missing → always run. "false" → always skip.
+	// Other CEL expressions → not yet evaluated (treated as skip with a
+	// "CEL evaluation not yet implemented" reason). Full CEL integration
+	// is tracked as a follow-up.
+	Condition string `yaml:"condition,omitempty"`
+
+	// Required marks this step as fail-fast: a tool error stops the pipeline
+	// with task/status{failed}. Non-required steps log and continue.
+	Required bool `yaml:"required,omitempty"`
+
+	// MaxResults caps the number of results returned (for tools that produce
+	// JSON arrays). 0 = no cap.
+	MaxResults int `yaml:"max_results,omitempty"`
+
+	// DependsOn references a prior step by name. Resolved to step index
+	// at planner time.
+	DependsOn string `yaml:"depends_on,omitempty"`
 }
 
 // CapabilityDef defines a named capability with its tools.

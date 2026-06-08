@@ -27,21 +27,16 @@ type AgentRuntime interface {
 }
 
 // StreamWriter is used by HandleStream to send SSE events to the client.
+//
+// The event argument is the typed StreamEvent envelope defined in events.go.
+// httpStreamWriter (in serve.go) marshals it to SSE wire format; in-process
+// consumers (Frontier mux.AddSource) consume the typed struct directly.
 type StreamWriter interface {
 	// WriteEvent sends a single SSE event to the client.
 	WriteEvent(ctx context.Context, event *StreamEvent) error
 
 	// Close signals the end of the stream.
 	Close() error
-}
-
-// StreamEvent represents a single event in an SSE stream.
-type StreamEvent struct {
-	// Type is the SSE event type (e.g., "message", "status", "error").
-	Type string `json:"type"`
-
-	// Data is the event payload.
-	Data json.RawMessage `json:"data"`
 }
 
 // AgentCard is the A2A agent card served at /.well-known/agent-card.json.

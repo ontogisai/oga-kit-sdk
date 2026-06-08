@@ -89,9 +89,9 @@ func DefaultPlannerConfig() PlannerConfig {
 	}
 }
 
-// gatewayClient is the subset of *gateway.PlatformGatewayClient the
+// GatewayClient is the subset of *gateway.PlatformGatewayClient the
 // planner uses. Defined as an interface so tests can supply a fake.
-type gatewayClient interface {
+type GatewayClient interface {
 	ChatCompletion(ctx context.Context, req *gateway.ChatCompletionRequest) (*gateway.ChatCompletionResponse, error)
 	CallTool(ctx context.Context, tool string, params any) (json.RawMessage, error)
 }
@@ -107,7 +107,7 @@ type gatewayClient interface {
 // metadata).
 func PlanAndExecute(
 	ctx context.Context,
-	gw gatewayClient,
+	gw GatewayClient,
 	profile *DomainAgentProfile,
 	userText string,
 	cfg PlannerConfig,
@@ -125,7 +125,7 @@ func PlanAndExecute(
 		cfg.ToolTimeout = 30 * time.Second
 	}
 
-	tools := uniqueTools(profile)
+	tools := UniqueTools(profile)
 	if len(tools) == 0 {
 		// No tools available — fall back to plain chat completion so
 		// the agent still answers, just without grounding.
@@ -137,7 +137,7 @@ func PlanAndExecute(
 
 	// Step 1: ask the LLM for an execution plan.
 	planCtx, planCancel := context.WithTimeout(ctx, cfg.PlanTimeout)
-	plan, err := requestPlan(planCtx, gw, profile, userText, tools, cfg)
+	plan, err := RequestPlan(planCtx, gw, profile, userText, tools, cfg)
 	planCancel()
 	if err != nil {
 		// Planning failed (LLM unavailable, parse error). Fall back to
@@ -196,7 +196,7 @@ func PlanAndExecute(
 		if step.DependsOn >= 0 && step.DependsOn < len(results) {
 			prior := results[step.DependsOn]
 			if prior.Success && prior.Content != "" {
-				args = resolveDependentArgs(args, prior.Content)
+				args = ResolveDependentArgs(args, prior.Content)
 			}
 		}
 		step.Arguments = args
@@ -226,9 +226,9 @@ func PlanAndExecute(
 	return answer, results, nil
 }
 
-// uniqueTools returns the union of all tools declared in the profile's
+// UniqueTools returns the union of all tools declared in the profile's
 // capabilities, deduplicated and stable-ordered.
-func uniqueTools(profile *DomainAgentProfile) []string {
+func UniqueTools(profile *DomainAgentProfile) []string {
 	if profile == nil {
 		return nil
 	}
@@ -249,16 +249,16 @@ func uniqueTools(profile *DomainAgentProfile) []string {
 	return out
 }
 
-// requestPlan asks the LLM to produce a JSON ToolPlan for the user query.
-func requestPlan(
+// RequestPlan asks the LLM to produce a JSON ToolPlan for the user query.
+func RequestPlan(
 	ctx context.Context,
-	gw gatewayClient,
+	gw GatewayClient,
 	profile *DomainAgentProfile,
 	userText string,
 	tools []string,
 	cfg PlannerConfig,
 ) (*ToolPlan, error) {
-	systemPrompt := planningSystemPrompt(profile, tools)
+	systemPrompt := PlanningSystemPrompt(profile, tools)
 
 	req := &gateway.ChatCompletionRequest{
 		Model:     cfg.Model,
@@ -279,12 +279,12 @@ func requestPlan(
 	if content == "" {
 		return nil, errors.New("planning LLM call: empty content")
 	}
-	return parsePlan(content)
+	return ParsePlan(content)
 }
 
-// parsePlan parses the LLM's JSON response into a ToolPlan, tolerating
+// ParsePlan parses the LLM's JSON response into a ToolPlan, tolerating
 // markdown code fences the LLM may wrap around the JSON.
-func parsePlan(content string) (*ToolPlan, error) {
+func ParsePlan(content string) (*ToolPlan, error) {
 	// Strip markdown fences if present.
 	content = strings.TrimSpace(content)
 	if strings.HasPrefix(content, "```") {
@@ -307,7 +307,7 @@ func parsePlan(content string) (*ToolPlan, error) {
 }
 
 // executeStep invokes a single tool via the gateway and captures the result.
-func executeStep(ctx context.Context, gw gatewayClient, step ToolStep) ToolStepResult {
+func executeStep(ctx context.Context, gw GatewayClient, step ToolStep) ToolStepResult {
 	start := time.Now()
 	res := ToolStepResult{ToolName: step.ToolName}
 	raw, err := gw.CallTool(ctx, step.ToolName, step.Arguments)
@@ -335,7 +335,7 @@ func executeStep(ctx context.Context, gw gatewayClient, step ToolStep) ToolStepR
 // assembleAnswer asks the LLM to synthesize tool results into a final answer.
 func assembleAnswer(
 	ctx context.Context,
-	gw gatewayClient,
+	gw GatewayClient,
 	profile *DomainAgentProfile,
 	userText string,
 	results []ToolStepResult,
@@ -363,7 +363,7 @@ func assembleAnswer(
 		}
 	}
 
-	systemPrompt := assemblySystemPrompt(profile)
+	systemPrompt := AssemblySystemPrompt(profile)
 	userPrompt := fmt.Sprintf("Original user question: %s\n\nTool results:\n%s", userText, resultCtx.String())
 
 	req := &gateway.ChatCompletionRequest{
@@ -389,7 +389,7 @@ func assembleAnswer(
 // no tools are needed.
 func plainAnswer(
 	ctx context.Context,
-	gw gatewayClient,
+	gw GatewayClient,
 	profile *DomainAgentProfile,
 	userText string,
 	cfg PlannerConfig,
@@ -417,9 +417,9 @@ func plainAnswer(
 	return strings.TrimSpace(resp.Choices[0].Message.Content), nil, nil
 }
 
-// planningSystemPrompt builds the system prompt instructing the LLM to
+// PlanningSystemPrompt builds the system prompt instructing the LLM to
 // produce a JSON tool-call plan.
-func planningSystemPrompt(profile *DomainAgentProfile, tools []string) string {
+func PlanningSystemPrompt(profile *DomainAgentProfile, tools []string) string {
 	currentTime := time.Now().UTC().Format(time.RFC3339)
 
 	var domainPrompt string
@@ -457,8 +457,8 @@ OUTPUT FORMAT:
 `, domainPrompt, currentTime, toolList.String())
 }
 
-// assemblySystemPrompt builds the prompt that synthesizes the final answer.
-func assemblySystemPrompt(profile *DomainAgentProfile) string {
+// AssemblySystemPrompt builds the prompt that synthesizes the final answer.
+func AssemblySystemPrompt(profile *DomainAgentProfile) string {
 	var domainPrompt string
 	if profile != nil && profile.ProactiveReasoning != nil && profile.ProactiveReasoning.SystemPrompt != "" {
 		domainPrompt = profile.ProactiveReasoning.SystemPrompt + "\n\n"

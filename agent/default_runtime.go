@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -66,6 +65,14 @@ func (d *RuntimeDeps) Close() {
 	d.closed = true
 }
 
+// StreamHandlerFunc is the pluggable streaming handler signature. The kit's
+// cmd/{agent}/main.go wires a streampipeline-backed handler via
+// WithStreamHandler so DefaultRuntime.HandleStream can delegate to the
+// shared orchestrator without creating an import cycle from agent →
+// streampipeline (the streampipeline package imports back to agent for
+// shared event types).
+type StreamHandlerFunc func(ctx context.Context, rt *DefaultRuntime, msg *A2AMessage, stream StreamWriter) error
+
 // DefaultRuntime is the reference implementation of AgentRuntime.
 // It provides a fully functional A2A agent with LLM reasoning, MCP tool
 // calling, event stream subscription, health probes, and graceful shutdown.
@@ -75,17 +82,41 @@ type DefaultRuntime struct {
 	card    *AgentCard
 	planner PlannerConfig
 
+	// streamHandler is the OGA-303 hook that delegates HandleStream to the
+	// streampipeline orchestrator. Kit sidecars wire it in main.go via
+	// WithStreamHandler. When nil, HandleStream uses a degraded sync
+	// fallback (reason() + 3 events) so unit tests don't require the full
+	// pipeline.
+	streamHandler StreamHandlerFunc
+
 	mu    sync.RWMutex
 	ready bool
 }
 
+// RuntimeOption customizes DefaultRuntime construction.
+type RuntimeOption func(*DefaultRuntime)
+
+// WithPlannerConfig overrides the default planner config.
+func WithPlannerConfig(cfg PlannerConfig) RuntimeOption {
+	return func(rt *DefaultRuntime) { rt.planner = cfg }
+}
+
+// WithStreamHandler injects the OGA-303 streampipeline-backed streaming
+// handler. Required for production kit sidecars; without it, HandleStream
+// falls back to a degraded 3-event path.
+func WithStreamHandler(handler StreamHandlerFunc) RuntimeOption {
+	return func(rt *DefaultRuntime) { rt.streamHandler = handler }
+}
+
 // NewDefaultRuntime creates a new DefaultRuntime with the given profile and deps.
-func NewDefaultRuntime(profile *DomainAgentProfile, deps *RuntimeDeps) *DefaultRuntime {
-	return NewDefaultRuntimeWithPlanner(profile, deps, DefaultPlannerConfig())
+// Use WithStreamHandler in opts to wire the streampipeline-backed streaming
+// handler (required for production OGA-303 behavior).
+func NewDefaultRuntime(profile *DomainAgentProfile, deps *RuntimeDeps, opts ...RuntimeOption) *DefaultRuntime {
+	return NewDefaultRuntimeWithPlanner(profile, deps, DefaultPlannerConfig(), opts...)
 }
 
 // NewDefaultRuntimeWithPlanner creates a runtime with a custom planner config.
-func NewDefaultRuntimeWithPlanner(profile *DomainAgentProfile, deps *RuntimeDeps, planner PlannerConfig) *DefaultRuntime {
+func NewDefaultRuntimeWithPlanner(profile *DomainAgentProfile, deps *RuntimeDeps, planner PlannerConfig, opts ...RuntimeOption) *DefaultRuntime {
 	skills := make([]Skill, 0, len(profile.Skills))
 	for _, s := range profile.Skills {
 		skills = append(skills, Skill(s))
@@ -120,8 +151,25 @@ func NewDefaultRuntimeWithPlanner(profile *DomainAgentProfile, deps *RuntimeDeps
 		ready:   true,
 	}
 
+	for _, opt := range opts {
+		opt(rt)
+	}
+
 	return rt
 }
+
+// Profile exposes the agent profile so injected stream handlers (set via
+// WithStreamHandler) can read configuration like ProactiveReasoning,
+// Capabilities, etc.
+func (rt *DefaultRuntime) Profile() *DomainAgentProfile { return rt.profile }
+
+// Deps exposes the runtime deps so injected stream handlers can access the
+// gateway client + other shared services.
+func (rt *DefaultRuntime) Deps() *RuntimeDeps { return rt.deps }
+
+// PlannerConfig returns the active planner config so handlers can construct
+// LLMToolPlanner instances with consistent settings.
+func (rt *DefaultRuntime) PlannerConfig() PlannerConfig { return rt.planner }
 
 // ServeAgentCard returns the agent's A2A card.
 func (rt *DefaultRuntime) ServeAgentCard() *AgentCard {
@@ -160,6 +208,20 @@ func (rt *DefaultRuntime) HandleMessage(ctx context.Context, msg *A2AMessage) (*
 }
 
 // HandleStream processes a streaming A2A message/stream request.
+//
+// OGA-303: this method delegates to the shared streampipeline orchestrator,
+// which emits the canonical event sequence (reasoning → plan → per-step
+// tool_call/tool_result/citation → token-streamed artifact → consolidated
+// citation → status). Planner selection is profile-driven:
+//   - When the profile declares `proactive_reasoning.grounding_strategy`,
+//     uses GroundingStrategyPlanner (deterministic, no LLM planning call).
+//   - Otherwise falls back to LLMToolPlanner (dynamic per-request planning).
+//
+// This is implemented inline rather than as a direct streampipeline import
+// because that would create an import cycle (the agent package's streampipeline
+// subpackage already imports back to agent for shared types). Production
+// wiring uses cmd/agent-runtime/main.go to construct DefaultRuntime which
+// then routes here.
 func (rt *DefaultRuntime) HandleStream(ctx context.Context, msg *A2AMessage, stream StreamWriter) error {
 	if msg.Params == nil || msg.Params.Message == nil {
 		return fmt.Errorf("message params required")
@@ -170,25 +232,52 @@ func (rt *DefaultRuntime) HandleStream(ctx context.Context, msg *A2AMessage, str
 		return fmt.Errorf("message contains no text content")
 	}
 
-	// Send status event
-	statusData, _ := json.Marshal(map[string]string{"state": "running"})
-	if err := stream.WriteEvent(ctx, &StreamEvent{Type: "status", Data: statusData}); err != nil {
+	// rt.streamHandler is wired by cmd/agent-runtime/main.go (or kit
+	// sidecar main.go) to a streampipeline-backed handler. When unset
+	// (e.g., minimal test fixtures), fall back to a degraded sync path
+	// that emits one artifact event with the full LLM answer.
+	if rt.streamHandler != nil {
+		return rt.streamHandler(ctx, rt, msg, stream)
+	}
+
+	return rt.handleStreamFallback(ctx, userText, stream)
+}
+
+// handleStreamFallback is the degraded sync path used when no streamHandler
+// is wired. Mirrors the pre-OGA-303 3-event behavior so unit tests of the
+// runtime that don't construct a full streampipeline still work.
+func (rt *DefaultRuntime) handleStreamFallback(ctx context.Context, userText string, stream StreamWriter) error {
+	// Working status
+	if err := stream.WriteEvent(ctx, &StreamEvent{
+		Type:    EventTypeStatus,
+		Payload: &StatusPayload{State: TaskStateWorking},
+	}); err != nil {
 		return err
 	}
 
-	// Reason and stream result
 	resp, err := rt.reason(ctx, userText)
 	if err != nil {
-		errData, _ := json.Marshal(map[string]string{"error": err.Error()})
-		_ = stream.WriteEvent(ctx, &StreamEvent{Type: "error", Data: errData})
+		_ = stream.WriteEvent(ctx, &StreamEvent{
+			Type: EventTypeStatus,
+			Payload: &StatusPayload{
+				State: TaskStateFailed,
+				Error: &StatusError{Code: -32000, Message: err.Error()},
+			},
+		})
 		return err
 	}
 
-	msgData, _ := json.Marshal(Message{
-		Role:  "agent",
-		Parts: []Part{{Text: resp}},
-	})
-	if err := stream.WriteEvent(ctx, &StreamEvent{Type: "message", Data: msgData}); err != nil {
+	if err := stream.WriteEvent(ctx, &StreamEvent{
+		Type:    EventTypeArtifact,
+		Payload: &ArtifactPayload{Parts: []ArtifactPart{{Text: resp}}},
+	}); err != nil {
+		return err
+	}
+
+	if err := stream.WriteEvent(ctx, &StreamEvent{
+		Type:    EventTypeStatus,
+		Payload: &StatusPayload{State: TaskStateCompleted},
+	}); err != nil {
 		return err
 	}
 
