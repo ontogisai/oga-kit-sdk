@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// resolveDependentArgs enriches the arguments of a dependent step with values
+// ResolveDependentArgs enriches the arguments of a dependent step with values
 // extracted from the prior step's result. This bridges the gap between the LLM
 // planner (which uses placeholders like "<from step 0>") and the MCP tool
 // handlers (which expect resolved values like a UUID entity_id).
@@ -18,7 +18,7 @@ import (
 //     extracted from the prior result.
 //  3. Auto-resolves entity_id / start_entity_id / source_id: when empty or
 //     placeholder, extracts from the prior result's "results" array.
-func resolveDependentArgs(args map[string]any, priorContent string) map[string]any {
+func ResolveDependentArgs(args map[string]any, priorContent string) map[string]any {
 	if args == nil {
 		args = make(map[string]any)
 	}

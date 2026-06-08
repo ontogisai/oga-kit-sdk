@@ -10,6 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ListenAndServe starts an HTTP server that serves the A2A protocol for any
@@ -129,30 +131,52 @@ func messageHandlerFunc(runtime AgentRuntime) http.HandlerFunc {
 	}
 }
 
+// httpStreamWriter serializes typed StreamEvents to SSE wire format. The
+// event-type SSE field carries the EventType string ("task/reasoning" etc.);
+// the data SSE field carries the entire JSON-marshalled StreamEvent envelope
+// so consumers (the platform's Frontier HTTPStreamingInvoker) can deserialize
+// directly into a typed *StreamEvent without lossy coercion.
 type httpStreamWriter struct {
 	w       http.ResponseWriter
 	flusher http.Flusher
 }
 
 func (s *httpStreamWriter) WriteEvent(_ context.Context, event *StreamEvent) error {
+	if event == nil {
+		return nil
+	}
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event.Type, data)
-	if err != nil {
+	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event.Type, data); err != nil {
 		return err
 	}
 	s.flusher.Flush()
 	return nil
 }
 
+// Close emits a final task/status{completed} event so consumers see a clean
+// terminal marker. Pipelines that emit their own terminal status before Close
+// will produce a duplicate completed status — that's harmless (consumers
+// process events idempotently by sequence number).
 func (s *httpStreamWriter) Close() error {
-	_, err := fmt.Fprintf(s.w, "event: done\ndata: {}\n\n")
-	if err == nil {
-		s.flusher.Flush()
+	final := &StreamEvent{
+		TaskID:    uuid.New().String(),
+		Sequence:  -1, // sentinel for terminal close (consumers should ignore if they tracked their own seq)
+		Timestamp: time.Now().UTC(),
+		Type:      EventTypeStatus,
+		Payload:   &StatusPayload{State: TaskStateCompleted},
 	}
-	return err
+	data, err := json.Marshal(final)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", final.Type, data); err != nil {
+		return err
+	}
+	s.flusher.Flush()
+	return nil
 }
 
 func writeJSONRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
