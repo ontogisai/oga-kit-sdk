@@ -37,6 +37,7 @@ const (
 	ToolKGGeoTemporal        = "kg_geotemporal"
 	ToolKGVector             = "kg_vector"
 	ToolKGReason             = "kg_reason"
+	ToolKGAggregate          = "kg_aggregate"
 
 	// Timeseries (kg_timeseries category)
 	ToolKGTSRead    = "kg_ts_read"
@@ -175,7 +176,32 @@ When the user asks about entities, properties, or relationships in the knowledge
 - Use kg_search for natural language queries (hybrid: vector + full-text + graph)
 - Use kg_query_entities for structured property filters
 - Use kg_traverse for relationship traversal from a known entity (ALWAYS requires start_entity_id from a prior step — set depends_on to that step's index)
+- Use kg_reason for HIGHER-ORDER graph analysis — impact tracing, root-cause analysis, path finding, pattern matching, temporal correlation. See "kg_reason vs kg_traverse" below.
 - Use kg_search_entity_types to discover what types exist
+
+## kg_reason vs kg_traverse — when to pick which
+Both walk the graph; they differ in INTENT.
+- kg_traverse: "show me what's connected to X" — flat list of neighbors.
+- kg_reason: "explain WHY" or "ANALYZE the relationship" — scored, ranked, mode-specific output.
+
+Pick kg_reason when the user asks:
+- "what would be affected if X fails?"           → mode=impact_chain
+- "what is causing this alarm/symptom on X?"    → mode=root_cause
+- "how is A connected to B?"                    → mode=path_find
+- "find Xs that have a Y connected via Z"        → mode=pattern_match
+- "find pairs of events that happened together within T" → mode=temporal_correlation
+
+## kg_reason — required arguments by mode
+ALL modes require:
+- mode (one of: impact_chain, root_cause, path_find, pattern_match, temporal_correlation)
+- stop_conditions (object — at minimum {"max_depth": 5} is fine; platform clamps to maximums)
+
+Per-mode required arguments:
+- impact_chain: start_entity_id (UUID from a prior step). Optional: impact_relationship_types, impact_entity_types, impact_severity_property.
+- root_cause: start_entity_id. Optional: cause_relationship_types.
+- path_find: start_entity_id AND end_entity_id. Optional: path_strategy ("shortest"|"all"|"weighted"), avoid_entity_types, required_via.
+- pattern_match: pattern (object with nodes[] and edges[]). The first node is the anchor; its entity_type must be specified.
+- temporal_correlation: correlation_events (≥2 entries with entity_type+event_type) AND correlation_window (duration like "10m", "2h"). Optional: correlation_spatial_scope ("same_h3_cell"|"any"), min_correlation_score.
 
 ## Search Strategies for Natural Language Queries
 When the user describes an entity in natural language (e.g., "the X in location L is broken"):
@@ -218,6 +244,18 @@ Query: "Give me a summary of all entity types"
 
 Query: "What does entity E contain?"
 {"steps":[{"tool_name":"kg_search","arguments":{"query":"entity E"},"depends_on":-1,"rationale":"Find entity E"},{"tool_name":"kg_traverse","arguments":{"start_entity_id":"<from step 0>","relationship_type":"hasPart","direction":"outgoing","max_depth":1},"depends_on":0,"rationale":"Traverse from E along hasPart edges"}]}
+
+Query: "What would be affected if asset X-1 fails?"
+{"steps":[{"tool_name":"kg_search","arguments":{"query":"asset X-1"},"depends_on":-1,"rationale":"Locate asset X-1"},{"tool_name":"kg_reason","arguments":{"mode":"impact_chain","start_entity_id":"<from step 0>","stop_conditions":{"max_depth":4,"max_results":50}},"depends_on":0,"rationale":"Trace downstream impact from X-1"}]}
+
+Query: "What is causing the alarm on sensor S-42?"
+{"steps":[{"tool_name":"kg_search","arguments":{"query":"sensor S-42"},"depends_on":-1,"rationale":"Locate sensor S-42"},{"tool_name":"kg_reason","arguments":{"mode":"root_cause","start_entity_id":"<from step 0>","stop_conditions":{"max_depth":5,"max_results":20}},"depends_on":0,"rationale":"Walk upstream causal chain"}]}
+
+Query: "How is asset A connected to asset B?"
+{"steps":[{"tool_name":"kg_search","arguments":{"query":"asset A","entity_types":["Asset"]},"depends_on":-1,"rationale":"Find asset A"},{"tool_name":"kg_search","arguments":{"query":"asset B","entity_types":["Asset"]},"depends_on":-1,"rationale":"Find asset B"},{"tool_name":"kg_reason","arguments":{"mode":"path_find","start_entity_id":"<from step 0>","end_entity_id":"<from step 1>","path_strategy":"shortest","stop_conditions":{"max_depth":6}},"depends_on":1,"rationale":"Find shortest path between A and B"}]}
+
+Query: "Find access events that occurred within 10 minutes of an equipment fault in the same zone"
+{"steps":[{"tool_name":"kg_reason","arguments":{"mode":"temporal_correlation","correlation_events":[{"entity_type":"Event","event_type":"equipment_fault"},{"entity_type":"Event","event_type":"access_event"}],"correlation_window":"10m","correlation_spatial_scope":"same_h3_cell","stop_conditions":{"max_results":50}},"depends_on":-1,"rationale":"Cross-domain temporal correlation between equipment and access events"}]}
 
 ## Contextual References (CRITICAL)
 When the user's message references something from prior conversation context using
