@@ -471,6 +471,10 @@ func (e *eventEmitter) emitToolCall(spanID, parentSpan string, step ToolPlanStep
 		ID:          "mcp:" + step.ToolName,
 		DisplayName: step.ToolName,
 	}
+	// Strip _prior_result from the operator-facing chip args. Today the
+	// executor clones step.Arguments before injecting _prior_result so this
+	// is a no-op pre-resolution, but stripping defensively means the chip
+	// stays clean even if a future change reorders emit/resolve.
 	e.emit(&agent.StreamEvent{
 		SpanID:       spanID,
 		ParentSpanID: parentSpan,
@@ -479,7 +483,7 @@ func (e *eventEmitter) emitToolCall(spanID, parentSpan string, step ToolPlanStep
 		Type:         agent.EventTypeToolCall,
 		Payload: &agent.ToolCallPayload{
 			ToolName:  step.ToolName,
-			Arguments: step.Arguments,
+			Arguments: stripPriorResult(step.Arguments),
 			StepIndex: idx,
 		},
 	})
@@ -499,7 +503,7 @@ func (e *eventEmitter) emitToolCallSkipped(spanID, parentSpan string, step ToolP
 		Type:         agent.EventTypeToolCall,
 		Payload: &agent.ToolCallPayload{
 			ToolName:   step.ToolName,
-			Arguments:  step.Arguments,
+			Arguments:  stripPriorResult(step.Arguments),
 			StepIndex:  idx,
 			Skipped:    true,
 			SkipReason: reason,
