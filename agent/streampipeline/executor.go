@@ -33,10 +33,17 @@ func executeStep(
 	res := ToolStepResult{StepIndex: stepIndex, ToolName: step.ToolName}
 
 	// Resolve placeholder arguments from prior step results.
-	args := step.Arguments
-	if args == nil {
-		args = make(map[string]any)
-	}
+	//
+	// Clone step.Arguments before resolution so ResolveDependentArgs (which
+	// mutates the map by injecting "_prior_result" and resolving placeholder
+	// IDs in place) doesn't leak through to either:
+	//   1. The task/tool_call event payload — it holds a reference to
+	//      step.Arguments for the chip display, and JSON marshaling at the
+	//      consumer side happens after this function runs. Without a clone,
+	//      the chip ends up showing post-mutation state.
+	//   2. Subsequent re-runs of the same plan — the mutation persists in
+	//      the shared map across runs.
+	args := cloneArgs(step.Arguments)
 	if step.DependsOn >= 0 && step.DependsOn < len(priorResults) {
 		prior := priorResults[step.DependsOn]
 		if prior.Success && prior.Content != "" {
@@ -79,6 +86,51 @@ func executeStep(
 	}
 
 	return res
+}
+
+// cloneArgs returns a shallow copy of args. Used by executeStep to avoid
+// mutating the original step.Arguments — important because the tool_call
+// event emitted before execute holds a reference to that same map and
+// JSON-marshals it later at the consumer side. Without the clone, the chip
+// would render post-mutation state (including the bulky _prior_result
+// injection) rather than the LLM-planned arguments.
+//
+// Shallow because nested values are not mutated by ResolveDependentArgs —
+// only top-level scalar keys (entity_id, start_entity_id, …) get rewritten,
+// and a new top-level _prior_result key is added.
+func cloneArgs(args map[string]any) map[string]any {
+	if args == nil {
+		return make(map[string]any)
+	}
+	out := make(map[string]any, len(args)+1) // +1 for _prior_result if added
+	for k, v := range args {
+		out[k] = v
+	}
+	return out
+}
+
+// stripPriorResult returns a shallow copy of args with the _prior_result key
+// removed. Used at chip emission sites so the operator UI displays only the
+// LLM-planned arguments (mode, start_entity_id, stop_conditions, …) and not
+// the bulky internal injection that ResolveDependentArgs adds for handlers.
+//
+// The injection still flows to the gateway via executeStep — handlers that
+// re-parse it for fallback ID resolution keep working.
+func stripPriorResult(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	if _, has := args["_prior_result"]; !has {
+		return args
+	}
+	out := make(map[string]any, len(args)-1)
+	for k, v := range args {
+		if k == "_prior_result" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // truncateJSONArray caps a JSON `{"results": [...]}` shape at maxResults

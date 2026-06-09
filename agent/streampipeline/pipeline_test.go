@@ -342,3 +342,110 @@ func sequenceMatches(got, want []agent.EventType) bool {
 	}
 	return true
 }
+
+// TestPipeline_DependentStep_ChipExcludesPriorResult is the OGA-314 regression
+// guard. When a step has DependsOn >= 0, the executor injects _prior_result
+// into the args map for handlers that re-parse it. The chip emission MUST NOT
+// expose this internal injection — it bloats the operator UI and Go's
+// alphabetical map-key sort makes it the first visible argument, hiding the
+// LLM-planned arguments behind the chip's truncation.
+//
+// Two invariants checked:
+//  1. The emitted task/tool_call payload's Arguments map does NOT contain
+//     "_prior_result" for either step.
+//  2. The dependent step's gateway call (params received by CallTool) DOES
+//     contain "_prior_result" so handlers that fall back to parsing it
+//     (e.g. relationship handler's extractEntityIDFromPriorResult) keep working.
+func TestPipeline_DependentStep_ChipExcludesPriorResult(t *testing.T) {
+	gw := &fakeGateway{
+		tools: map[string]json.RawMessage{
+			"kg_search": json.RawMessage(`{"results":[{"entity_id":"019e38e3-69b7-7d81-8e09-f28b947b98a6","entity_type":"brick_Chiller"}]}`),
+			"kg_reason": json.RawMessage(`{"results":[],"total_count":0}`),
+		},
+		streamChunks: []string{"Done."},
+	}
+	planner := &fakePlanner{
+		plan: &ToolPlan{Steps: []ToolPlanStep{
+			{Name: "search", ToolName: "kg_search", DependsOn: -1, Arguments: map[string]any{"query": "chiller"}},
+			{Name: "reason", ToolName: "kg_reason", DependsOn: 0, Arguments: map[string]any{
+				"mode":            "root_cause",
+				"start_entity_id": "<from step 0>",
+				"stop_conditions": map[string]any{"max_depth": 5},
+			}},
+		}},
+		narrative: &PlanNarrative{Text: "Planning..."},
+	}
+
+	events := runPipelineForTest(t, gw, planner, Input{Query: "what caused the chiller fault?"})
+
+	// Invariant 1: no emitted tool_call carries _prior_result.
+	for _, evt := range events {
+		if evt.Type != agent.EventTypeToolCall {
+			continue
+		}
+		p, ok := evt.Payload.(*agent.ToolCallPayload)
+		if !ok {
+			continue
+		}
+		if _, has := p.Arguments["_prior_result"]; has {
+			t.Errorf("tool_call event for %q exposes _prior_result in Arguments — operator chip should not see internal injection", p.ToolName)
+		}
+	}
+
+	// Invariant 2: the dependent step's gateway call received _prior_result.
+	if len(gw.callToolCalls) < 2 {
+		t.Fatalf("expected 2 gateway calls (kg_search + kg_reason), got %d", len(gw.callToolCalls))
+	}
+	reasonCall := gw.callToolCalls[1]
+	if reasonCall.Tool != "kg_reason" {
+		t.Fatalf("expected second call to kg_reason, got %s", reasonCall.Tool)
+	}
+	params, ok := reasonCall.Params.(map[string]any)
+	if !ok {
+		t.Fatalf("expected kg_reason params to be map[string]any, got %T", reasonCall.Params)
+	}
+	if _, has := params["_prior_result"]; !has {
+		t.Error("gateway-bound kg_reason args missing _prior_result — handlers that re-parse it for fallback ID resolution will break")
+	}
+	if params["mode"] != "root_cause" {
+		t.Errorf("kg_reason params.mode = %v, want root_cause", params["mode"])
+	}
+	// start_entity_id should be resolved from the upstream entity_id.
+	if got := params["start_entity_id"]; got != "019e38e3-69b7-7d81-8e09-f28b947b98a6" {
+		t.Errorf("kg_reason params.start_entity_id = %v, want resolved UUID", got)
+	}
+}
+
+// TestPipeline_ExecutorDoesNotMutatePlanArguments verifies that running the
+// pipeline does not retain the _prior_result mutation on the original plan's
+// step.Arguments map. Without the cloneArgs() guard in executeStep, re-runs
+// of the same plan would carry forward the previous run's _prior_result.
+func TestPipeline_ExecutorDoesNotMutatePlanArguments(t *testing.T) {
+	gw := &fakeGateway{
+		tools: map[string]json.RawMessage{
+			"kg_search": json.RawMessage(`{"results":[{"entity_id":"e1"}]}`),
+			"kg_reason": json.RawMessage(`{"results":[]}`),
+		},
+		streamChunks: []string{"ok"},
+	}
+	originalArgs := map[string]any{
+		"mode":            "impact_chain",
+		"start_entity_id": "<from step 0>",
+	}
+	planner := &fakePlanner{
+		plan: &ToolPlan{Steps: []ToolPlanStep{
+			{Name: "search", ToolName: "kg_search", DependsOn: -1},
+			{Name: "reason", ToolName: "kg_reason", DependsOn: 0, Arguments: originalArgs},
+		}},
+		narrative: &PlanNarrative{Text: "Planning..."},
+	}
+
+	_ = runPipelineForTest(t, gw, planner, Input{Query: "q"})
+
+	if _, has := originalArgs["_prior_result"]; has {
+		t.Error("executor mutated the plan's step.Arguments map — _prior_result leaked into the original. Re-runs of the same plan will carry stale upstream data.")
+	}
+	if got := originalArgs["start_entity_id"]; got != "<from step 0>" {
+		t.Errorf("executor mutated start_entity_id placeholder in original args (now %v) — clone was not effective", got)
+	}
+}
