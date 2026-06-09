@@ -394,7 +394,7 @@ func plainAnswer(
 	userText string,
 	cfg PlannerConfig,
 ) (string, []ToolStepResult, error) {
-	systemPrompt := "You are a helpful domain agent."
+	systemPrompt := DefaultPlainAnswerSystemPrompt
 	if profile != nil && profile.ProactiveReasoning != nil && profile.ProactiveReasoning.SystemPrompt != "" {
 		systemPrompt = profile.ProactiveReasoning.SystemPrompt
 	}
@@ -419,6 +419,15 @@ func plainAnswer(
 
 // PlanningSystemPrompt builds the system prompt instructing the LLM to
 // produce a JSON tool-call plan.
+//
+// The prompt has three layers:
+//   - Layer 1 (top): kit-author domain prompt from
+//     profile.ProactiveReasoning.SystemPrompt — vertical guidance, output
+//     formats for proactive reasoning, equipment-type mappings, etc.
+//   - Layer 2: the shared PlannerPromptTemplate (see constants.go) — same
+//     RULES + TOOL USAGE PATTERNS + EXAMPLES the platform Knowledge Agent
+//     uses, so kit agents and the KA produce consistent plans.
+//   - Layer 3: dynamic data (current time, available tools).
 func PlanningSystemPrompt(profile *DomainAgentProfile, tools []string) string {
 	currentTime := time.Now().UTC().Format(time.RFC3339)
 
@@ -432,48 +441,24 @@ func PlanningSystemPrompt(profile *DomainAgentProfile, tools []string) string {
 		fmt.Fprintf(&toolList, "  - %s\n", t)
 	}
 
-	return fmt.Sprintf(`%sYou are a tool planning engine for a domain agent on the ONTOGIS AI Platform.
-Your job is to analyze the user's question and produce an execution plan using the
-MCP tools available to you. The platform will execute your plan and feed the
-results back so you can produce the final answer.
-
-Current date and time: %s
-
-AVAILABLE TOOLS:
-%s
-RULES:
-1. Return ONLY valid JSON — no markdown, no explanation, no code fences.
-2. Select 0-5 tools that best answer the question.
-3. If the question can be answered without tools (greeting, meta-question, opinion), return {"steps":[]}.
-4. Order steps so dependent queries come after their prerequisites.
-5. Use "depends_on" (0-based index) when a step needs output from a prior step. Use -1 for no dependency.
-6. Only use tools from the AVAILABLE TOOLS list above.
-7. Include a brief "rationale" for each step.
-8. Arguments should match the tool's expected input schema.
-9. When computing time ranges (e.g., "past 7 days"), use the Current date and time as reference.
-
-OUTPUT FORMAT:
-{"steps":[{"tool_name":"<name>","arguments":{...},"depends_on":-1,"rationale":"<why>"}]}
-`, domainPrompt, currentTime, toolList.String())
+	return fmt.Sprintf(
+		PlannerPromptTemplate,
+		domainPrompt,
+		currentTime,
+		toolList.String(),
+		currentTime[:4], // current year (rule 9)
+		currentTime,     // example RFC3339 (rule 10)
+	)
 }
 
 // AssemblySystemPrompt builds the prompt that synthesizes the final answer.
+// Like PlanningSystemPrompt, the kit-author domain prompt (from
+// profile.ProactiveReasoning.SystemPrompt) is composed at the top, followed
+// by the shared AssemblyPromptTemplate (see constants.go).
 func AssemblySystemPrompt(profile *DomainAgentProfile) string {
 	var domainPrompt string
 	if profile != nil && profile.ProactiveReasoning != nil && profile.ProactiveReasoning.SystemPrompt != "" {
 		domainPrompt = profile.ProactiveReasoning.SystemPrompt + "\n\n"
 	}
-
-	return domainPrompt + `You are a domain agent on the ONTOGIS AI Platform. The platform has executed
-the tool calls you planned and returned the results below. Your job is to:
-
-1. Read the tool results and combine them into a coherent answer to the user's question.
-2. Cite specific entities, documents, or measurements from the results when relevant —
-   reference them by their IDs, names, or titles so the user can verify.
-3. If a tool returned an error, acknowledge it gracefully and answer with what you have.
-4. If the results are empty or insufficient, say so clearly rather than fabricating.
-5. Match the tone and verbosity expected for this domain (concise, professional).
-
-Do NOT mention the tools by name in the prose — just present the information.
-Do NOT add disclaimers about being an AI or unable to access systems — you have just queried them.`
+	return fmt.Sprintf(AssemblyPromptTemplate, domainPrompt)
 }
