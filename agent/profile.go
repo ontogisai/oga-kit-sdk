@@ -43,7 +43,8 @@ type DomainAgentProfile struct {
 	// PBACBoundary defines access control limits.
 	PBACBoundary *PBACBoundary `yaml:"pbac_boundary,omitempty"`
 
-	// EventSubscriptions lists event topics this agent subscribes to.
+	// EventSubscriptions lists the ontology entity types whose mutations wake
+	// this agent (matched against ingestion.resolved.{tenant}.{entity_type}).
 	EventSubscriptions []EventSubscription `yaml:"event_subscriptions,omitempty"`
 }
 
@@ -77,7 +78,7 @@ type ProactiveConfig struct {
 	Actions []ActionDef `yaml:"actions,omitempty"`
 
 	// Routing is the primary delivery target for proposals this agent submits.
-	// REQUIRED when Actions is non-empty (validated at load → OGA-DKIT-VAL-1040)
+	// REQUIRED when Actions is non-empty (validated at load → OGA-DKIT-VAL-1041)
 	// so a misconfigured kit fails at install rather than at runtime. The
 	// proactive handler packs it into ActionProposal.Routing for every proposal.
 	Routing *RoutingDef `yaml:"routing,omitempty"`
@@ -138,10 +139,21 @@ type PBACBoundary struct {
 	DeniedOperations   []string `yaml:"denied_operations,omitempty"`
 }
 
-// EventSubscription defines an event topic subscription.
+// EventSubscription declares an ontology entity type whose mutations wake this
+// agent. The Event Router matches proactive agents against
+// ingestion.resolved.{tenant}.{entity_type} events by exact EntityType; the
+// optional On filter restricts to specific mutations. EntityType is validated
+// against the tenant's active ontology at kit-install time
+// (OGA-DKIT-VAL-1040). Replaces the legacy {topic, action} form (OGA-317 C4).
 type EventSubscription struct {
-	Topic  string `yaml:"topic"`
-	Action string `yaml:"action"`
+	// EntityType is the ontology entity type whose mutations wake the agent
+	// (e.g., "EntityAnomalyEvent", "brick_Equipment"). Case-sensitive; must
+	// exist in the active ontology.
+	EntityType string `yaml:"entity_type"`
+
+	// On optionally restricts the subscription to specific mutations — any of
+	// "created", "updated", "deleted". Empty means all mutations.
+	On []string `yaml:"on,omitempty"`
 }
 
 // LoadDomainAgentProfile reads and parses an agent profile from a YAML file.
