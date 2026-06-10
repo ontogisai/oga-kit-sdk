@@ -93,6 +93,7 @@ func TestWriter_PresignedPathAboveLimit(t *testing.T) {
 	last := fc.LastComplete()
 	if last == nil {
 		t.Fatal("LastComplete is nil")
+		return
 	}
 	if last.UploadToken == "" {
 		t.Error("Complete.UploadToken was empty on presigned path")
@@ -284,6 +285,7 @@ func TestWriter_CompleteRequestCarriesKindAndKitID(t *testing.T) {
 	last := fc.LastComplete()
 	if last == nil {
 		t.Fatal("LastComplete is nil")
+		return
 	}
 	if last.Kind != transfer.KindOntology {
 		t.Errorf("Complete.Kind = %q, want ontology", last.Kind)

@@ -19,8 +19,10 @@ const (
 	ErrCodeActionRelSource        = "OGA-DKIT-VAL-1037" // relationships[].source bad prefix
 	ErrCodeActionRelDirection     = "OGA-DKIT-VAL-1038" // relationships[].direction invalid
 	ErrCodeActionAutoApprove      = "OGA-DKIT-VAL-1039" // auto_approve_timeout unparseable
-	ErrCodeActionRoutingRequired  = "OGA-DKIT-VAL-1040" // proactive_reasoning.routing required when actions declared
-	ErrCodeActionEscalationDur    = "OGA-DKIT-VAL-1041" // escalation_policy duration unparseable
+	// 1040 is reserved (platform) for the event_subscriptions ontology
+	// validation added in C4 — do NOT reuse it here.
+	ErrCodeActionRoutingRequired = "OGA-DKIT-VAL-1041" // proactive_reasoning.routing required when actions declared
+	ErrCodeActionEscalationDur   = "OGA-DKIT-VAL-1042" // routing/escalation duration unparseable
 )
 
 // ActionValidationError is the structured error returned when an action
