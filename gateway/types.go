@@ -247,7 +247,60 @@ type ApprovalResolvedEvent struct {
 	// OutcomeEntityID is the KG vertex created by execution (when applicable).
 	OutcomeEntityID string `json:"outcome_entity_id,omitempty"`
 
+	// ChainDecisions records every level's decision in chain order. For
+	// single-level approvals this has exactly one entry (synthesized from the
+	// resolution metadata). Multi-level chains populate the full audit trail
+	// of who decided what at which level. Consumers (BFF, audit) read it for
+	// the per-level decision history.
+	ChainDecisions []LevelDecision `json:"chain_decisions,omitempty"`
+
+	// EscalationPath records the supervisor or escalation chain when the
+	// resolution crossed an escalation timeout (Status=escalated). Empty
+	// otherwise.
+	EscalationPath []string `json:"escalation_path,omitempty"`
+
+	// SupersededBy identifies the convergence agent that took over the
+	// proposal. Populated only when Status=superseded.
+	SupersededBy string `json:"superseded_by,omitempty"`
+
+	// SupersedingIncidentID is the unified safety incident that now owns the
+	// proposal. Populated only when Status=superseded.
+	SupersedingIncidentID string `json:"superseding_incident_id,omitempty"`
+
 	CompletedAt time.Time `json:"completed_at"`
+}
+
+// LevelDecision is one level's decision record within
+// ApprovalResolvedEvent.ChainDecisions. Single-level approvals carry exactly
+// one entry; multi-level chains carry one per level in chain order.
+type LevelDecision struct {
+	// Level is the 1-based level index in the approval chain.
+	Level int `json:"level"`
+
+	// Decision is the operator's decision at this level: "approved",
+	// "rejected", "acknowledged", "dismissed", "expired" (timeout at this
+	// level), or "auto_approved" (trust + risk auto-approval).
+	Decision string `json:"decision"`
+
+	// DecidedBy is the operator id who decided. Empty for "auto_approved"
+	// (the workflow itself) and "expired" (no decision was made).
+	DecidedBy string `json:"decided_by,omitempty"`
+
+	// DecidedAt is the wall-clock time of the decision.
+	DecidedAt time.Time `json:"decided_at,omitempty"`
+
+	// SourceChannel records which channel the operator used to decide
+	// ("web", "telegram", "auto" for timer-driven, ...).
+	SourceChannel string `json:"source_channel,omitempty"`
+
+	// Reason carries any rejection / acknowledgement rationale supplied by the
+	// operator at this level.
+	Reason string `json:"reason,omitempty"`
+
+	// Modifications carries operator-supplied modifications. Reserved for the
+	// multi-level roadmap; single-level resolutions leave it nil (the Modify
+	// action was dropped per design principle 7).
+	Modifications map[string]any `json:"modifications,omitempty"`
 }
 
 // SubmitActionInput is the high-level kit-facing input to SubmitAction. It
