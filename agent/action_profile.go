@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"time"
+
+	"github.com/ontogisai/oga-kit-sdk/gateway"
+)
 
 // This file defines the kit-facing action-schema structs that hang off
 // ProactiveConfig.Actions, plus the profile helper methods the proactive
@@ -164,4 +168,64 @@ func (p *DomainAgentProfile) CandidateActions(event *ProactiveEvent) []ActionDef
 		}
 	}
 	return out
+}
+
+// RoutingDef is the kit-facing YAML form of a routing target. It mirrors
+// gateway.ActionRouting one-for-one but carries yaml tags (gateway.ActionRouting
+// has json tags only). The proactive handler converts it to gateway.ActionRouting
+// at submit time via ToActionRouting. At least one of TargetUserID / TargetRoles
+// / TargetGroups must be set.
+type RoutingDef struct {
+	// TargetUserID addresses a specific user by id. When set, the role and
+	// group targets are ignored by the notification-router.
+	TargetUserID string `yaml:"target_user_id,omitempty"`
+
+	// TargetRoles lists platform roles whose members receive the notification
+	// (e.g. ["fm_operator"]). The most common form for kit-declared routing.
+	TargetRoles []string `yaml:"target_roles,omitempty"`
+
+	// TargetGroups lists operator groups (e.g. ["fm-managers-night-shift"]).
+	TargetGroups []string `yaml:"target_groups,omitempty"`
+
+	// Channels constrains delivery channels: empty honors each recipient's
+	// preferences; ["all"] broadcasts; an explicit list forces those channels.
+	Channels []string `yaml:"channels,omitempty"`
+}
+
+// HasTarget reports whether at least one recipient target is populated.
+func (r *RoutingDef) HasTarget() bool {
+	if r == nil {
+		return false
+	}
+	return r.TargetUserID != "" || len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
+}
+
+// ToActionRouting converts the YAML routing form to the canonical gateway type.
+func (r *RoutingDef) ToActionRouting() gateway.ActionRouting {
+	if r == nil {
+		return gateway.ActionRouting{}
+	}
+	return gateway.ActionRouting{
+		TargetUserID: r.TargetUserID,
+		TargetRoles:  r.TargetRoles,
+		TargetGroups: r.TargetGroups,
+		Channels:     r.Channels,
+	}
+}
+
+// EscalationPolicyDef declares how a proposal escalates when no operator decides
+// within Timeout. All fields are optional; an empty policy means "no escalation
+// routing, rely on platform defaults".
+type EscalationPolicyDef struct {
+	// Timeout is the Go-duration string after which an undecided proposal
+	// escalates (e.g. "30m"). Parsed + validated at load (OGA-DKIT-VAL-1041).
+	Timeout string `yaml:"timeout,omitempty"`
+
+	// NotificationHoldWindow delays operator notification by this duration so a
+	// convergence agent can supersede the proposal first (e.g. "5s"). Parsed +
+	// validated at load (OGA-DKIT-VAL-1041).
+	NotificationHoldWindow string `yaml:"notification_hold_window,omitempty"`
+
+	// Routing is the escalation recipient — same shape as the primary routing.
+	Routing RoutingDef `yaml:"routing,omitempty"`
 }

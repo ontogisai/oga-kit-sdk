@@ -75,6 +75,18 @@ type ProactiveConfig struct {
 	// as a discriminated decision schema, never a rule-based gate. See
 	// proactive-action-handling design "Action Schema". (OGA-317)
 	Actions []ActionDef `yaml:"actions,omitempty"`
+
+	// Routing is the primary delivery target for proposals this agent submits.
+	// REQUIRED when Actions is non-empty (validated at load → OGA-DKIT-VAL-1040)
+	// so a misconfigured kit fails at install rather than at runtime. The
+	// proactive handler packs it into ActionProposal.Routing for every proposal.
+	Routing *RoutingDef `yaml:"routing,omitempty"`
+
+	// EscalationPolicy declares where a proposal escalates when no operator
+	// responds within Timeout, plus the notification hold window. Optional —
+	// when absent, proposals carry no escalation routing and rely on platform
+	// defaults. (OGA-317)
+	EscalationPolicy *EscalationPolicyDef `yaml:"escalation_policy,omitempty"`
 }
 
 // GroundingStep is one step in a kit-declared grounding strategy. Each step

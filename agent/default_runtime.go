@@ -213,12 +213,14 @@ func (rt *DefaultRuntime) HandleMessage(ctx context.Context, msg *A2AMessage) (*
 	if readIntent(msg.Params.Message.Metadata) == IntentProactiveEvent {
 		return rt.handleProactiveFallback(ctx, msg)
 	}
-	return rt.handleReactive(ctx, msg)
+	return rt.HandleReactive(ctx, msg)
 }
 
-// handleReactive is the default synchronous path: LLM reasoning over the user's
-// message text via the Platform Gateway.
-func (rt *DefaultRuntime) handleReactive(ctx context.Context, msg *A2AMessage) (*A2AResponse, error) {
+// HandleReactive is the default synchronous path: LLM reasoning over the user's
+// message text via the Platform Gateway. Exported so the streampipeline
+// proactive handler (wired via WithMessageHandler) can delegate non-proactive
+// messages back to the reactive path without duplicating it.
+func (rt *DefaultRuntime) HandleReactive(ctx context.Context, msg *A2AMessage) (*A2AResponse, error) {
 	userText := ExtractText(msg.Params.Message.Parts)
 	if userText == "" {
 		return nil, fmt.Errorf("message contains no text content")
