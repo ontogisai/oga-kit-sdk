@@ -361,11 +361,10 @@ func (p *Pipeline) streamAssembly(
 	return nil
 }
 
-// RunSync drives the same pipeline but drains all events to a buffer and
-// returns the assembled artifact text + consolidated citations. Used by the
-// non-streaming message/send path so both sync and streaming flows share one
-// implementation.
-func (p *Pipeline) RunSync(
+// runArtifact drives the pipeline but drains all events to a buffer and
+// returns the assembled artifact text + consolidated citations. It backs the
+// typed RunSync[T] (see runsync.go) and any non-streaming message/send path.
+func (p *Pipeline) runArtifact(
 	ctx context.Context,
 	deps Deps,
 	input Input,

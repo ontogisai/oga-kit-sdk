@@ -99,6 +99,11 @@ type Message struct {
 
 	// Parts are the message content parts.
 	Parts []Part `json:"parts"`
+
+	// Metadata carries A2A message metadata. The proactive dispatch reads
+	// metadata["intent"] (== "proactive_event") to route the message to the
+	// proactive handler. Event Router populates this for proactive events.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // Part is a content part within a message.

@@ -4,12 +4,13 @@ go 1.26
 
 require (
 	github.com/fsnotify/fsnotify v1.8.0
+	github.com/google/uuid v1.6.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	golang.org/x/text v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	golang.org/x/sys v0.29.0 // indirect
