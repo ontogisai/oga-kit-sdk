@@ -67,6 +67,14 @@ type ProactiveConfig struct {
 	// (deterministic, no LLM planning call). When empty, falls back to
 	// LLMToolPlanner (dynamic per-request planning). See OGA-303.
 	GroundingStrategy []GroundingStep `yaml:"grounding_strategy,omitempty"`
+
+	// Actions is the declarative catalog of proactive actions this agent may
+	// propose. Each action is the contract between the reasoning LLM and the
+	// platform's execution + persistence layer. The reasoning LLM selects one
+	// action from the candidate catalog (or declines) — the catalog is offered
+	// as a discriminated decision schema, never a rule-based gate. See
+	// proactive-action-handling design "Action Schema". (OGA-317)
+	Actions []ActionDef `yaml:"actions,omitempty"`
 }
 
 // GroundingStep is one step in a kit-declared grounding strategy. Each step
@@ -141,6 +149,10 @@ func LoadDomainAgentProfile(path string) (*DomainAgentProfile, error) {
 	}
 	if profile.Port == "" {
 		profile.Port = "8200"
+	}
+
+	if err := validateActions(&profile); err != nil {
+		return nil, fmt.Errorf("agent profile %s: %w", path, err)
 	}
 
 	return &profile, nil

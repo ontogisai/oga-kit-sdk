@@ -89,6 +89,14 @@ type DefaultRuntime struct {
 	// pipeline.
 	streamHandler StreamHandlerFunc
 
+	// messageHandler is the OGA-317 hook that overrides synchronous
+	// HandleMessage. Kit sidecars wire the proactive-capable handler in
+	// main.go via WithMessageHandler (the default proactive handler lives in
+	// the streampipeline package to avoid an agent→streampipeline import
+	// cycle). When nil, HandleMessage runs the built-in intent dispatch:
+	// proactive_event → degraded ack (no proposal); otherwise → reactive.
+	messageHandler MessageHandlerFunc
+
 	mu    sync.RWMutex
 	ready bool
 }
@@ -106,6 +114,19 @@ func WithPlannerConfig(cfg PlannerConfig) RuntimeOption {
 // falls back to a degraded 3-event path.
 func WithStreamHandler(handler StreamHandlerFunc) RuntimeOption {
 	return func(rt *DefaultRuntime) { rt.streamHandler = handler }
+}
+
+// MessageHandlerFunc is the pluggable synchronous A2A handler signature. Kits
+// override via WithMessageHandler when they need custom proactive or reactive
+// handling. When unset, DefaultRuntime.HandleMessage runs the built-in intent
+// dispatch.
+type MessageHandlerFunc func(ctx context.Context, rt *DefaultRuntime, msg *A2AMessage) (*A2AResponse, error)
+
+// WithMessageHandler overrides the default sync message handler. Production kit
+// sidecars wire the streampipeline-backed proactive handler here (the default
+// proactive handler lives in streampipeline to avoid an import cycle).
+func WithMessageHandler(h MessageHandlerFunc) RuntimeOption {
+	return func(rt *DefaultRuntime) { rt.messageHandler = h }
 }
 
 // NewDefaultRuntime creates a new DefaultRuntime with the given profile and deps.
@@ -182,6 +203,22 @@ func (rt *DefaultRuntime) HandleMessage(ctx context.Context, msg *A2AMessage) (*
 		return nil, fmt.Errorf("message params required")
 	}
 
+	// Kit override takes precedence (e.g., the streampipeline-backed proactive
+	// handler wired via WithMessageHandler).
+	if rt.messageHandler != nil {
+		return rt.messageHandler(ctx, rt, msg)
+	}
+
+	// Built-in intent dispatch.
+	if readIntent(msg.Params.Message.Metadata) == IntentProactiveEvent {
+		return rt.handleProactiveFallback(ctx, msg)
+	}
+	return rt.handleReactive(ctx, msg)
+}
+
+// handleReactive is the default synchronous path: LLM reasoning over the user's
+// message text via the Platform Gateway.
+func (rt *DefaultRuntime) handleReactive(ctx context.Context, msg *A2AMessage) (*A2AResponse, error) {
 	userText := ExtractText(msg.Params.Message.Parts)
 	if userText == "" {
 		return nil, fmt.Errorf("message contains no text content")
@@ -193,7 +230,6 @@ func (rt *DefaultRuntime) HandleMessage(ctx context.Context, msg *A2AMessage) (*
 		"text_length", len(userText),
 	)
 
-	// Use LLM via Platform Gateway for reasoning
 	resp, err := rt.reason(ctx, userText)
 	if err != nil {
 		return nil, fmt.Errorf("reasoning: %w", err)
@@ -205,6 +241,26 @@ func (rt *DefaultRuntime) HandleMessage(ctx context.Context, msg *A2AMessage) (*
 			Parts: []Part{{Text: resp}},
 		},
 	}, nil
+}
+
+// handleProactiveFallback is the degraded proactive path used when no
+// proactive-capable handler is wired via WithMessageHandler. The full default
+// proactive handler (parse → candidate actions → discriminated decision schema
+// → RunSync[ActionDecision] → SubmitAction) lives in the streampipeline package
+// because it needs the pipeline (an agent→streampipeline import would cycle).
+// Production kit sidecars wire it in main.go; without it, the runtime
+// acknowledges the event without submitting a proposal rather than erroring.
+func (rt *DefaultRuntime) handleProactiveFallback(ctx context.Context, msg *A2AMessage) (*A2AResponse, error) {
+	event, err := ParseProactiveEvent(msg)
+	if err != nil {
+		return nil, fmt.Errorf("parse proactive event: %w", err)
+	}
+	slog.WarnContext(ctx, "proactive event received but no proactive handler wired; acknowledging without proposal",
+		"agent_id", rt.profile.AgentID,
+		"event_type", event.EventType,
+		"entity_id", event.EntityID,
+	)
+	return AckNoProposal(event), nil
 }
 
 // HandleStream processes a streaming A2A message/stream request.
