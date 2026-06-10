@@ -190,6 +190,14 @@ type RoutingDef struct {
 	// Channels constrains delivery channels: empty honors each recipient's
 	// preferences; ["all"] broadcasts; an explicit list forces those channels.
 	Channels []string `yaml:"channels,omitempty"`
+
+	// NotificationHoldWindow delays delivery of the PRIMARY operator
+	// notification by this Go-duration string (e.g. "5s") so a convergence
+	// agent can correlate and supersede the proposal before the operator sees
+	// it. Empty / unset = "0" = no hold. Parsed + validated at load
+	// (OGA-DKIT-VAL-1041). Only meaningful on the primary proactive_reasoning.
+	// routing — ignored on escalation_policy.routing.
+	NotificationHoldWindow string `yaml:"notification_hold_window,omitempty"`
 }
 
 // HasTarget reports whether at least one recipient target is populated.
@@ -201,31 +209,38 @@ func (r *RoutingDef) HasTarget() bool {
 }
 
 // ToActionRouting converts the YAML routing form to the canonical gateway type.
+// NotificationHoldWindow is parsed best-effort (already validated at load); an
+// empty or unparseable value yields a zero hold (no delay).
 func (r *RoutingDef) ToActionRouting() gateway.ActionRouting {
 	if r == nil {
 		return gateway.ActionRouting{}
 	}
+	var hold time.Duration
+	if r.NotificationHoldWindow != "" {
+		if d, err := time.ParseDuration(r.NotificationHoldWindow); err == nil {
+			hold = d
+		}
+	}
 	return gateway.ActionRouting{
-		TargetUserID: r.TargetUserID,
-		TargetRoles:  r.TargetRoles,
-		TargetGroups: r.TargetGroups,
-		Channels:     r.Channels,
+		TargetUserID:           r.TargetUserID,
+		TargetRoles:            r.TargetRoles,
+		TargetGroups:           r.TargetGroups,
+		Channels:               r.Channels,
+		NotificationHoldWindow: hold,
 	}
 }
 
 // EscalationPolicyDef declares how a proposal escalates when no operator decides
 // within Timeout. All fields are optional; an empty policy means "no escalation
-// routing, rely on platform defaults".
+// routing, rely on platform defaults". The notification hold window is NOT here
+// — it is a primary-delivery concern and lives on proactive_reasoning.routing.
 type EscalationPolicyDef struct {
 	// Timeout is the Go-duration string after which an undecided proposal
 	// escalates (e.g. "30m"). Parsed + validated at load (OGA-DKIT-VAL-1041).
 	Timeout string `yaml:"timeout,omitempty"`
 
-	// NotificationHoldWindow delays operator notification by this duration so a
-	// convergence agent can supersede the proposal first (e.g. "5s"). Parsed +
-	// validated at load (OGA-DKIT-VAL-1041).
-	NotificationHoldWindow string `yaml:"notification_hold_window,omitempty"`
-
 	// Routing is the escalation recipient — same shape as the primary routing.
+	// Its NotificationHoldWindow (if set) is ignored: escalation has no
+	// supersession window.
 	Routing RoutingDef `yaml:"routing,omitempty"`
 }

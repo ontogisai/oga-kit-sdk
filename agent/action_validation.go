@@ -37,26 +37,23 @@ func validateActions(p *DomainAgentProfile) error {
 }
 
 // validateProactiveRouting enforces that a profile declaring actions also
-// declares a primary routing target, and that any escalation-policy durations
+// declares a primary routing target, and that any routing/escalation durations
 // parse. Called only when the profile has at least one action.
 func validateProactiveRouting(pr *ProactiveConfig) error {
 	if pr == nil || !pr.Routing.HasTarget() {
 		return newActionValidationError(ErrCodeActionRoutingRequired, "", "proactive_reasoning.routing",
 			"required (at least one of target_user_id/target_roles/target_groups) when actions are declared")
 	}
-	if pr.EscalationPolicy != nil {
-		ep := pr.EscalationPolicy
-		if ep.Timeout != "" {
-			if _, err := time.ParseDuration(ep.Timeout); err != nil {
-				return newActionValidationError(ErrCodeActionEscalationDur, "", "proactive_reasoning.escalation_policy.timeout",
-					fmt.Sprintf("not a valid Go duration: %v", err))
-			}
+	if pr.Routing.NotificationHoldWindow != "" {
+		if _, err := time.ParseDuration(pr.Routing.NotificationHoldWindow); err != nil {
+			return newActionValidationError(ErrCodeActionEscalationDur, "", "proactive_reasoning.routing.notification_hold_window",
+				fmt.Sprintf("not a valid Go duration: %v", err))
 		}
-		if ep.NotificationHoldWindow != "" {
-			if _, err := time.ParseDuration(ep.NotificationHoldWindow); err != nil {
-				return newActionValidationError(ErrCodeActionEscalationDur, "", "proactive_reasoning.escalation_policy.notification_hold_window",
-					fmt.Sprintf("not a valid Go duration: %v", err))
-			}
+	}
+	if pr.EscalationPolicy != nil && pr.EscalationPolicy.Timeout != "" {
+		if _, err := time.ParseDuration(pr.EscalationPolicy.Timeout); err != nil {
+			return newActionValidationError(ErrCodeActionEscalationDur, "", "proactive_reasoning.escalation_policy.timeout",
+				fmt.Sprintf("not a valid Go duration: %v", err))
 		}
 	}
 	return nil

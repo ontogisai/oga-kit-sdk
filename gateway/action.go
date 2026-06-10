@@ -43,21 +43,20 @@ func (c *PlatformGatewayClient) SubmitAction(
 	}
 
 	proposal := &ActionProposal{
-		ActionType:             input.ActionName,
-		ActionPayload:          input.Payload,
-		Description:            input.Description,
-		Reasoning:              input.Reasoning,
-		ReasoningFacts:         input.ReasoningFacts,
-		ExpectedOutcome:        input.ExpectedOutcome,
-		Routing:                input.Routing,
-		TriggerEventID:         input.TriggerEventID,
-		HumanActionMode:        input.HumanActionMode,
-		RiskLevel:              input.RiskLevel,
-		AutoApproveTimeout:     input.AutoApproveTimeout,
-		AutoApproveEligible:    input.AutoApproveEligible,
-		EscalationTimeout:      input.EscalationTimeout,
-		EscalationRouting:      input.EscalationRouting,
-		NotificationHoldWindow: input.NotificationHoldWindow,
+		ActionType:          input.ActionName,
+		ActionPayload:       input.Payload,
+		Description:         input.Description,
+		Reasoning:           input.Reasoning,
+		ReasoningFacts:      input.ReasoningFacts,
+		ExpectedOutcome:     input.ExpectedOutcome,
+		Routing:             input.Routing,
+		TriggerEventID:      input.TriggerEventID,
+		HumanActionMode:     input.HumanActionMode,
+		RiskLevel:           input.RiskLevel,
+		AutoApproveTimeout:  input.AutoApproveTimeout,
+		AutoApproveEligible: input.AutoApproveEligible,
+		EscalationTimeout:   input.EscalationTimeout,
+		EscalationRouting:   input.EscalationRouting,
 	}
 	return c.SubmitActionProposal(ctx, proposal)
 }

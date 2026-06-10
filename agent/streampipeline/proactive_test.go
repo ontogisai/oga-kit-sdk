@@ -56,9 +56,9 @@ func TestBuildSubmitActionInput(t *testing.T) {
 	profile := &agent.DomainAgentProfile{
 		Name: "fm-ops",
 		ProactiveReasoning: &agent.ProactiveConfig{
-			Routing: &agent.RoutingDef{TargetRoles: []string{"fm_operator"}},
+			Routing: &agent.RoutingDef{TargetRoles: []string{"fm_operator"}, NotificationHoldWindow: "5s"},
 			EscalationPolicy: &agent.EscalationPolicyDef{
-				Timeout: "30m", NotificationHoldWindow: "5s",
+				Timeout: "30m",
 				Routing: agent.RoutingDef{TargetRoles: []string{"fm_manager"}},
 			},
 		},
@@ -84,8 +84,11 @@ func TestBuildSubmitActionInput(t *testing.T) {
 	if in.AutoApproveTimeout.String() != "5m0s" {
 		t.Errorf("auto_approve_timeout = %s, want 5m0s", in.AutoApproveTimeout)
 	}
-	if in.EscalationTimeout.String() != "30m0s" || in.NotificationHoldWindow.String() != "5s" {
-		t.Errorf("escalation durations wrong: to=%s hold=%s", in.EscalationTimeout, in.NotificationHoldWindow)
+	if in.EscalationTimeout.String() != "30m0s" {
+		t.Errorf("escalation timeout wrong: %s", in.EscalationTimeout)
+	}
+	if in.Routing.NotificationHoldWindow.String() != "5s" {
+		t.Errorf("primary routing hold window = %s, want 5s", in.Routing.NotificationHoldWindow)
 	}
 	if len(in.Routing.TargetRoles) != 1 || in.Routing.TargetRoles[0] != "fm_operator" {
 		t.Errorf("primary routing wrong: %+v", in.Routing)

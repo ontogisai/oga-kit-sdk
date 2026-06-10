@@ -113,6 +113,15 @@ type ActionRouting struct {
 	// Channels constrains delivery channels: nil/[] honors recipient
 	// preferences; ["all"] broadcasts; explicit list forces those channels.
 	Channels []string `json:"channels,omitempty"`
+
+	// NotificationHoldWindow delays delivery of the PRIMARY operator
+	// notification by this duration. During the hold the AgentApprovalWorkflow
+	// listens for a supersede signal, so a convergence agent that correlates
+	// the same events can take over the proposal before the operator is
+	// notified. Zero disables the hold. Only meaningful on
+	// ActionProposal.Routing (primary delivery) — ignored on
+	// ActionProposal.EscalationRouting, which has no supersession window.
+	NotificationHoldWindow time.Duration `json:"notification_hold_window,omitempty"`
 }
 
 // HasTarget reports whether at least one recipient target is populated.
@@ -123,9 +132,9 @@ func (r ActionRouting) HasTarget() bool {
 // ActionProposal is the kit-author input contract for a proposed action. The
 // kit author supplies the action data + reasoning + routing intent; the SDK
 // packs the profile-derived governance fields (HumanActionMode, RiskLevel,
-// AutoApprove*, Escalation*, NotificationHoldWindow) from the chosen action
-// declaration; the gateway and workflow add the remaining fields downstream
-// (see ActionProposedEvent).
+// AutoApprove*, Escalation*) from the chosen action declaration; the gateway
+// and workflow add the remaining fields downstream (see ActionProposedEvent).
+// The notification hold window lives on Routing.
 type ActionProposal struct {
 	// --- Kit-author supplied (via SubmitActionInput) ---
 
@@ -142,15 +151,15 @@ type ActionProposal struct {
 
 	// --- SDK packs these from the loaded profile (chosen action + escalation policy) ---
 
-	HumanActionMode        HumanActionMode `json:"human_action_mode"`
-	RiskLevel              RiskLevel       `json:"risk_level"`
-	AutoApproveTimeout     time.Duration   `json:"auto_approve_timeout,omitempty"`
-	AutoApproveEligible    bool            `json:"auto_approve_eligible"`
-	EscalationTimeout      time.Duration   `json:"escalation_timeout,omitempty"`
-	NotificationHoldWindow time.Duration   `json:"notification_hold_window,omitempty"`
+	HumanActionMode     HumanActionMode `json:"human_action_mode"`
+	RiskLevel           RiskLevel       `json:"risk_level"`
+	AutoApproveTimeout  time.Duration   `json:"auto_approve_timeout,omitempty"`
+	AutoApproveEligible bool            `json:"auto_approve_eligible"`
+	EscalationTimeout   time.Duration   `json:"escalation_timeout,omitempty"`
 
 	// EscalationRouting carries the routing intent when no operator responds
-	// within EscalationTimeout. Same resolution semantics as Routing.
+	// within EscalationTimeout. Same resolution semantics as Routing. The
+	// notification hold window (if any) lives on Routing, not here.
 	EscalationRouting ActionRouting `json:"escalation_routing,omitempty"`
 }
 
@@ -254,17 +263,16 @@ type SubmitActionInput struct {
 	Reasoning       string
 	ReasoningFacts  []string
 	ExpectedOutcome string
-	Routing         ActionRouting // at least one target field required
+	Routing         ActionRouting // at least one target field required; carries NotificationHoldWindow
 	TriggerEventID  string
 
 	// --- Profile-derived governance fields (packed by the SDK from the chosen action) ---
-	HumanActionMode        HumanActionMode
-	RiskLevel              RiskLevel
-	AutoApproveTimeout     time.Duration
-	AutoApproveEligible    bool
-	EscalationTimeout      time.Duration
-	EscalationRouting      ActionRouting
-	NotificationHoldWindow time.Duration
+	HumanActionMode     HumanActionMode
+	RiskLevel           RiskLevel
+	AutoApproveTimeout  time.Duration
+	AutoApproveEligible bool
+	EscalationTimeout   time.Duration
+	EscalationRouting   ActionRouting
 }
 
 // ActionProposalSubmission is the result of submitting an action proposal.

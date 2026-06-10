@@ -167,7 +167,6 @@ func buildSubmitActionInput(p *agent.DomainAgentProfile, action *agent.ActionDef
 	}
 	if ep := p.ProactiveReasoning.EscalationPolicy; ep != nil {
 		in.EscalationTimeout = durationOrZero(ep.Timeout)
-		in.NotificationHoldWindow = durationOrZero(ep.NotificationHoldWindow)
 		in.EscalationRouting = ep.Routing.ToActionRouting()
 	}
 	return in

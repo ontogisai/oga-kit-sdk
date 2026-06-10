@@ -47,10 +47,27 @@ func TestValidateActions_EscalationDuration(t *testing.T) {
 		t.Errorf("bad escalation timeout should fail with %s, got %v", ErrCodeActionEscalationDur, err)
 	}
 
-	ok := &EscalationPolicyDef{Timeout: "30m", NotificationHoldWindow: "5s",
-		Routing: RoutingDef{TargetRoles: []string{"fm_manager"}}}
+	ok := &EscalationPolicyDef{Timeout: "30m", Routing: RoutingDef{TargetRoles: []string{"fm_manager"}}}
 	if err := validateActions(profileWithActions(routing, ok)); err != nil {
 		t.Errorf("valid escalation policy should pass: %v", err)
+	}
+}
+
+func TestValidateActions_RoutingHoldWindow(t *testing.T) {
+	// Bad hold window on the primary routing → OGA-DKIT-VAL-1041.
+	badRouting := &RoutingDef{TargetRoles: []string{"fm_operator"}, NotificationHoldWindow: "5 secs"}
+	if err := validateActions(profileWithActions(badRouting, nil)); err == nil ||
+		codeOf(t, err) != ErrCodeActionEscalationDur {
+		t.Errorf("bad routing hold window should fail with %s, got %v", ErrCodeActionEscalationDur, err)
+	}
+
+	// Valid hold window passes and converts to a duration.
+	okRouting := &RoutingDef{TargetRoles: []string{"fm_operator"}, NotificationHoldWindow: "5s"}
+	if err := validateActions(profileWithActions(okRouting, nil)); err != nil {
+		t.Errorf("valid routing hold window should pass: %v", err)
+	}
+	if got := okRouting.ToActionRouting().NotificationHoldWindow.String(); got != "5s" {
+		t.Errorf("hold window conversion = %s, want 5s", got)
 	}
 }
 
