@@ -179,19 +179,61 @@ func validateIntegration(a *ActionDef, integ *IntegrationDef, fieldPath string, 
 // integration must map from its tool result.
 const externalRecordIDKey = "external_record_id"
 
-// validateRelationships checks each relationship's source prefix and direction.
+// validateRelationships checks each relationship's source prefix, direction,
+// and edge declaration. The edge's STRUCTURE is validated here (exactly one of
+// edge_type|edge; long-form edge type/name/schema); whether the edge type
+// resolves in / registers into the active ontology is a platform install-time
+// concern (OGA-DKIT-VAL-1043), not an SDK structural check.
 func validateRelationships(a *ActionDef, rels []RelDef) error {
 	for j := range rels {
 		r := rels[j]
+		field := fmt.Sprintf("relationships[%d]", j)
 		if !strings.HasPrefix(r.Source, "event.") && !strings.HasPrefix(r.Source, "payload.") {
-			return newActionValidationError(ErrCodeActionRelSource, a.Name,
-				fmt.Sprintf("relationships[%d].source", j),
+			return newActionValidationError(ErrCodeActionRelSource, a.Name, field+".source",
 				fmt.Sprintf("must start with 'event.' or 'payload.', got %q", r.Source))
 		}
 		if r.Direction != relDirectionOutgoing && r.Direction != relDirectionIncoming {
-			return newActionValidationError(ErrCodeActionRelDirection, a.Name,
-				fmt.Sprintf("relationships[%d].direction", j),
+			return newActionValidationError(ErrCodeActionRelDirection, a.Name, field+".direction",
 				fmt.Sprintf("must be outgoing|incoming, got %q", r.Direction))
+		}
+		// Exactly one of the short form (edge_type) or long form (edge) must be set.
+		hasShort := r.EdgeType != ""
+		hasLong := r.Edge != nil
+		if hasShort == hasLong {
+			return newActionValidationError(ErrCodeActionRelEdge, a.Name, field,
+				"must set exactly one of edge_type (short form) | edge (long form)")
+		}
+		if hasLong {
+			if err := validateEdgeDef(a, r.Edge, field+".edge"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateEdgeDef validates the long-form edge declaration's structure:
+// type ∈ {existing,new}, name required, schema required+valid for new (valid if
+// present otherwise). Edge-type existence/registration in the ontology is a
+// platform install-time concern, not validated here.
+func validateEdgeDef(a *ActionDef, e *EdgeDef, fp string) error {
+	switch e.Type {
+	case EntityTypeExisting, EntityTypeNew:
+	default:
+		return newActionValidationError(ErrCodeActionEdgeType, a.Name, fp+".type",
+			fmt.Sprintf("must be existing|new, got %q", e.Type))
+	}
+	if e.Name == "" {
+		return newActionValidationError(ErrCodeActionEdgeName, a.Name, fp+".name", "required")
+	}
+	if e.Type == EntityTypeNew && len(e.Schema) == 0 {
+		return newActionValidationError(ErrCodeActionSchemaRequired, a.Name, fp+".schema",
+			"required when edge.type=new")
+	}
+	if len(e.Schema) > 0 {
+		if err := compileActionSchema(e.Schema); err != nil {
+			return newActionValidationError(ErrCodeActionSchemaInvalid, a.Name, fp+".schema",
+				fmt.Sprintf("not a valid JSON Schema 2020-12: %v", err))
 		}
 	}
 	return nil

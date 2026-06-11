@@ -29,6 +29,9 @@ const (
 	// them. Do NOT reuse them here.
 	ErrCodeActionExternalRecordID = "OGA-DKIT-VAL-1045" // integration.result_mapping.external_record_id required
 	ErrCodeActionOutcomeMode      = "OGA-DKIT-VAL-1046" // outcome must set exactly one of knowledge_graph_entity | external_system_record
+	ErrCodeActionRelEdge          = "OGA-DKIT-VAL-1047" // relationships[].* must set exactly one of edge_type | edge
+	ErrCodeActionEdgeType         = "OGA-DKIT-VAL-1048" // relationships[].edge.type invalid (must be existing|new)
+	ErrCodeActionEdgeName         = "OGA-DKIT-VAL-1049" // relationships[].edge.name required
 )
 
 // ActionValidationError is the structured error returned when an action

@@ -390,6 +390,7 @@ proactive_reasoning:
 | `integration` / `integration.tool` required (external_system_record + tool) | `OGA-DKIT-VAL-1036` |
 | `integration.result_mapping.external_record_id` required when integration present | `OGA-DKIT-VAL-1045` |
 | `relationships[].source` starts with `event.` / `payload.`; `direction` ∈ {outgoing, incoming} | `OGA-DKIT-VAL-1037` / `1038` |
+| `relationships[].*` sets exactly one of `edge_type` / `edge`; long-form `edge.type` ∈ {existing,new}, `edge.name` required | `OGA-DKIT-VAL-1047` / `1048` / `1049` |
 | `auto_approve_timeout` / routing + escalation durations parse; routing required when actions present | `OGA-DKIT-VAL-1039` / `1041` / `1042` |
 
 The reasoning LLM picks one action (or `no_action`) and produces a payload

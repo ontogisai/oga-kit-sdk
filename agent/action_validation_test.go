@@ -82,6 +82,24 @@ func TestValidateAction_ErrorCodes(t *testing.T) {
 		{"bad rel direction", func(a *ActionDef) {
 			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "event.entity_id", EdgeType: "AFFECTS", Direction: "sideways"}}
 		}, ErrCodeActionRelDirection},
+		{"rel missing edge", func(a *ActionDef) {
+			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "event.entity_id", Direction: "outgoing"}}
+		}, ErrCodeActionRelEdge},
+		{"rel both edge forms", func(a *ActionDef) {
+			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "event.entity_id", EdgeType: "AFFECTS", Edge: &EdgeDef{Type: "existing", Name: "AFFECTS"}, Direction: "outgoing"}}
+		}, ErrCodeActionRelEdge},
+		{"edge type invalid", func(a *ActionDef) {
+			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "event.entity_id", Edge: &EdgeDef{Type: "bogus", Name: "X"}, Direction: "outgoing"}}
+		}, ErrCodeActionEdgeType},
+		{"edge name required", func(a *ActionDef) {
+			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "event.entity_id", Edge: &EdgeDef{Type: "new"}, Direction: "outgoing"}}
+		}, ErrCodeActionEdgeName},
+		{"edge new schema required", func(a *ActionDef) {
+			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "event.entity_id", Edge: &EdgeDef{Type: "new", Name: "REQUIRES"}, Direction: "outgoing"}}
+		}, ErrCodeActionSchemaRequired},
+		{"edge schema invalid", func(a *ActionDef) {
+			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "event.entity_id", Edge: &EdgeDef{Type: "new", Name: "REQUIRES", Schema: map[string]any{"type": 123}}, Direction: "outgoing"}}
+		}, ErrCodeActionSchemaInvalid},
 		{"bad auto_approve_timeout", func(a *ActionDef) { a.AutoApproveTimeout = "5 fortnights" }, ErrCodeActionAutoApprove},
 	}
 	for _, tc := range cases {
@@ -111,6 +129,19 @@ func TestValidateAction_KnowledgeGraphEntityHybridValid(t *testing.T) {
 	}
 	if err := validateAction(&a); err != nil {
 		t.Fatalf("valid hybrid knowledge_graph_entity action should pass: %v", err)
+	}
+}
+
+func TestValidateAction_LongFormEdgeNewValid(t *testing.T) {
+	a := validAction()
+	a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{
+		{Source: "payload.target_id", Direction: "incoming", Edge: &EdgeDef{
+			Type: "new", Name: "REQUIRES_MAINTENANCE",
+			Schema: map[string]any{"type": "object", "properties": map[string]any{"priority": map[string]any{"type": "string"}}},
+		}},
+	}
+	if err := validateAction(&a); err != nil {
+		t.Fatalf("valid long-form new edge should pass: %v", err)
 	}
 }
 
