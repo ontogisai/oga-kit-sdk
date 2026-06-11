@@ -70,8 +70,11 @@ func TestValidateAction_ErrorCodes(t *testing.T) {
 		{"integration tool required", func(a *ActionDef) {
 			a.Outcome.KnowledgeGraphEntity.Integration = &IntegrationDef{ResultMapping: map[string]string{"external_record_id": "id"}}
 		}, ErrCodeActionExecutorRequired},
+		{"hybrid integration system required", func(a *ActionDef) {
+			a.Outcome.KnowledgeGraphEntity.Integration = &IntegrationDef{Tool: "fm_create_wo", ResultMapping: map[string]string{"external_record_id": "id"}}
+		}, ErrCodeActionExternalSystem},
 		{"external_record_id mapping required", func(a *ActionDef) {
-			a.Outcome.KnowledgeGraphEntity.Integration = &IntegrationDef{Tool: "fm_create_wo"}
+			a.Outcome.KnowledgeGraphEntity.Integration = &IntegrationDef{Tool: "fm_create_wo", System: "contract_wo_mgmt"}
 		}, ErrCodeActionExternalRecordID},
 		{"bad rel source", func(a *ActionDef) {
 			a.Outcome.KnowledgeGraphEntity.Relationships = []RelDef{{Source: "bogus.x", EdgeType: "AFFECTS", Direction: "outgoing"}}

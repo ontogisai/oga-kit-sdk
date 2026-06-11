@@ -122,7 +122,9 @@ func validateKnowledgeGraphEntity(a *ActionDef, kg *KnowledgeGraphEntityDef) err
 		return err
 	}
 	if kg.Integration != nil {
-		return validateIntegration(a, kg.Integration, fp+".integration")
+		// Hybrid: the integration produces an ExternalSystemRecord, whose
+		// external_system has no parent to default from here — require it.
+		return validateIntegration(a, kg.Integration, fp+".integration", true)
 	}
 	return nil
 }
@@ -146,14 +148,24 @@ func validateExternalSystemRecord(a *ActionDef, ext *ExternalSystemRecordDef) er
 		return newActionValidationError(ErrCodeActionExecutorRequired, a.Name, fp+".integration",
 			"required for external_system_record")
 	}
-	return validateIntegration(a, ext.Integration, fp+".integration")
+	// external_system_record's external_system defaults from ext.System, so the
+	// integration.system is optional here.
+	return validateIntegration(a, ext.Integration, fp+".integration", false)
 }
 
 // validateIntegration enforces that an integration declares a tool and maps
 // external_record_id from the tool result (the searchable correlation key).
-func validateIntegration(a *ActionDef, integ *IntegrationDef, fieldPath string) error {
+// requireSystem is true for a hybrid knowledge_graph_entity integration, where
+// integration.system is the only source for the ExternalSystemRecord's
+// external_system column; false for external_system_record (it defaults from
+// the parent ExternalSystemRecordDef.System).
+func validateIntegration(a *ActionDef, integ *IntegrationDef, fieldPath string, requireSystem bool) error {
 	if integ.Tool == "" {
 		return newActionValidationError(ErrCodeActionExecutorRequired, a.Name, fieldPath+".tool", "required")
+	}
+	if requireSystem && integ.System == "" {
+		return newActionValidationError(ErrCodeActionExternalSystem, a.Name, fieldPath+".system",
+			"required for a knowledge_graph_entity integration (names the external system the outcome is mirrored to)")
 	}
 	if integ.ResultMapping[externalRecordIDKey] == "" {
 		return newActionValidationError(ErrCodeActionExternalRecordID, a.Name,

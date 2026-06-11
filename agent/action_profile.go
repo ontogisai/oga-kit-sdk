@@ -111,9 +111,11 @@ type ExternalSystemRecordDef struct {
 // the KG entity — the platform owns KG writes; the tool result is recorded as
 // an ExternalSystemRecord and/or mapped per ResultMapping.
 type IntegrationDef struct {
-	// System optionally labels the external system. For a hybrid
-	// knowledge_graph_entity integration it names the synced system; for an
-	// external_system_record it defaults to the parent System when empty.
+	// System labels the external system the outcome is recorded in (drives the
+	// ExternalSystemRecord.external_system column). REQUIRED for a hybrid
+	// knowledge_graph_entity integration (it has no parent system to default
+	// from); optional for an external_system_record, where it defaults to the
+	// parent System when empty.
 	System string `yaml:"system,omitempty"`
 
 	// Tool is the MCP tool name invoked via the Platform Access Gateway. Required.

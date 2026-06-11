@@ -386,6 +386,7 @@ proactive_reasoning:
 | schema required (`knowledge_graph_entity.type=new` / `external_system_record`) | `OGA-DKIT-VAL-1033` |
 | schema is valid JSON Schema 2020-12 | `OGA-DKIT-VAL-1034` |
 | `external_system_record.system` required | `OGA-DKIT-VAL-1035` |
+| `integration.system` required for a hybrid `knowledge_graph_entity` integration | `OGA-DKIT-VAL-1035` |
 | `integration` / `integration.tool` required (external_system_record + tool) | `OGA-DKIT-VAL-1036` |
 | `integration.result_mapping.external_record_id` required when integration present | `OGA-DKIT-VAL-1045` |
 | `relationships[].source` starts with `event.` / `payload.`; `direction` ∈ {outgoing, incoming} | `OGA-DKIT-VAL-1037` / `1038` |
