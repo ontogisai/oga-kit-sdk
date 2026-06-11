@@ -10,9 +10,8 @@ import (
 
 // Entity type and direction constants for action declarations.
 const (
-	EntityTypeExisting          = "existing"
-	EntityTypeNew               = "new"
-	EntityTypeExternalReference = "external_reference"
+	EntityTypeExisting = "existing"
+	EntityTypeNew      = "new"
 
 	relDirectionOutgoing = "outgoing"
 	relDirectionIncoming = "incoming"
@@ -72,54 +71,169 @@ func validateAction(a *ActionDef) error {
 			fmt.Sprintf("must be informational|low|medium|high, got %q", a.RiskLevel))
 	}
 
-	switch a.Entity.Type {
-	case EntityTypeExisting, EntityTypeNew, EntityTypeExternalReference:
+	switch a.Outcome.Mode() {
+	case OutcomeKnowledgeGraphEntity:
+		if err := validateKnowledgeGraphEntity(a, a.Outcome.KnowledgeGraphEntity); err != nil {
+			return err
+		}
+	case OutcomeExternalSystemRecord:
+		if err := validateExternalSystemRecord(a, a.Outcome.ExternalSystemRecord); err != nil {
+			return err
+		}
 	default:
-		return newActionValidationError(ErrCodeActionEntityType, a.Name, "entity.type",
-			fmt.Sprintf("must be existing|new|external_reference, got %q", a.Entity.Type))
-	}
-
-	needsSchema := a.Entity.Type == EntityTypeNew || a.Entity.Type == EntityTypeExternalReference
-	if needsSchema && len(a.Entity.Schema) == 0 {
-		return newActionValidationError(ErrCodeActionSchemaRequired, a.Name, "entity.schema",
-			fmt.Sprintf("required when entity.type=%s", a.Entity.Type))
-	}
-	if len(a.Entity.Schema) > 0 {
-		if err := compileActionSchema(a.Entity.Schema); err != nil {
-			return newActionValidationError(ErrCodeActionSchemaInvalid, a.Name, "entity.schema",
-				fmt.Sprintf("not a valid JSON Schema 2020-12: %v", err))
-		}
-	}
-
-	if a.Entity.Type == EntityTypeExternalReference {
-		if a.Entity.ExternalSystem == "" {
-			return newActionValidationError(ErrCodeActionExternalSystem, a.Name, "entity.external_system",
-				"required when entity.type=external_reference")
-		}
-		if a.Executor == nil {
-			return newActionValidationError(ErrCodeActionExecutorRequired, a.Name, "executor",
-				"required when entity.type=external_reference")
-		}
-	}
-
-	for j := range a.Relationships {
-		r := a.Relationships[j]
-		if !strings.HasPrefix(r.Source, "event.") && !strings.HasPrefix(r.Source, "payload.") {
-			return newActionValidationError(ErrCodeActionRelSource, a.Name,
-				fmt.Sprintf("relationships[%d].source", j),
-				fmt.Sprintf("must start with 'event.' or 'payload.', got %q", r.Source))
-		}
-		if r.Direction != relDirectionOutgoing && r.Direction != relDirectionIncoming {
-			return newActionValidationError(ErrCodeActionRelDirection, a.Name,
-				fmt.Sprintf("relationships[%d].direction", j),
-				fmt.Sprintf("must be outgoing|incoming, got %q", r.Direction))
-		}
+		return newActionValidationError(ErrCodeActionOutcomeMode, a.Name, "outcome",
+			"must set exactly one of knowledge_graph_entity | external_system_record")
 	}
 
 	if a.AutoApproveTimeout != "" {
 		if _, err := time.ParseDuration(a.AutoApproveTimeout); err != nil {
 			return newActionValidationError(ErrCodeActionAutoApprove, a.Name, "auto_approve_timeout",
 				fmt.Sprintf("not a valid Go duration: %v", err))
+		}
+	}
+	return nil
+}
+
+// validateKnowledgeGraphEntity validates a knowledge_graph_entity outcome:
+// type ∈ {existing,new}, schema required+valid for new (valid if present for
+// existing), relationships well-formed, and an optional integration.
+func validateKnowledgeGraphEntity(a *ActionDef, kg *KnowledgeGraphEntityDef) error {
+	const fp = "outcome.knowledge_graph_entity"
+	switch kg.Type {
+	case EntityTypeExisting, EntityTypeNew:
+	default:
+		return newActionValidationError(ErrCodeActionEntityType, a.Name, fp+".type",
+			fmt.Sprintf("must be existing|new, got %q", kg.Type))
+	}
+	if kg.Name == "" {
+		return newActionValidationError(ErrCodeActionEntityType, a.Name, fp+".name", "required")
+	}
+	if kg.Type == EntityTypeNew && len(kg.Schema) == 0 {
+		return newActionValidationError(ErrCodeActionSchemaRequired, a.Name, fp+".schema",
+			"required when type=new")
+	}
+	if len(kg.Schema) > 0 {
+		if err := compileActionSchema(kg.Schema); err != nil {
+			return newActionValidationError(ErrCodeActionSchemaInvalid, a.Name, fp+".schema",
+				fmt.Sprintf("not a valid JSON Schema 2020-12: %v", err))
+		}
+	}
+	if err := validateRelationships(a, kg.Relationships); err != nil {
+		return err
+	}
+	if kg.Integration != nil {
+		// Hybrid: the integration produces an ExternalSystemRecord, whose
+		// external_system has no parent to default from here — require it.
+		return validateIntegration(a, kg.Integration, fp+".integration", true)
+	}
+	return nil
+}
+
+// validateExternalSystemRecord validates an external_system_record outcome:
+// system + schema required, and a required integration.
+func validateExternalSystemRecord(a *ActionDef, ext *ExternalSystemRecordDef) error {
+	const fp = "outcome.external_system_record"
+	if ext.System == "" {
+		return newActionValidationError(ErrCodeActionExternalSystem, a.Name, fp+".system", "required")
+	}
+	if len(ext.Schema) == 0 {
+		return newActionValidationError(ErrCodeActionSchemaRequired, a.Name, fp+".schema",
+			"required for external_system_record")
+	}
+	if err := compileActionSchema(ext.Schema); err != nil {
+		return newActionValidationError(ErrCodeActionSchemaInvalid, a.Name, fp+".schema",
+			fmt.Sprintf("not a valid JSON Schema 2020-12: %v", err))
+	}
+	if ext.Integration == nil {
+		return newActionValidationError(ErrCodeActionExecutorRequired, a.Name, fp+".integration",
+			"required for external_system_record")
+	}
+	// external_system_record's external_system defaults from ext.System, so the
+	// integration.system is optional here.
+	return validateIntegration(a, ext.Integration, fp+".integration", false)
+}
+
+// validateIntegration enforces that an integration declares a tool and maps
+// external_record_id from the tool result (the searchable correlation key).
+// requireSystem is true for a hybrid knowledge_graph_entity integration, where
+// integration.system is the only source for the ExternalSystemRecord's
+// external_system column; false for external_system_record (it defaults from
+// the parent ExternalSystemRecordDef.System).
+func validateIntegration(a *ActionDef, integ *IntegrationDef, fieldPath string, requireSystem bool) error {
+	if integ.Tool == "" {
+		return newActionValidationError(ErrCodeActionExecutorRequired, a.Name, fieldPath+".tool", "required")
+	}
+	if requireSystem && integ.System == "" {
+		return newActionValidationError(ErrCodeActionExternalSystem, a.Name, fieldPath+".system",
+			"required for a knowledge_graph_entity integration (names the external system the outcome is mirrored to)")
+	}
+	if integ.ResultMapping[externalRecordIDKey] == "" {
+		return newActionValidationError(ErrCodeActionExternalRecordID, a.Name,
+			fieldPath+".result_mapping.external_record_id",
+			"required when an integration is present (maps a tool-result field to the external record id)")
+	}
+	return nil
+}
+
+// externalRecordIDKey is the required ExternalSystemRecord column every
+// integration must map from its tool result.
+const externalRecordIDKey = "external_record_id"
+
+// validateRelationships checks each relationship's source prefix, direction,
+// and edge declaration. The edge's STRUCTURE is validated here (exactly one of
+// edge_type|edge; long-form edge type/name/schema); whether the edge type
+// resolves in / registers into the active ontology is a platform install-time
+// concern (OGA-DKIT-VAL-1043), not an SDK structural check.
+func validateRelationships(a *ActionDef, rels []RelDef) error {
+	for j := range rels {
+		r := rels[j]
+		field := fmt.Sprintf("relationships[%d]", j)
+		if !strings.HasPrefix(r.Source, "event.") && !strings.HasPrefix(r.Source, "payload.") {
+			return newActionValidationError(ErrCodeActionRelSource, a.Name, field+".source",
+				fmt.Sprintf("must start with 'event.' or 'payload.', got %q", r.Source))
+		}
+		if r.Direction != relDirectionOutgoing && r.Direction != relDirectionIncoming {
+			return newActionValidationError(ErrCodeActionRelDirection, a.Name, field+".direction",
+				fmt.Sprintf("must be outgoing|incoming, got %q", r.Direction))
+		}
+		// Exactly one of the short form (edge_type) or long form (edge) must be set.
+		hasShort := r.EdgeType != ""
+		hasLong := r.Edge != nil
+		if hasShort == hasLong {
+			return newActionValidationError(ErrCodeActionRelEdge, a.Name, field,
+				"must set exactly one of edge_type (short form) | edge (long form)")
+		}
+		if hasLong {
+			if err := validateEdgeDef(a, r.Edge, field+".edge"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateEdgeDef validates the long-form edge declaration's structure:
+// type ∈ {existing,new}, name required, schema required+valid for new (valid if
+// present otherwise). Edge-type existence/registration in the ontology is a
+// platform install-time concern, not validated here.
+func validateEdgeDef(a *ActionDef, e *EdgeDef, fp string) error {
+	switch e.Type {
+	case EntityTypeExisting, EntityTypeNew:
+	default:
+		return newActionValidationError(ErrCodeActionEdgeType, a.Name, fp+".type",
+			fmt.Sprintf("must be existing|new, got %q", e.Type))
+	}
+	if e.Name == "" {
+		return newActionValidationError(ErrCodeActionEdgeName, a.Name, fp+".name", "required")
+	}
+	if e.Type == EntityTypeNew && len(e.Schema) == 0 {
+		return newActionValidationError(ErrCodeActionSchemaRequired, a.Name, fp+".schema",
+			"required when edge.type=new")
+	}
+	if len(e.Schema) > 0 {
+		if err := compileActionSchema(e.Schema); err != nil {
+			return newActionValidationError(ErrCodeActionSchemaInvalid, a.Name, fp+".schema",
+				fmt.Sprintf("not a valid JSON Schema 2020-12: %v", err))
 		}
 	}
 	return nil

@@ -10,16 +10,16 @@ import (
 func candidateActions() []agent.ActionDef {
 	return []agent.ActionDef{
 		{Name: "create_work_order", Description: "create WO", HumanActionMode: "approval", RiskLevel: "medium",
-			Entity: agent.EntityDef{Type: agent.EntityTypeExisting, Name: "WorkOrder"}},
+			Outcome: agent.OutcomeDef{KnowledgeGraphEntity: &agent.KnowledgeGraphEntityDef{Type: agent.EntityTypeExisting, Name: "WorkOrder"}}},
 		{Name: "log_observation", Description: "log obs", HumanActionMode: "acknowledgement", RiskLevel: "informational",
-			Entity: agent.EntityDef{Type: agent.EntityTypeNew, Name: "AgentObservation",
+			Outcome: agent.OutcomeDef{KnowledgeGraphEntity: &agent.KnowledgeGraphEntityDef{Type: agent.EntityTypeNew, Name: "AgentObservation",
 				Schema: map[string]any{
 					"type":     "object",
 					"required": []any{"observation"},
 					"properties": map[string]any{
 						"observation": map[string]any{"type": "string"},
 					},
-				}}},
+				}}}},
 	}
 }
 
@@ -74,6 +74,9 @@ func TestBuildSubmitActionInput(t *testing.T) {
 
 	if in.ActionName != "create_work_order" || in.TriggerEventID != "evt-1" {
 		t.Errorf("unexpected base fields: %+v", in)
+	}
+	if in.TriggerEntityID != "CH-01" {
+		t.Errorf("trigger_entity_id = %q, want CH-01", in.TriggerEntityID)
 	}
 	if in.HumanActionMode != gateway.HumanActionModeApproval || in.RiskLevel != gateway.RiskLevelLow {
 		t.Errorf("enum conversion wrong: mode=%s risk=%s", in.HumanActionMode, in.RiskLevel)

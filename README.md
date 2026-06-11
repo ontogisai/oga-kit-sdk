@@ -291,6 +291,112 @@ func main() {
 }
 ```
 
+## Proactive actions
+
+A proactive agent declares the actions it may propose under
+`proactive_reasoning.actions`. Each action's `outcome` block answers one
+question — **where does the result live?** — by setting exactly one of two
+intents:
+
+- `knowledge_graph_entity` — the result is a first-class **domain entity** in
+  the Knowledge Graph; the platform writes it. Optionally also sync it to an
+  external system with an `integration` block (the hybrid pattern).
+- `external_system_record` — the result lives only in an **external system**;
+  the KG keeps a lightweight reference vertex. Requires an `integration`.
+
+The platform **always owns Knowledge Graph writes** — an `integration` tool is
+for custom processing and/or external-system calls, never for writing the KG
+entity itself. Its result is recorded as an `ExternalSystemRecord` and/or merged
+per `result_mapping`.
+
+### Example 1 — Knowledge-graph entity (no external system)
+
+```yaml
+proactive_reasoning:
+  routing: { target_roles: [fm_operator] }   # required when actions are declared
+  actions:
+    - name: log_observation
+      description: Record an advisory observation for the operator
+      human_action_mode: acknowledgement
+      risk_level: informational
+      outcome:
+        knowledge_graph_entity:
+          type: new                            # registered in the active ontology at install
+          name: AgentObservation
+          schema:                              # required for type=new
+            type: object
+            required: [observation]
+            properties:
+              observation: { type: string }
+              severity: { type: string, enum: [info, warning, alert] }
+```
+
+### Example 2 — Hybrid (KG entity + external system sync)
+
+```yaml
+    - name: create_work_order
+      description: Raise a corrective work order for the affected equipment
+      human_action_mode: approval
+      risk_level: medium
+      outcome:
+        knowledge_graph_entity:
+          type: existing                       # WorkOrder already in the active ontology
+          name: WorkOrder
+          relationships:
+            - { source: event.entity_id, edge_type: AFFECTS, direction: outgoing }
+          integration:                         # OPTIONAL — also create the WO in the external system
+            system: contract_wo_mgmt
+            tool: fm_create_work_order
+            result_mapping:                    # <ExternalSystemRecord column>: <tool-result field>
+              external_record_id: wo_number    # REQUIRED when integration is present
+              status: wo_status                # optional
+```
+
+### Example 3 — External-system record (no domain entity)
+
+```yaml
+    - name: raise_sap_incident
+      description: Raise an incident in SAP
+      human_action_mode: approval
+      risk_level: high
+      outcome:
+        external_system_record:
+          system: sap
+          schema:                              # required — describes the payload sent to the tool
+            type: object
+            required: [equipment_id, priority]
+            properties:
+              equipment_id: { type: string }
+              priority: { type: string, enum: [P1, P2, P3] }
+          integration:                         # REQUIRED for external_system_record
+            tool: sap_create_incident
+            result_mapping:
+              external_record_id: id
+              status: state
+```
+
+### Validation (at `LoadDomainAgentProfile` / kit CI / sidecar startup)
+
+| Rule | Error code |
+|------|-----------|
+| `human_action_mode` ∈ {approval, acknowledgement} | `OGA-DKIT-VAL-1030` |
+| `risk_level` ∈ {informational, low, medium, high} | `OGA-DKIT-VAL-1031` |
+| `outcome` sets exactly one of `knowledge_graph_entity` / `external_system_record` | `OGA-DKIT-VAL-1046` |
+| `knowledge_graph_entity.type` ∈ {existing, new}; `name` required | `OGA-DKIT-VAL-1032` |
+| schema required (`knowledge_graph_entity.type=new` / `external_system_record`) | `OGA-DKIT-VAL-1033` |
+| schema is valid JSON Schema 2020-12 | `OGA-DKIT-VAL-1034` |
+| `external_system_record.system` required | `OGA-DKIT-VAL-1035` |
+| `integration.system` required for a hybrid `knowledge_graph_entity` integration | `OGA-DKIT-VAL-1035` |
+| `integration` / `integration.tool` required (external_system_record + tool) | `OGA-DKIT-VAL-1036` |
+| `integration.result_mapping.external_record_id` required when integration present | `OGA-DKIT-VAL-1045` |
+| `relationships[].source` starts with `event.` / `payload.`; `direction` ∈ {outgoing, incoming} | `OGA-DKIT-VAL-1037` / `1038` |
+| `relationships[].*` sets exactly one of `edge_type` / `edge`; long-form `edge.type` ∈ {existing,new}, `edge.name` required | `OGA-DKIT-VAL-1047` / `1048` / `1049` |
+| `auto_approve_timeout` / routing + escalation durations parse; routing required when actions present | `OGA-DKIT-VAL-1039` / `1041` / `1042` |
+
+The reasoning LLM picks one action (or `no_action`) and produces a payload
+conforming to that action's schema; the platform validates the payload again at
+execution time before writing the outcome.
+
 ## Test with mocks
 
 `transfer.FakeCommitClient` records every prepare / put / complete call so kit tests can assert on the artifact body, transport mode, and request shape without standing up a gateway:

@@ -69,10 +69,10 @@ func TestProfile_CandidateActions(t *testing.T) {
 		Name: "fm-ops",
 		ProactiveReasoning: &ProactiveConfig{
 			Actions: []ActionDef{
-				{Name: "always", HumanActionMode: "approval", RiskLevel: "low", Entity: EntityDef{Type: EntityTypeExisting, Name: "A"}},
-				{Name: "anomaly_only", HumanActionMode: "approval", RiskLevel: "low", Entity: EntityDef{Type: EntityTypeExisting, Name: "B"},
+				{Name: "always", HumanActionMode: "approval", RiskLevel: "low", Outcome: OutcomeDef{KnowledgeGraphEntity: &KnowledgeGraphEntityDef{Type: EntityTypeExisting, Name: "A"}}},
+				{Name: "anomaly_only", HumanActionMode: "approval", RiskLevel: "low", Outcome: OutcomeDef{KnowledgeGraphEntity: &KnowledgeGraphEntityDef{Type: EntityTypeExisting, Name: "B"}},
 					Triggers: []TriggerDef{{EventType: "EntityAnomalyEvent"}}},
-				{Name: "other_only", HumanActionMode: "approval", RiskLevel: "low", Entity: EntityDef{Type: EntityTypeExisting, Name: "C"},
+				{Name: "other_only", HumanActionMode: "approval", RiskLevel: "low", Outcome: OutcomeDef{KnowledgeGraphEntity: &KnowledgeGraphEntityDef{Type: EntityTypeExisting, Name: "C"}},
 					Triggers: []TriggerDef{{EventType: "SomethingElse"}}},
 			},
 		},

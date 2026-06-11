@@ -109,8 +109,8 @@ func buildActionDecisionSchema(candidates []agent.ActionDef) (*jsonschema.Schema
 	branches := make([]any, 0, len(candidates)+1)
 	for _, a := range candidates {
 		var payloadSchema any = map[string]any{"type": "object"}
-		if len(a.Entity.Schema) > 0 {
-			payloadSchema = a.Entity.Schema
+		if s := a.PayloadSchema(); len(s) > 0 {
+			payloadSchema = s
 		}
 		branches = append(branches, map[string]any{
 			"type":     "object",
@@ -160,6 +160,7 @@ func buildSubmitActionInput(p *agent.DomainAgentProfile, action *agent.ActionDef
 		ExpectedOutcome:     decision.ExpectedOutcome,
 		Routing:             p.ProactiveReasoning.Routing.ToActionRouting(),
 		TriggerEventID:      event.EventID,
+		TriggerEntityID:     event.EntityID,
 		HumanActionMode:     gateway.HumanActionMode(action.HumanActionMode),
 		RiskLevel:           gateway.RiskLevel(action.RiskLevel),
 		AutoApproveTimeout:  durationOrZero(action.AutoApproveTimeout),

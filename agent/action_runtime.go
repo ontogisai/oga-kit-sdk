@@ -22,7 +22,7 @@ var ErrActionDecision = errors.New("invalid action decision")
 // ActionDecision is the structured output of proactive reasoning. The LLM
 // chooses ONE action from the candidate catalog (or ActionNoOp to decline) and
 // produces the payload + reasoning. Payload conforms to the chosen action's
-// entity.schema (the selected branch of the discriminated decision schema).
+// outcome payload schema (the selected branch of the discriminated decision schema).
 type ActionDecision struct {
 	ActionType      string         `json:"action_type"`
 	Payload         map[string]any `json:"payload,omitempty"`

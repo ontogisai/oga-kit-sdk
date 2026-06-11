@@ -39,14 +39,9 @@ type ActionDef struct {
 	// Parsed as a Go duration string (e.g. "5m", "0") and validated at load.
 	AutoApproveTimeout string `yaml:"auto_approve_timeout,omitempty"`
 
-	// Entity describes the KG entity (or external reference) the action produces.
-	Entity EntityDef `yaml:"entity"`
-
-	// Executor optionally routes execution through an MCP tool.
-	Executor *ExecutorDef `yaml:"executor,omitempty"`
-
-	// Relationships declares the edges created from the produced entity.
-	Relationships []RelDef `yaml:"relationships,omitempty"`
+	// Outcome declares what the action produces — exactly one of the two
+	// outcome intents (knowledge_graph_entity | external_system_record).
+	Outcome OutcomeDef `yaml:"outcome"`
 
 	// Triggers is an OPTIONAL coarse candidate-narrowing hint, NOT a selector.
 	// When present, it filters the candidate catalog offered to the reasoning
@@ -55,26 +50,84 @@ type ActionDef struct {
 	Triggers []TriggerDef `yaml:"triggers,omitempty"`
 }
 
-// EntityDef describes the entity an action produces.
-type EntityDef struct {
-	// Type is "existing" | "new" | "external_reference".
-	Type string `yaml:"type"`
-
-	// Name is the entity/relationship type name (for existing/new).
-	Name string `yaml:"name,omitempty"`
-
-	// ExternalSystem identifies the target system (for external_reference).
-	ExternalSystem string `yaml:"external_system,omitempty"`
-
-	// Schema is a JSON Schema 2020-12 document. Required for new /
-	// external_reference; optional override for existing.
-	Schema map[string]any `yaml:"schema,omitempty"`
+// OutcomeDef declares what an action produces. Exactly one of the two intents
+// must be set (validated at load):
+//
+//   - knowledge_graph_entity — a first-class domain entity in the Knowledge
+//     Graph (the platform writes it). May optionally also sync to an external
+//     system via an integration sub-block (the hybrid pattern).
+//   - external_system_record — the record lives only in an external system; the
+//     KG keeps a lightweight reference vertex (ExternalSystemRecord). Requires
+//     an integration.
+//
+// "external" never means "not in the graph": an external_system_record still
+// produces an ExternalSystemRecord vertex — the distinction is domain entity vs
+// platform reference vertex, and which system owns the record.
+type OutcomeDef struct {
+	KnowledgeGraphEntity *KnowledgeGraphEntityDef `yaml:"knowledge_graph_entity,omitempty"`
+	ExternalSystemRecord *ExternalSystemRecordDef `yaml:"external_system_record,omitempty"`
 }
 
-// ExecutorDef routes action execution through an MCP tool.
-type ExecutorDef struct {
-	Tool          string         `yaml:"tool"`
-	ResultMapping map[string]any `yaml:"result_mapping,omitempty"`
+// KnowledgeGraphEntityDef describes a first-class KG domain entity outcome.
+type KnowledgeGraphEntityDef struct {
+	// Type is "existing" (a type already in the active ontology) or "new" (a
+	// type the kit declares here, registered at install).
+	Type string `yaml:"type"`
+
+	// Name is the entity type name (tenant-prefixed at install).
+	Name string `yaml:"name"`
+
+	// Schema is a JSON Schema 2020-12 document. Required when type=new; an
+	// optional narrowing override for type=existing (the platform lifts the
+	// schema from the active ontology when omitted).
+	Schema map[string]any `yaml:"schema,omitempty"`
+
+	// Relationships declares the edges created from the produced entity.
+	Relationships []RelDef `yaml:"relationships,omitempty"`
+
+	// Integration optionally syncs the outcome to an external system as part of
+	// producing it (the hybrid pattern). The platform still writes the KG
+	// entity; the integration result populates an ExternalSystemRecord linked
+	// by a MIRRORS edge.
+	Integration *IntegrationDef `yaml:"integration,omitempty"`
+}
+
+// ExternalSystemRecordDef describes an outcome that lives only in an external
+// system, recorded in the KG as an ExternalSystemRecord reference vertex.
+type ExternalSystemRecordDef struct {
+	// System identifies the target external system (e.g. "sap").
+	System string `yaml:"system"`
+
+	// Schema is a JSON Schema 2020-12 document describing the payload sent to
+	// the integration tool. Required.
+	Schema map[string]any `yaml:"schema,omitempty"`
+
+	// Integration is the external-system call. Required for this mode.
+	Integration *IntegrationDef `yaml:"integration,omitempty"`
+}
+
+// IntegrationDef routes execution through an MCP tool for custom processing
+// and/or external-system integration. The platform never lets the tool write
+// the KG entity — the platform owns KG writes; the tool result is recorded as
+// an ExternalSystemRecord and/or mapped per ResultMapping.
+type IntegrationDef struct {
+	// System labels the external system the outcome is recorded in (drives the
+	// ExternalSystemRecord.external_system column). REQUIRED for a hybrid
+	// knowledge_graph_entity integration (it has no parent system to default
+	// from); optional for an external_system_record, where it defaults to the
+	// parent System when empty.
+	System string `yaml:"system,omitempty"`
+
+	// Tool is the MCP tool name invoked via the Platform Access Gateway. Required.
+	Tool string `yaml:"tool"`
+
+	// ResultMapping maps fields from the tool's JSON result onto the
+	// ExternalSystemRecord columns: keys are the fixed columns, values are the
+	// source field path in the tool result. `external_record_id` is REQUIRED
+	// when an integration is present. `status` is optional. Any other key is
+	// promoted onto the ExternalSystemRecord as an un-indexed property (the full
+	// response is always stored in ExternalSystemRecord.result_json).
+	ResultMapping map[string]string `yaml:"result_mapping,omitempty"`
 }
 
 // RelDef declares an edge from the produced entity to another entity.
@@ -97,6 +150,54 @@ type EdgeDef struct {
 	Type   string         `yaml:"type"`
 	Name   string         `yaml:"name"`
 	Schema map[string]any `yaml:"schema,omitempty"`
+}
+
+// Outcome mode identifiers (the OutcomeDef discriminator).
+const (
+	OutcomeKnowledgeGraphEntity = "knowledge_graph_entity"
+	OutcomeExternalSystemRecord = "external_system_record"
+)
+
+// Mode returns the populated outcome mode, or "" when neither (or both) is set.
+func (o OutcomeDef) Mode() string {
+	kg := o.KnowledgeGraphEntity != nil
+	ext := o.ExternalSystemRecord != nil
+	switch {
+	case kg && !ext:
+		return OutcomeKnowledgeGraphEntity
+	case ext && !kg:
+		return OutcomeExternalSystemRecord
+	default:
+		return ""
+	}
+}
+
+// PayloadSchema returns the JSON Schema the LLM payload must conform to for this
+// action — the knowledge_graph_entity / external_system_record schema. Nil when
+// none is declared (e.g. type=existing without an override; the platform lifts
+// the schema from the active ontology at execution time).
+func (a *ActionDef) PayloadSchema() map[string]any {
+	switch {
+	case a.Outcome.KnowledgeGraphEntity != nil:
+		return a.Outcome.KnowledgeGraphEntity.Schema
+	case a.Outcome.ExternalSystemRecord != nil:
+		return a.Outcome.ExternalSystemRecord.Schema
+	default:
+		return nil
+	}
+}
+
+// Integration returns the action's integration block (from whichever outcome
+// mode is set), or nil when the action has no integration.
+func (a *ActionDef) Integration() *IntegrationDef {
+	switch {
+	case a.Outcome.KnowledgeGraphEntity != nil:
+		return a.Outcome.KnowledgeGraphEntity.Integration
+	case a.Outcome.ExternalSystemRecord != nil:
+		return a.Outcome.ExternalSystemRecord.Integration
+	default:
+		return nil
+	}
 }
 
 // TriggerDef is a coarse candidate-narrowing hint for an action.

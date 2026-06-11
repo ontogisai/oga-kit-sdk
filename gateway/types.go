@@ -140,13 +140,14 @@ type ActionProposal struct {
 
 	ProposalID      string         `json:"proposal_id"`    // SDK generates a UUID if empty
 	ActionType      string         `json:"action_type"`    // matches profile actions[*].name
-	ActionPayload   map[string]any `json:"action_payload"` // validated against action.entity.schema
+	ActionPayload   map[string]any `json:"action_payload"` // validated against the action's outcome payload schema
 	Description     string         `json:"description"`    // 1-2 sentence operator summary
 	Reasoning       string         `json:"reasoning"`      // full chain of thought
 	ReasoningFacts  []string       `json:"reasoning_facts,omitempty"`
 	ExpectedOutcome string         `json:"expected_outcome"`
 	Routing         ActionRouting  `json:"routing"` // primary delivery intent
 	TriggerEventID  string         `json:"trigger_event_id,omitempty"`
+	TriggerEntityID string         `json:"trigger_entity_id,omitempty"` // source entity that triggered the action; resolves relationships.source: event.entity_id
 	ProposedAt      time.Time      `json:"proposed_at"`
 
 	// --- SDK packs these from the loaded profile (chosen action + escalation policy) ---
@@ -311,13 +312,14 @@ type LevelDecision struct {
 type SubmitActionInput struct {
 	// --- Kit-author fields ---
 	ActionName      string         // matches profile actions[*].name → ActionProposal.ActionType
-	Payload         map[string]any // validated against entity.schema before submit
+	Payload         map[string]any // validated against the action's outcome payload schema before submit
 	Description     string
 	Reasoning       string
 	ReasoningFacts  []string
 	ExpectedOutcome string
 	Routing         ActionRouting // at least one target field required; carries NotificationHoldWindow
 	TriggerEventID  string
+	TriggerEntityID string // source entity that triggered the action
 
 	// --- Profile-derived governance fields (packed by the SDK from the chosen action) ---
 	HumanActionMode     HumanActionMode
