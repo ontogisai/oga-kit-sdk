@@ -11,11 +11,11 @@ import "fmt"
 const (
 	ErrCodeActionHumanMode        = "OGA-DKIT-VAL-1030" // human_action_mode invalid
 	ErrCodeActionRiskLevel        = "OGA-DKIT-VAL-1031" // risk_level invalid
-	ErrCodeActionEntityType       = "OGA-DKIT-VAL-1032" // entity.type invalid
-	ErrCodeActionSchemaRequired   = "OGA-DKIT-VAL-1033" // entity.schema required (new/external_reference)
-	ErrCodeActionSchemaInvalid    = "OGA-DKIT-VAL-1034" // entity.schema not valid JSON Schema 2020-12
-	ErrCodeActionExternalSystem   = "OGA-DKIT-VAL-1035" // external_system required (external_reference)
-	ErrCodeActionExecutorRequired = "OGA-DKIT-VAL-1036" // executor required (external_reference)
+	ErrCodeActionEntityType       = "OGA-DKIT-VAL-1032" // knowledge_graph_entity.type invalid
+	ErrCodeActionSchemaRequired   = "OGA-DKIT-VAL-1033" // schema required (kg type=new / external_system_record)
+	ErrCodeActionSchemaInvalid    = "OGA-DKIT-VAL-1034" // schema not valid JSON Schema 2020-12
+	ErrCodeActionExternalSystem   = "OGA-DKIT-VAL-1035" // external_system_record.system required
+	ErrCodeActionExecutorRequired = "OGA-DKIT-VAL-1036" // integration required / integration.tool required
 	ErrCodeActionRelSource        = "OGA-DKIT-VAL-1037" // relationships[].source bad prefix
 	ErrCodeActionRelDirection     = "OGA-DKIT-VAL-1038" // relationships[].direction invalid
 	ErrCodeActionAutoApprove      = "OGA-DKIT-VAL-1039" // auto_approve_timeout unparseable
@@ -23,6 +23,12 @@ const (
 	// validation added in C4 — do NOT reuse it here.
 	ErrCodeActionRoutingRequired = "OGA-DKIT-VAL-1041" // proactive_reasoning.routing required when actions declared
 	ErrCodeActionEscalationDur   = "OGA-DKIT-VAL-1042" // routing/escalation duration unparseable
+	// 1043 (action references undefined entity type) and 1044 (action executor
+	// references unavailable tool) are platform-only install-time codes — the
+	// SDK cannot resolve ontology types or the MCP catalog, so it never raises
+	// them. Do NOT reuse them here.
+	ErrCodeActionExternalRecordID = "OGA-DKIT-VAL-1045" // integration.result_mapping.external_record_id required
+	ErrCodeActionOutcomeMode      = "OGA-DKIT-VAL-1046" // outcome must set exactly one of knowledge_graph_entity | external_system_record
 )
 
 // ActionValidationError is the structured error returned when an action

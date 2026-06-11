@@ -10,7 +10,7 @@ func profileWithActions(routing *RoutingDef, ep *EscalationPolicyDef) *DomainAge
 			EscalationPolicy: ep,
 			Actions: []ActionDef{
 				{Name: "create_work_order", HumanActionMode: "approval", RiskLevel: "medium",
-					Entity: EntityDef{Type: EntityTypeExisting, Name: "WorkOrder"}},
+					Outcome: OutcomeDef{KnowledgeGraphEntity: &KnowledgeGraphEntityDef{Type: EntityTypeExisting, Name: "WorkOrder"}}},
 			},
 		},
 	}

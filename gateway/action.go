@@ -51,6 +51,7 @@ func (c *PlatformGatewayClient) SubmitAction(
 		ExpectedOutcome:     input.ExpectedOutcome,
 		Routing:             input.Routing,
 		TriggerEventID:      input.TriggerEventID,
+		TriggerEntityID:     input.TriggerEntityID,
 		HumanActionMode:     input.HumanActionMode,
 		RiskLevel:           input.RiskLevel,
 		AutoApproveTimeout:  input.AutoApproveTimeout,
