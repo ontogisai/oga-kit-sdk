@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
@@ -113,6 +114,14 @@ type KitSpec struct {
 	// Domain Kit Manifest Schema) for authoring guidance and the full set
 	// of CEL activation variables expressions can reference.
 	Policies []KitPolicySpec `yaml:"policies,omitempty"`
+
+	// Monitors lists kit-declared time-series anomaly monitors (OGA-319). The
+	// anomaly-monitor service runs detection per (tenant, source_id, metric)
+	// for the declared (entity_type, metric) pairs and materializes
+	// EntityAnomalyEvent triggers. The shape mirrors the platform's
+	// internal/anomalymonitor.RawMonitorConfig exactly so YAML authored against
+	// either type round-trips without translation.
+	Monitors []MonitorSpec `yaml:"monitors,omitempty"`
 }
 
 // PromptFragmentEntry declares a prompt fragment file targeting a specific
@@ -354,6 +363,9 @@ func Validate(m *KitManifest) error {
 	if err := validateKitPolicies(m.Spec.Policies); err != nil {
 		return err
 	}
+	if err := validateMonitors(m.Spec.Monitors); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -473,6 +485,77 @@ func validateKitPolicies(entries []KitPolicySpec) error {
 		}
 		if e.Expression == "" {
 			return fmt.Errorf("spec.policies[%d]: expression is required", i)
+		}
+	}
+	return nil
+}
+
+// Monitor detection methods (OGA-319). MVP supports zscore + threshold;
+// forecast-based detection is deferred.
+const (
+	MonitorMethodZScore    = "zscore"
+	MonitorMethodThreshold = "threshold"
+)
+
+// MonitorSpec is a kit-declared time-series anomaly monitor (spec.monitors[]).
+// It mirrors the platform's internal/anomalymonitor.RawMonitorConfig field-for-
+// field (and YAML-tag-for-tag) so a manifest authored against this SDK type
+// validates identically at platform install time.
+//
+// entity_type + metric select which entities' series to watch; method selects
+// the detector. The damping/cadence fields are optional — the platform fills
+// any unset field from configs/anomaly-monitor.yaml defaults.
+type MonitorSpec struct {
+	EntityType           string   `yaml:"entity_type"`
+	Metric               string   `yaml:"metric"`
+	Method               string   `yaml:"method"`
+	Sensitivity          float64  `yaml:"sensitivity,omitempty"`
+	Upper                *float64 `yaml:"upper,omitempty"`
+	Lower                *float64 `yaml:"lower,omitempty"`
+	MinDuration          string   `yaml:"min_duration,omitempty"`
+	MinConsecutive       int      `yaml:"min_consecutive,omitempty"`
+	ClearAfter           string   `yaml:"clear_after,omitempty"`
+	Cooldown             string   `yaml:"cooldown,omitempty"`
+	Cadence              string   `yaml:"cadence,omitempty"`
+	ReescalateOnSeverity bool     `yaml:"reescalate_on_severity,omitempty"`
+	ReescalateCooldown   string   `yaml:"reescalate_cooldown,omitempty"`
+}
+
+// validateMonitors checks each kit-declared anomaly monitor. Mirrors the
+// platform's internal/domainkit.validateMonitors + anomalymonitor validation so
+// kit authors get the same field-level errors locally as at install time.
+func validateMonitors(monitors []MonitorSpec) error {
+	for i := range monitors {
+		m := &monitors[i]
+		if m.EntityType == "" || m.Metric == "" {
+			return fmt.Errorf("spec.monitors[%d]: entity_type and metric are required", i)
+		}
+		method := m.Method
+		if method == "" {
+			method = MonitorMethodZScore
+		}
+		if method != MonitorMethodZScore && method != MonitorMethodThreshold {
+			return fmt.Errorf(
+				"spec.monitors[%d]: method = %q is invalid; must be %q or %q",
+				i, m.Method, MonitorMethodZScore, MonitorMethodThreshold,
+			)
+		}
+		if method == MonitorMethodThreshold && m.Upper == nil && m.Lower == nil {
+			return fmt.Errorf("spec.monitors[%d]: threshold monitor requires at least one of upper/lower", i)
+		}
+		for field, val := range map[string]string{
+			"min_duration":        m.MinDuration,
+			"clear_after":         m.ClearAfter,
+			"cooldown":            m.Cooldown,
+			"cadence":             m.Cadence,
+			"reescalate_cooldown": m.ReescalateCooldown,
+		} {
+			if val == "" {
+				continue
+			}
+			if _, err := time.ParseDuration(val); err != nil {
+				return fmt.Errorf("spec.monitors[%d]: %s = %q is not a valid duration", i, field, val)
+			}
 		}
 	}
 	return nil

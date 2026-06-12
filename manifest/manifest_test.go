@@ -727,3 +727,38 @@ func TestIsValidPolicyLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestValidate_Monitors(t *testing.T) {
+	base := func(monitors []MonitorSpec) *KitManifest {
+		return &KitManifest{
+			APIVersion: "ontogis.ai/v1",
+			Kind:       "DomainKitManifest",
+			Metadata:   KitMetadata{Name: "k", Version: "1.0.0"},
+			Spec:       KitSpec{PlatformVersion: ">=1.0.0", Monitors: monitors},
+		}
+	}
+	up := 4.5
+	if err := Validate(base([]MonitorSpec{
+		{EntityType: "brick_Equipment", Metric: "temperature", Method: "zscore", MinDuration: "10m"},
+		{EntityType: "brick_Equipment", Metric: "vibration", Method: "threshold", Upper: &up},
+	})); err != nil {
+		t.Fatalf("valid monitors rejected: %v", err)
+	}
+
+	bad := []struct {
+		name    string
+		monitor MonitorSpec
+	}{
+		{"missing fields", MonitorSpec{Method: "zscore"}},
+		{"bad method", MonitorSpec{EntityType: "e", Metric: "m", Method: "teleport"}},
+		{"threshold no bounds", MonitorSpec{EntityType: "e", Metric: "m", Method: "threshold"}},
+		{"bad duration", MonitorSpec{EntityType: "e", Metric: "m", Method: "zscore", Cadence: "soon"}},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := Validate(base([]MonitorSpec{tt.monitor})); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
