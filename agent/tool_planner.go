@@ -196,7 +196,7 @@ func PlanAndExecute(
 		if step.DependsOn >= 0 && step.DependsOn < len(results) {
 			prior := results[step.DependsOn]
 			if prior.Success && prior.Content != "" {
-				args = ResolveDependentArgs(args, prior.Content)
+				args = ResolveDependentArgsForTool(args, prior.Content, prior.ToolName)
 			}
 		}
 		step.Arguments = args

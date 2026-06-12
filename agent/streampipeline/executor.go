@@ -47,7 +47,7 @@ func executeStep(
 	if step.DependsOn >= 0 && step.DependsOn < len(priorResults) {
 		prior := priorResults[step.DependsOn]
 		if prior.Success && prior.Content != "" {
-			args = agent.ResolveDependentArgs(args, prior.Content)
+			args = agent.ResolveDependentArgsForTool(args, prior.Content, prior.ToolName)
 		} else if !prior.Success || prior.Content == "" {
 			// Short-circuit: upstream returned nothing usable.
 			res.Success = false
@@ -82,7 +82,7 @@ func executeStep(
 
 	// Apply MaxResults truncation if configured.
 	if step.MaxResults > 0 {
-		res.Content = truncateJSONArray(res.Content, step.MaxResults)
+		res.Content = truncateJSONArray(res.Content, step.MaxResults, step.ToolName)
 	}
 
 	return res
@@ -133,10 +133,13 @@ func stripPriorResult(args map[string]any) map[string]any {
 	return out
 }
 
-// truncateJSONArray caps a JSON `{"results": [...]}` shape at maxResults
-// entries. Returns the original content if not parseable as the expected shape
-// (truncation is a best-effort optimization, not a correctness requirement).
-func truncateJSONArray(content string, maxResults int) string {
+// truncateJSONArray caps the tool's result array at maxResults entries. The
+// array key is resolved from the shape registry for toolName (e.g. kg_search →
+// "results", kg_query_entities → "entities", kg_doc_search → "documents"); for
+// unknown tools it falls back to a default set of common array keys. Returns
+// the original content if not parseable as the expected shape (truncation is a
+// best-effort optimization, not a correctness requirement).
+func truncateJSONArray(content string, maxResults int, toolName string) string {
 	if maxResults <= 0 {
 		return content
 	}
@@ -144,16 +147,25 @@ func truncateJSONArray(content string, maxResults int) string {
 	if err := json.Unmarshal([]byte(content), &obj); err != nil {
 		return content
 	}
-	results, ok := obj["results"].([]any)
-	if !ok || len(results) <= maxResults {
-		return content
+
+	keys := agent.ArrayKeysForTool(toolName)
+	if len(keys) == 0 {
+		keys = []string{"results", "entities", "nodes", "documents", "passages", "relationships"}
 	}
-	obj["results"] = results[:maxResults]
-	truncated, err := json.Marshal(obj)
-	if err != nil {
-		return content
+
+	for _, key := range keys {
+		arr, ok := obj[key].([]any)
+		if !ok || len(arr) <= maxResults {
+			continue
+		}
+		obj[key] = arr[:maxResults]
+		truncated, err := json.Marshal(obj)
+		if err != nil {
+			return content
+		}
+		return string(truncated)
 	}
-	return string(truncated)
+	return content
 }
 
 // evaluateCondition checks whether a step should run.

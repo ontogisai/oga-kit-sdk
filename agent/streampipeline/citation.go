@@ -94,48 +94,62 @@ func ExtractCitations(result *ToolStepResult, toolName string, args map[string]a
 }
 
 // ExtractEntityCitations attempts to parse entity references from a tool's
-// JSON result content. Handles two common shapes:
-//  1. {"results": [{"id"|"entity_id": ..., "name": ..., "entity_type": ...}, ...]}
-//  2. Single entity: {"entity_id": ..., "name": ..., "entity_type": ...}
+// JSON result content. Handles the array shapes from both kg_search
+// (`results`) and kg_query_entities (`entities`), plus a single-entity shape:
+//  1. {"results":  [{"id"|"entity_id": ..., "name": ..., "entity_type": ...}, ...]}
+//  2. {"entities": [{"id"|"entity_id": ..., "name": ..., "entity_type": ...}, ...]}
+//  3. Single entity: {"entity_id": ..., "name": ..., "entity_type": ...}
 //
-// Returns nil for unparseable content. Caps at MaxCitationsPerStep.
+// The recognized array keys mirror the entity-kind entries in the agent shape
+// registry. Returns nil for unparseable content. Caps at MaxCitationsPerStep.
 func ExtractEntityCitations(content string) []agent.CitationSource {
-	// Shape 1: results array
-	var arrayShape struct {
-		Results []struct {
-			ID         string `json:"id"`
-			EntityID   string `json:"entity_id"`
-			Name       string `json:"name"`
-			EntityType string `json:"entity_type"`
-		} `json:"results"`
+	type citItem struct {
+		ID         string `json:"id"`
+		EntityID   string `json:"entity_id"`
+		Name       string `json:"name"`
+		EntityType string `json:"entity_type"`
 	}
-	if err := json.Unmarshal([]byte(content), &arrayShape); err == nil && len(arrayShape.Results) > 0 {
-		citations := make([]agent.CitationSource, 0, len(arrayShape.Results))
-		for _, r := range arrayShape.Results {
-			id := r.ID
-			if id == "" {
-				id = r.EntityID
+
+	// Shapes 1 & 2: results / entities arrays.
+	var arrayShape struct {
+		Results  []citItem `json:"results"`
+		Entities []citItem `json:"entities"`
+	}
+	if err := json.Unmarshal([]byte(content), &arrayShape); err == nil {
+		items := arrayShape.Results
+		if len(items) == 0 {
+			items = arrayShape.Entities
+		}
+		if len(items) > 0 {
+			citations := make([]agent.CitationSource, 0, len(items))
+			for _, r := range items {
+				id := r.ID
+				if id == "" {
+					id = r.EntityID
+				}
+				if id == "" {
+					continue
+				}
+				label := r.Name
+				if label == "" && r.EntityType != "" {
+					label = r.EntityType + ":" + id
+				}
+				if label == "" {
+					label = id
+				}
+				citations = append(citations, agent.CitationSource{
+					Type:  "entity",
+					ID:    id,
+					Label: label,
+				})
+				if len(citations) >= MaxCitationsPerStep {
+					break
+				}
 			}
-			if id == "" {
-				continue
-			}
-			label := r.Name
-			if label == "" && r.EntityType != "" {
-				label = r.EntityType + ":" + id
-			}
-			if label == "" {
-				label = id
-			}
-			citations = append(citations, agent.CitationSource{
-				Type:  "entity",
-				ID:    id,
-				Label: label,
-			})
-			if len(citations) >= MaxCitationsPerStep {
-				break
+			if len(citations) > 0 {
+				return citations
 			}
 		}
-		return citations
 	}
 
 	// Shape 2: single entity
