@@ -82,7 +82,15 @@ type extractedValues struct {
 }
 
 // extractPriorValues parses the prior result JSON and extracts commonly needed
-// values. Handles: {"results":[{"entity_id":...}]} and {"entity_id":...}.
+// values. Handles three shapes:
+//
+//  1. {"results":  [{"entity_id"|"id": ...}]} — kg_search responses
+//  2. {"entities": [{"id"|"entity_id": ...}]} — kg_query_entities responses
+//  3. {"entity_id": ...} or {"id": ...}       — single entity responses
+//
+// Within an array item the identifier is read from "entity_id" first, falling
+// back to "id" — different MCP tools name the field differently (kg_search
+// emits "entity_id", kg_query_entities emits "id").
 func extractPriorValues(content string) *extractedValues {
 	if content == "" {
 		return nil
@@ -95,30 +103,41 @@ func extractPriorValues(content string) *extractedValues {
 
 	ev := &extractedValues{}
 
-	// Shape 1: {"results": [...]} — search/query responses
-	if results, ok := obj["results"]; ok {
-		if arr, ok := results.([]any); ok && len(arr) > 0 {
-			for _, item := range arr {
-				if m, ok := item.(map[string]any); ok {
-					if id := stringField(m, "entity_id"); id != "" {
-						ev.entityIDs = append(ev.entityIDs, id)
-						if ev.firstEntityID == "" {
-							ev.firstEntityID = id
-						}
-					}
-					if ev.entityType == "" {
-						ev.entityType = stringField(m, "entity_type")
-					}
-					if ev.label == "" {
-						ev.label = stringField(m, "label")
+	// Shape 1/2: array responses. Different tools use different array keys:
+	// kg_search → "results", kg_query_entities → "entities".
+	for _, arrayKey := range []string{"results", "entities"} {
+		results, ok := obj[arrayKey]
+		if !ok {
+			continue
+		}
+		arr, ok := results.([]any)
+		if !ok || len(arr) == 0 {
+			continue
+		}
+		for _, item := range arr {
+			if m, ok := item.(map[string]any); ok {
+				id := stringField(m, "entity_id")
+				if id == "" {
+					id = stringField(m, "id")
+				}
+				if id != "" {
+					ev.entityIDs = append(ev.entityIDs, id)
+					if ev.firstEntityID == "" {
+						ev.firstEntityID = id
 					}
 				}
+				if ev.entityType == "" {
+					ev.entityType = stringField(m, "entity_type")
+				}
+				if ev.label == "" {
+					ev.label = stringField(m, "label")
+				}
 			}
-			return ev
 		}
+		return ev
 	}
 
-	// Shape 2: {"entity_id": "..."} — single entity response
+	// Shape 3: {"entity_id": "..."} — single entity response
 	if id := stringField(obj, "entity_id"); id != "" {
 		ev.firstEntityID = id
 		ev.entityIDs = []string{id}
@@ -127,7 +146,7 @@ func extractPriorValues(content string) *extractedValues {
 		return ev
 	}
 
-	// Shape 3: {"id": "..."} — alternative single entity
+	// Shape 4: {"id": "..."} — alternative single entity
 	if id := stringField(obj, "id"); id != "" {
 		ev.firstEntityID = id
 		ev.entityIDs = []string{id}
