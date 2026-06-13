@@ -104,3 +104,23 @@ func AckNoProposal(event *ProactiveEvent) *A2AResponse {
 		},
 	}
 }
+
+// AckAccepted returns the immediate acknowledgement the proactive handler sends
+// back to the Event Router BEFORE running grounding + reasoning. The Event
+// Router invokes proactive events over a synchronous A2A message/send bounded
+// by a short client timeout and expects the agent to "acknowledge quickly and
+// process async". Proactive reasoning runs on a detached context after this
+// ack, so the router's timeout is a delivery-ack window, not a bound on the
+// agent's reasoning time.
+func AckAccepted(event *ProactiveEvent) *A2AResponse {
+	msg := "proactive event accepted; processing asynchronously"
+	if event != nil && event.EventType != "" {
+		msg = "proactive event accepted; processing asynchronously: " + event.EventType
+	}
+	return &A2AResponse{
+		Message: &Message{
+			Role:  "agent",
+			Parts: []Part{{Text: msg}},
+		},
+	}
+}
