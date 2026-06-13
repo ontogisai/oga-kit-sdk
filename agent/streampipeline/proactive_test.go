@@ -1,7 +1,9 @@
 package streampipeline
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
@@ -113,5 +115,65 @@ func TestBuildSubmitActionInput_MediumRiskNotEligible(t *testing.T) {
 	in := buildSubmitActionInput(profile, action, &agent.ProactiveEvent{}, &agent.ActionDecision{ActionType: "x"})
 	if in.AutoApproveEligible {
 		t.Error("medium risk must not be auto-approve eligible")
+	}
+}
+
+// TestProactiveBudget verifies the detached reasoning timeout derivation
+// (OGA-343): sum of context-gather + reasoning timeouts plus SubmitAction
+// headroom, with a generous fallback when the profile leaves them unset.
+func TestProactiveBudget(t *testing.T) {
+	const fallback = 120 * time.Second
+
+	t.Run("nil profile falls back", func(t *testing.T) {
+		if got := proactiveBudget(nil); got != fallback {
+			t.Errorf("proactiveBudget(nil) = %v, want %v", got, fallback)
+		}
+	})
+
+	t.Run("nil proactive_reasoning falls back", func(t *testing.T) {
+		if got := proactiveBudget(&agent.DomainAgentProfile{}); got != fallback {
+			t.Errorf("proactiveBudget(no reasoning) = %v, want %v", got, fallback)
+		}
+	})
+
+	t.Run("unset timeouts fall back", func(t *testing.T) {
+		p := &agent.DomainAgentProfile{ProactiveReasoning: &agent.ProactiveConfig{}}
+		if got := proactiveBudget(p); got != fallback {
+			t.Errorf("proactiveBudget(empty timeouts) = %v, want %v", got, fallback)
+		}
+	})
+
+	t.Run("sum plus headroom", func(t *testing.T) {
+		p := &agent.DomainAgentProfile{ProactiveReasoning: &agent.ProactiveConfig{
+			ContextGatherTimeout: "15s",
+			ReasoningTimeout:     "30s",
+		}}
+		want := 15*time.Second + 30*time.Second + 30*time.Second // + SubmitAction headroom
+		if got := proactiveBudget(p); got != want {
+			t.Errorf("proactiveBudget(15s+30s) = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestAckAccepted verifies the fast-ack response shape returned to the Event
+// Router before async reasoning begins (OGA-343).
+func TestAckAccepted(t *testing.T) {
+	resp := agent.AckAccepted(&agent.ProactiveEvent{EventType: "EntityAnomalyEvent"})
+	if resp == nil || resp.Message == nil {
+		t.Fatal("AckAccepted returned nil response/message")
+	}
+	if resp.Message.Role != "agent" {
+		t.Errorf("role = %q, want agent", resp.Message.Role)
+	}
+	if len(resp.Message.Parts) == 0 || resp.Message.Parts[0].Text == "" {
+		t.Fatal("AckAccepted response has no text part")
+	}
+	if !strings.Contains(resp.Message.Parts[0].Text, "EntityAnomalyEvent") {
+		t.Errorf("ack text should mention the event type, got %q", resp.Message.Parts[0].Text)
+	}
+
+	// Nil event must still produce a valid ack.
+	if r := agent.AckAccepted(nil); r == nil || r.Message == nil || len(r.Message.Parts) == 0 {
+		t.Fatal("AckAccepted(nil) must return a valid ack")
 	}
 }

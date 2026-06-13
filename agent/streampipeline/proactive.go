@@ -55,9 +55,44 @@ func handleProactive(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A
 		return agent.AckNoProposal(event), nil
 	}
 
+	// Fast-ack + async. The Event Router invokes proactive events over a
+	// synchronous A2A message/send bounded by a SHORT client timeout
+	// (configs/event-router.yaml a2a_timeout, default 5s — "domain agents
+	// should acknowledge quickly and process async"). Grounding + LLM
+	// reasoning + SubmitAction routinely exceed that window; running them on
+	// the inbound request context means the router's timeout cancels the work
+	// before any proposal is submitted (OGA-343). So we acknowledge receipt
+	// immediately and run the reasoning on a DETACHED context whose lifetime
+	// is the agent's own reasoning budget, not the router's delivery-ack
+	// window. context.WithoutCancel preserves request-scoped values (tenant,
+	// locale) while dropping the router's cancellation.
+	bgctx := context.WithoutCancel(ctx)
+	go func() {
+		rctx, cancel := context.WithTimeout(bgctx, proactiveBudget(profile))
+		defer cancel()
+		if rerr := runProactiveReasoning(rctx, rt, event, candidates); rerr != nil {
+			slog.ErrorContext(rctx, "proactive reasoning failed",
+				"agent_id", profile.AgentID,
+				"event_type", event.EventType,
+				"entity_id", event.EntityID,
+				"error", rerr)
+		}
+	}()
+
+	slog.InfoContext(ctx, "proactive event accepted; reasoning asynchronously",
+		"agent_id", profile.AgentID, "event_type", event.EventType, "entity_id", event.EntityID)
+	return agent.AckAccepted(event), nil
+}
+
+// runProactiveReasoning runs the synchronous grounding strategy + LLM action
+// decision and submits the chosen action. It is invoked on a detached context
+// from handleProactive's background goroutine, so it owns all logging of its
+// outcome — no caller observes its return value.
+func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event *agent.ProactiveEvent, candidates []agent.ActionDef) error {
+	profile := rt.Profile()
 	schema, err := buildActionDecisionSchema(candidates)
 	if err != nil {
-		return nil, fmt.Errorf("build action decision schema: %w", err)
+		return fmt.Errorf("build action decision schema: %w", err)
 	}
 
 	deps := Deps{Gateway: rt.Deps().Gateway, Logger: slog.Default(), Config: DefaultConfig()}
@@ -71,32 +106,49 @@ func handleProactive(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A
 
 	decision, _, err := RunSync[agent.ActionDecision](ctx, NewPipeline(), deps, input, planner, schema)
 	if err != nil {
-		return nil, fmt.Errorf("proactive reasoning: %w", err)
+		return fmt.Errorf("proactive reasoning: %w", err)
 	}
 
 	if decision.ActionType == "" || decision.ActionType == agent.ActionNoOp {
 		slog.InfoContext(ctx, "agent reasoned no action warranted",
 			"agent_id", profile.AgentID, "event_type", event.EventType, "rationale", decision.Reasoning)
-		return agent.AckNoProposal(event), nil
+		return nil
 	}
 
 	action, ok := profile.Action(decision.ActionType)
 	if !ok {
-		return nil, fmt.Errorf("%w: LLM chose unknown action %q", agent.ErrActionDecision, decision.ActionType)
+		return fmt.Errorf("%w: LLM chose unknown action %q", agent.ErrActionDecision, decision.ActionType)
 	}
 
 	in := buildSubmitActionInput(profile, action, event, &decision)
 	submission, err := rt.Deps().Gateway.SubmitAction(ctx, in)
 	if err != nil {
-		return nil, fmt.Errorf("submit action: %w", err)
+		return fmt.Errorf("submit action: %w", err)
 	}
-	return &agent.A2AResponse{
-		Message: &agent.Message{
-			Role: "agent",
-			Parts: []agent.Part{{Text: fmt.Sprintf("Action proposal submitted (action=%s, workflow=%s)",
-				decision.ActionType, submission.WorkflowID)}},
-		},
-	}, nil
+	slog.InfoContext(ctx, "proactive action proposal submitted",
+		"agent_id", profile.AgentID,
+		"action", decision.ActionType,
+		"workflow_id", submission.WorkflowID,
+		"event_type", event.EventType,
+		"entity_id", event.EntityID)
+	return nil
+}
+
+// proactiveBudget derives the detached reasoning timeout from the profile's
+// proactive_reasoning timeouts (context gather + reasoning) plus headroom for
+// SubmitAction. Falls back to a generous default when the profile leaves them
+// unset.
+func proactiveBudget(p *agent.DomainAgentProfile) time.Duration {
+	const fallback = 120 * time.Second
+	if p == nil || p.ProactiveReasoning == nil {
+		return fallback
+	}
+	total := durationOrZero(p.ProactiveReasoning.ContextGatherTimeout) +
+		durationOrZero(p.ProactiveReasoning.ReasoningTimeout)
+	if total <= 0 {
+		return fallback
+	}
+	return total + 30*time.Second // headroom for SubmitAction
 }
 
 // buildActionDecisionSchema composes a JSON Schema 2020-12 oneOf over the
