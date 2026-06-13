@@ -155,6 +155,40 @@ func TestProactiveBudget(t *testing.T) {
 	})
 }
 
+// TestProactiveAssemblyPrompt_IncludesPayloadSchema verifies the assembly
+// prompt renders each candidate action's declared payload schema inline so the
+// reasoning LLM knows the required fields + enum constraints it must satisfy
+// (OGA-343). Without this the LLM guesses payload fields and RunSync's post-hoc
+// schema validation rejects the output.
+func TestProactiveAssemblyPrompt_IncludesPayloadSchema(t *testing.T) {
+	profile := &agent.DomainAgentProfile{
+		Name:               "fm-ops",
+		ProactiveReasoning: &agent.ProactiveConfig{SystemPrompt: "You are FM ops."},
+	}
+	prompt := proactiveAssemblyPrompt(profile, candidateActions())
+
+	// The kit system prompt is prepended.
+	if !strings.Contains(prompt, "You are FM ops.") {
+		t.Error("assembly prompt should include the kit system prompt")
+	}
+	// Both actions appear by name.
+	if !strings.Contains(prompt, "create_work_order") || !strings.Contains(prompt, "log_observation") {
+		t.Errorf("assembly prompt missing candidate action names:\n%s", prompt)
+	}
+	// log_observation declares a payload schema → its required field must surface.
+	if !strings.Contains(prompt, "payload schema") || !strings.Contains(prompt, "observation") {
+		t.Errorf("assembly prompt should render log_observation's payload schema:\n%s", prompt)
+	}
+	// no_action option is always offered.
+	if !strings.Contains(prompt, "no_action") {
+		t.Errorf("assembly prompt should offer no_action:\n%s", prompt)
+	}
+	// Guidance to honor required fields + enums.
+	if !strings.Contains(prompt, "required field") {
+		t.Errorf("assembly prompt should instruct the LLM to include required fields:\n%s", prompt)
+	}
+}
+
 // TestAckAccepted verifies the fast-ack response shape returned to the Event
 // Router before async reasoning begins (OGA-343).
 func TestAckAccepted(t *testing.T) {

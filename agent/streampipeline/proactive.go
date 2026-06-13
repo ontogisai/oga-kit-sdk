@@ -2,6 +2,7 @@ package streampipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -259,9 +260,23 @@ func proactiveAssemblyPrompt(p *agent.DomainAgentProfile, candidates []agent.Act
 	b.WriteString("or no_action if none is warranted:\n")
 	for _, a := range candidates {
 		fmt.Fprintf(&b, "- %s: %s [risk=%s, mode=%s]\n", a.Name, a.Description, a.RiskLevel, a.HumanActionMode)
+		// Render the action's payload schema inline so the LLM knows the
+		// required fields and enum constraints it must satisfy. Without this
+		// the LLM guesses payload fields and the post-hoc schema validation in
+		// RunSync rejects the output (OGA-343). When PayloadSchema is nil
+		// (type=existing without an override) the platform lifts the schema
+		// from the active ontology at execution time, so no inline schema is
+		// emitted and the LLM fills a best-effort payload.
+		if schema := a.PayloadSchema(); len(schema) > 0 {
+			if js, err := json.Marshal(schema); err == nil {
+				fmt.Fprintf(&b, "    payload schema (JSON Schema): %s\n", js)
+			}
+		}
 	}
 	b.WriteString("- no_action: take no action\n\n")
-	b.WriteString("Set action_type to your choice, payload to an object conforming to that action's schema, ")
-	b.WriteString("and reasoning to your justification (including why no_action, if chosen).")
+	b.WriteString("Set action_type to your chosen action's name. ")
+	b.WriteString("When the action declares a payload schema above, set payload to an object that satisfies it — ")
+	b.WriteString("include EVERY required field and use ONLY allowed enum values for constrained fields. ")
+	b.WriteString("Set reasoning to your justification (including why no_action, if chosen).")
 	return b.String()
 }
