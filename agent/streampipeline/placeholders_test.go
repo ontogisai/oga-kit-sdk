@@ -26,10 +26,10 @@ func testEvent() *agent.ProactiveEvent {
 	}
 }
 
-func TestEventPlaceholderResolver_StaticTokens(t *testing.T) {
+func TestProactivePlaceholderResolver_StaticTokens(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
-	resolve := NewEventPlaceholderResolver(testEvent(), now)
+	resolve := NewProactivePlaceholderResolver(testEvent(), now)
 
 	cases := map[string]string{
 		"entity_id":   "chiller-01",
@@ -52,10 +52,10 @@ func TestEventPlaceholderResolver_StaticTokens(t *testing.T) {
 	}
 }
 
-func TestEventPlaceholderResolver_TimeMinus(t *testing.T) {
+func TestProactivePlaceholderResolver_TimeMinus(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
-	resolve := NewEventPlaceholderResolver(testEvent(), now)
+	resolve := NewProactivePlaceholderResolver(testEvent(), now)
 
 	got, ok := resolve("time_minus_24h")
 	if !ok {
@@ -79,9 +79,9 @@ func TestEventPlaceholderResolver_TimeMinus(t *testing.T) {
 	}
 }
 
-func TestEventPlaceholderResolver_EntityProperties(t *testing.T) {
+func TestProactivePlaceholderResolver_EntityProperties(t *testing.T) {
 	t.Parallel()
-	resolve := NewEventPlaceholderResolver(testEvent(), time.Now())
+	resolve := NewProactivePlaceholderResolver(testEvent(), time.Now())
 
 	cases := map[string]string{
 		"entity_properties.manufacturer": "Carrier",
@@ -105,14 +105,14 @@ func TestEventPlaceholderResolver_EntityProperties(t *testing.T) {
 	}
 }
 
-func TestEventPlaceholderResolver_UnknownAndNil(t *testing.T) {
+func TestProactivePlaceholderResolver_UnknownAndNil(t *testing.T) {
 	t.Parallel()
-	resolve := NewEventPlaceholderResolver(testEvent(), time.Now())
+	resolve := NewProactivePlaceholderResolver(testEvent(), time.Now())
 	if _, ok := resolve("totally_unknown"); ok {
 		t.Error("unknown token should not resolve")
 	}
 
-	nilResolve := NewEventPlaceholderResolver(nil, time.Now())
+	nilResolve := NewProactivePlaceholderResolver(nil, time.Now())
 	if _, ok := nilResolve("entity_id"); ok {
 		t.Error("nil event should resolve nothing")
 	}
@@ -121,7 +121,7 @@ func TestEventPlaceholderResolver_UnknownAndNil(t *testing.T) {
 func TestSubstitutePlan_ResolvesAndPreservesProfileMap(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
-	resolve := NewEventPlaceholderResolver(testEvent(), now)
+	resolve := NewProactivePlaceholderResolver(testEvent(), now)
 
 	// Shared map mimicking a profile's grounding-step arguments.
 	shared := map[string]any{"entity_id": "{entity_id}"}
@@ -161,7 +161,7 @@ func TestSubstitutePlan_NilResolverIsNoOp(t *testing.T) {
 
 func TestSubstitutePlan_UnknownTokenLeftVerbatim(t *testing.T) {
 	t.Parallel()
-	resolve := NewEventPlaceholderResolver(testEvent(), time.Now())
+	resolve := NewProactivePlaceholderResolver(testEvent(), time.Now())
 	plan := &ToolPlan{Steps: []ToolPlanStep{
 		{ToolName: "kg_get_entity", Arguments: map[string]any{
 			"a": "{entity_id}",
@@ -179,7 +179,7 @@ func TestSubstitutePlan_UnknownTokenLeftVerbatim(t *testing.T) {
 
 func TestSubstituteValue_NestedContainers(t *testing.T) {
 	t.Parallel()
-	resolve := NewEventPlaceholderResolver(testEvent(), time.Now())
+	resolve := NewProactivePlaceholderResolver(testEvent(), time.Now())
 	unresolved := make(map[string]struct{})
 	in := map[string]any{
 		"filter": map[string]any{"id": "{entity_id}"},

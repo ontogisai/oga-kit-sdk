@@ -47,6 +47,12 @@ func executeStep(
 	if step.DependsOn >= 0 && step.DependsOn < len(priorResults) {
 		prior := priorResults[step.DependsOn]
 		if prior.Success && prior.Content != "" {
+			// Dependent-step (<from step N>) resolution — fills ID args from a
+			// prior tool result (OGA-331). This is the SECOND of the two
+			// placeholder conventions; the FIRST ({entity_id} event templates)
+			// is already resolved at plan-build time by substitutePlan. See the
+			// two-conventions note in placeholders.go. Concrete values from
+			// event substitution are never overwritten here (needsResolution).
 			args = agent.ResolveDependentArgsForTool(args, prior.Content, prior.ToolName)
 		} else if !prior.Success || prior.Content == "" {
 			// Short-circuit: upstream returned nothing usable.

@@ -106,7 +106,7 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 		// {entity_properties.X}, {time_minus_24h}, ...) from the triggering
 		// event so kg_get_entity({entity_id}) sees the real id rather than the
 		// literal token (OGA-350).
-		Placeholders: NewEventPlaceholderResolver(event, time.Now()),
+		ProactivePlaceholders: NewProactivePlaceholderResolver(event, time.Now()),
 	}
 	planner := NewGroundingStrategyPlanner(profile)
 
