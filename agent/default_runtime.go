@@ -270,10 +270,11 @@ func (rt *DefaultRuntime) handleProactiveFallback(ctx context.Context, msg *A2AM
 // OGA-303: this method delegates to the shared streampipeline orchestrator,
 // which emits the canonical event sequence (reasoning → plan → per-step
 // tool_call/tool_result/citation → token-streamed artifact → consolidated
-// citation → status). Planner selection is profile-driven:
-//   - When the profile declares `proactive_reasoning.grounding_strategy`,
-//     uses GroundingStrategyPlanner (deterministic, no LLM planning call).
-//   - Otherwise falls back to LLMToolPlanner (dynamic per-request planning).
+// citation → status). This is the agent's REACTIVE surface (interactive chat
+// + the [Investigate] follow-up), so it always uses LLMToolPlanner — identical
+// to the platform Knowledge Agent. The proactive grounding strategy is NOT
+// used here; it is consumed only by the proactive message handler
+// (NewProactiveMessageHandler → runProactiveReasoning). See OGA-348.
 //
 // This is implemented inline rather than as a direct streampipeline import
 // because that would create an import cycle (the agent package's streampipeline
