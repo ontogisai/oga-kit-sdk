@@ -82,6 +82,17 @@ type Input struct {
 	// ToolNames is the union of MCP tool names available to this agent. Passed
 	// to the StreamPlanner. May be empty if the planner doesn't need it.
 	ToolNames []string
+
+	// ProactivePlaceholders resolves grounding-step argument placeholders for
+	// the proactive path ({entity_id}, {entity_type}, {entity_properties.X},
+	// {time_minus_24h}, ...). It is set by runProactiveReasoning from the
+	// triggering ProactiveEvent. Nil on the reactive path — the LLMToolPlanner
+	// emits concrete arguments, so there is nothing to substitute. See OGA-350.
+	//
+	// Distinct from the dependent-step (<from step N>) resolution the executor
+	// applies via agent.ResolveDependentArgsForTool (OGA-331) — see the
+	// two-conventions note in placeholders.go.
+	ProactivePlaceholders ProactivePlaceholderResolver
 }
 
 // Pipeline is the shared streaming orchestrator. Construct with NewPipeline
@@ -159,6 +170,13 @@ func (p *Pipeline) runInternal(
 		// No plan — fall through to plain LLM answer (no tool grounding).
 		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter)
 	}
+
+	// Resolve proactive event placeholders ({entity_id}, {entity_properties.X},
+	// {time_minus_24h}, ...) into the plan's step arguments before they are
+	// emitted or executed. No-op on the reactive path (ProactivePlaceholders is
+	// nil). Done after the empty-plan check so the LLM path skips it entirely,
+	// and before emitPlan so chips show resolved values. See OGA-350.
+	substitutePlan(ctx, plan, input.ProactivePlaceholders, logger)
 
 	if len(plan.Steps) > cfg.MaxSteps {
 		logger.WarnContext(ctx, "streampipeline: plan exceeds MaxSteps, truncating",
