@@ -300,9 +300,70 @@ func TestPipeline_EmptyPlan_PlainAnswer(t *testing.T) {
 	}
 }
 
-func TestPipeline_PlannerError_EmitsFailed(t *testing.T) {
-	gw := &fakeGateway{}
-	planner := &fakePlanner{err: errors.New("planner exploded")}
+// TestPipeline_PlannerError_FallsBackToPlainAnswer verifies the OGA-368
+// behavior: a non-fatal planner failure (e.g. the LLM returned prose instead
+// of JSON) degrades to a plain LLM answer instead of failing the task. The
+// pipeline must emit a reasoning event explaining the degraded path, stream
+// the artifact, and complete — never emit task/status{failed}.
+func TestPipeline_PlannerError_FallsBackToPlainAnswer(t *testing.T) {
+	gw := &fakeGateway{streamChunks: []string{"Here is", " a briefing."}}
+	planner := &fakePlanner{err: errors.New("parse plan JSON: invalid character 'I' looking for beginning of value")}
+
+	events := runPipelineForTest(t, gw, planner, Input{Query: "investigate this proposal"})
+
+	hasFailed := false
+	hasCompleted := false
+	hasReasoning := false
+	hasArtifact := false
+	hasPlan := false
+	for _, evt := range events {
+		switch evt.Type {
+		case agent.EventTypeStatus:
+			if p, ok := evt.Payload.(*agent.StatusPayload); ok {
+				if p.State == agent.TaskStateFailed {
+					hasFailed = true
+				}
+				if p.State == agent.TaskStateCompleted {
+					hasCompleted = true
+				}
+			}
+		case agent.EventTypeReasoning:
+			hasReasoning = true
+		case agent.EventTypeArtifact:
+			hasArtifact = true
+		case agent.EventTypePlan:
+			hasPlan = true
+		}
+	}
+
+	if hasFailed {
+		t.Errorf("planner parse failure must NOT emit task/status{failed}; expected graceful fallback")
+	}
+	if !hasCompleted {
+		t.Errorf("expected task/status{completed} after fallback to plain answer")
+	}
+	if !hasReasoning {
+		t.Errorf("expected a task/reasoning event explaining the degraded path")
+	}
+	if !hasArtifact {
+		t.Errorf("expected the plain answer streamed as task/artifact")
+	}
+	if hasPlan {
+		t.Errorf("expected NO plan event on the planner-failure fallback path")
+	}
+}
+
+// TestPipeline_PlannerError_AssemblyAlsoFails_EmitsFailed verifies that the
+// fallback does not mask a genuine transport failure: when planning fails AND
+// the subsequent plain-answer assembly call also fails (gateway down), the
+// pipeline surfaces task/status{failed} (per OGA-368 acceptance criteria).
+func TestPipeline_PlannerError_AssemblyAlsoFails_EmitsFailed(t *testing.T) {
+	gw := &fakeGateway{
+		// No stream chunks → ChatCompletionStream errors → falls through to
+		// non-streaming ChatCompletion, which also errors.
+		completionErr: errors.New("gateway unreachable"),
+	}
+	planner := &fakePlanner{err: errors.New("parse plan JSON: invalid character 'I' looking for beginning of value")}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "q"})
 
@@ -315,7 +376,48 @@ func TestPipeline_PlannerError_EmitsFailed(t *testing.T) {
 		}
 	}
 	if !hasFailed {
-		t.Errorf("expected task/status{failed} for planner error")
+		t.Errorf("expected task/status{failed} when the fallback assembly call also fails (transport down)")
+	}
+}
+
+// TestPipeline_PlannerError_ContextCancelled_EmitsFailed verifies that a
+// planner failure under a cancelled context is terminal — the pipeline does
+// NOT attempt a fallback and surfaces task/status{failed} (per OGA-368).
+func TestPipeline_PlannerError_ContextCancelled_EmitsFailed(t *testing.T) {
+	gw := &fakeGateway{streamChunks: []string{"should not be used"}}
+	planner := &fakePlanner{err: context.Canceled}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before running so ctx.Err() != nil
+
+	pipeline := NewPipeline()
+	events := make(chan *agent.StreamEvent, 64)
+	collected := make([]*agent.StreamEvent, 0, 8)
+	done := make(chan struct{})
+	go func() {
+		for evt := range events {
+			collected = append(collected, evt)
+		}
+		close(done)
+	}()
+	_ = pipeline.runInternal(ctx, Deps{Config: DefaultConfig()}, Input{Query: "q"}, planner, events, gw)
+	close(events)
+	<-done
+
+	hasFailed := false
+	calledGateway := len(gw.callToolCalls) > 0 || gw.completionCalls > 0
+	for _, evt := range collected {
+		if evt.Type == agent.EventTypeStatus {
+			if p, ok := evt.Payload.(*agent.StatusPayload); ok && p.State == agent.TaskStateFailed {
+				hasFailed = true
+			}
+		}
+	}
+	if !hasFailed {
+		t.Errorf("expected task/status{failed} when planning fails under a cancelled context")
+	}
+	if calledGateway {
+		t.Errorf("expected NO fallback gateway call under a cancelled context")
 	}
 }
 
