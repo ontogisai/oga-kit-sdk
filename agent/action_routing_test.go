@@ -80,16 +80,19 @@ func TestValidateActions_NoActionsNoRoutingRequired(t *testing.T) {
 }
 
 func TestRoutingDef_ToActionRouting(t *testing.T) {
-	r := &RoutingDef{TargetRoles: []string{"fm_operator"}, Channels: []string{"all"}}
+	r := &RoutingDef{TargetUsers: []string{"fm@ex.io"}, TargetRoles: []string{"fm_operator"}, Channels: []string{"all"}}
 	got := r.ToActionRouting()
 	if len(got.TargetRoles) != 1 || got.TargetRoles[0] != "fm_operator" || got.Channels[0] != "all" {
 		t.Errorf("unexpected conversion: %+v", got)
 	}
-	// By-user routing is not a kit-authored concept: ToActionRouting never
+	if len(got.TargetUsers) != 1 || got.TargetUsers[0] != "fm@ex.io" {
+		t.Errorf("ToActionRouting must propagate target_users (emails), got %+v", got.TargetUsers)
+	}
+	// By-user-id routing is not a kit-authored concept: ToActionRouting never
 	// propagates a user id (the field is a rejected catch-field; see
 	// TestValidateActions_RejectsDirectUserRouting).
 	if got.TargetUserID != "" {
-		t.Errorf("ToActionRouting must not propagate a by-user target, got %q", got.TargetUserID)
+		t.Errorf("ToActionRouting must not propagate a by-id target, got %q", got.TargetUserID)
 	}
 	var nilR *RoutingDef
 	if nilR.ToActionRouting().HasTarget() {
@@ -97,10 +100,19 @@ func TestRoutingDef_ToActionRouting(t *testing.T) {
 	}
 }
 
+// TestValidateActions_TargetUsersAllowed asserts a kit may declare email
+// distribution addresses (target_users) — emails are portable, unlike a user id.
+func TestValidateActions_TargetUsersAllowed(t *testing.T) {
+	r := &RoutingDef{TargetUsers: []string{"fm-desk@ex.io"}}
+	if err := validateActions(profileWithActions(r, nil)); err != nil {
+		t.Errorf("target_users (email) routing should be allowed: %v", err)
+	}
+}
+
 // TestValidateActions_RejectsDirectUserRouting asserts the kit-author guardrail:
-// a manifest routing block that addresses a recipient directly by user id /
-// email is rejected with OGA-DKIT-VAL-1050 (per-user routing is non-portable;
-// kits declare target_roles / target_groups only). The rejected catch-fields
+// a manifest routing block that addresses a recipient directly by user id is
+// rejected with OGA-DKIT-VAL-1050 (by-id is non-portable; kits declare
+// target_users / target_roles / target_groups). The rejected catch-fields
 // (target_user_id / user_id / operator_id) exist solely to surface this code
 // instead of a generic decode error. Covers both primary and escalation routing.
 func TestValidateActions_RejectsDirectUserRouting(t *testing.T) {
@@ -120,7 +132,7 @@ func TestValidateActions_RejectsDirectUserRouting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateActions(profileWithActions(tc.routing, tc.esc))
 			if err == nil {
-				t.Fatalf("by-user routing should be rejected")
+				t.Fatalf("by-user-id routing should be rejected")
 			}
 			if got := codeOf(t, err); got != ErrCodeActionRoutingDirectUser {
 				t.Errorf("code = %s, want %s", got, ErrCodeActionRoutingDirectUser)

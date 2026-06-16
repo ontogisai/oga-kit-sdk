@@ -41,7 +41,7 @@ func validateActions(p *DomainAgentProfile) error {
 func validateProactiveRouting(pr *ProactiveConfig) error {
 	if pr == nil {
 		return newActionValidationError(ErrCodeActionRoutingRequired, "", "proactive_reasoning.routing",
-			"required (at least one of target_roles/target_groups) when actions are declared")
+			"required (at least one of target_users/target_roles/target_groups) when actions are declared")
 	}
 	// Reject by-user routing FIRST, so a routing block carrying only a by-user
 	// catch-field surfaces OGA-DKIT-VAL-1050 (not the generic routing-required
@@ -56,7 +56,7 @@ func validateProactiveRouting(pr *ProactiveConfig) error {
 	}
 	if !pr.Routing.HasTarget() {
 		return newActionValidationError(ErrCodeActionRoutingRequired, "", "proactive_reasoning.routing",
-			"required (at least one of target_roles/target_groups) when actions are declared")
+			"required (at least one of target_users/target_roles/target_groups) when actions are declared")
 	}
 	if pr.Routing.NotificationHoldWindow != "" {
 		if _, err := time.ParseDuration(pr.Routing.NotificationHoldWindow); err != nil {
@@ -87,13 +87,13 @@ func validateNoDirectUserRouting(r *RoutingDef, fieldPath string) error {
 	switch {
 	case r.TargetUserID != "":
 		return newActionValidationError(ErrCodeActionRoutingDirectUser, "", fieldPath+".target_user_id",
-			"by-user routing is not portable across tenants; use target_roles / target_groups")
+			"by-user-id routing is not portable across tenants; use target_users (email) / target_roles / target_groups")
 	case r.UserID != "":
 		return newActionValidationError(ErrCodeActionRoutingDirectUser, "", fieldPath+".user_id",
-			"by-user routing is not portable across tenants; use target_roles / target_groups")
+			"by-user-id routing is not portable across tenants; use target_users (email) / target_roles / target_groups")
 	case r.OperatorID != "":
 		return newActionValidationError(ErrCodeActionRoutingDirectUser, "", fieldPath+".operator_id",
-			"by-user routing is not portable across tenants; use target_roles / target_groups")
+			"by-user-id routing is not portable across tenants; use target_users (email) / target_roles / target_groups")
 	}
 	return nil
 }

@@ -33,11 +33,11 @@ const (
 	ErrCodeActionEdgeType         = "OGA-DKIT-VAL-1048" // relationships[].edge.type invalid (must be existing|new)
 	ErrCodeActionEdgeName         = "OGA-DKIT-VAL-1049" // relationships[].edge.name required
 	// ErrCodeActionRoutingDirectUser rejects kit-authored routing that
-	// addresses a recipient directly by user id / email (target_user_id,
-	// user_id, operator_id). Per-user routing is non-portable across tenants —
-	// kit routing must address by target_roles / target_groups only. Direct
-	// user routing is a tenant-override concern resolved at delivery time.
-	ErrCodeActionRoutingDirectUser = "OGA-DKIT-VAL-1050" // routing addresses a user directly (non-portable)
+	// addresses a recipient directly by user id (target_user_id, user_id,
+	// operator_id). A user id is non-portable across tenants — kit routing must
+	// address by target_users (email), target_roles, or target_groups. Emails
+	// are portable distribution addresses and ARE allowed; only by-id is not.
+	ErrCodeActionRoutingDirectUser = "OGA-DKIT-VAL-1050" // routing addresses a user by id (non-portable)
 )
 
 // ActionValidationError is the structured error returned when an action

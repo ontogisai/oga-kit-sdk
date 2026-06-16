@@ -274,15 +274,22 @@ func (p *DomainAgentProfile) CandidateActions(event *ProactiveEvent) []ActionDef
 // RoutingDef is the kit-facing YAML form of a routing target. It mirrors
 // gateway.ActionRouting but carries yaml tags (gateway.ActionRouting has json
 // tags only). The proactive handler converts it to gateway.ActionRouting at
-// submit time via ToActionRouting. At least one of TargetRoles / TargetGroups
-// must be set.
+// submit time via ToActionRouting. At least one of TargetUsers / TargetRoles /
+// TargetGroups must be set.
 //
-// Kit-authored routing addresses recipients by ROLE or GROUP only. Addressing a
-// specific user (by id or email) is non-portable across tenants and is rejected
-// at manifest validation (OGA-DKIT-VAL-1042) — per-user routing is a
-// tenant-override concern resolved at delivery time, never declared in a kit
-// bundle.
+// Kit-authored routing addresses recipients by EMAIL (target_users), ROLE
+// (target_roles), or GROUP (target_groups). Addressing a specific user by id is
+// non-portable across tenants and is rejected at manifest validation
+// (OGA-DKIT-VAL-1050) — by-id routing is a runtime/programmatic concern resolved
+// at delivery time, never declared in a kit bundle. Emails ARE portable as
+// distribution addresses, so target_users is allowed in manifests.
 type RoutingDef struct {
+	// TargetUsers lists recipients by email address — distribution addresses a
+	// kit can configure (e.g. an FM mailbox). The platform resolves each email
+	// to an active Tenant User at delivery time; unresolvable emails are logged
+	// and skipped, never fabricated.
+	TargetUsers []string `yaml:"target_users,omitempty"`
+
 	// TargetRoles lists platform roles whose members receive the notification
 	// (e.g. ["fm_operator"]). The most common form for kit-declared routing.
 	TargetRoles []string `yaml:"target_roles,omitempty"`
@@ -303,11 +310,11 @@ type RoutingDef struct {
 	NotificationHoldWindow string `yaml:"notification_hold_window,omitempty"`
 
 	// TargetUserID / UserID / OperatorID are REJECTED catch fields. Kit routing
-	// must address recipients by target_roles / target_groups only — a user id
-	// or email is non-portable across tenants. These fields exist solely so the
-	// manifest loader produces the helpful OGA-DKIT-VAL-1050 error instead of a
-	// generic "unknown field" decode error. Always rejected at load by
-	// validateNoDirectUserRouting; never used for routing.
+	// may address recipients by email (target_users), role, or group — but NOT
+	// by user id, which is non-portable across tenants. These fields exist
+	// solely so the manifest loader produces the helpful OGA-DKIT-VAL-1050 error
+	// instead of a generic "unknown field" decode error. Always rejected at load
+	// by validateNoDirectUserRouting; never used for routing.
 	TargetUserID string `yaml:"target_user_id,omitempty"`
 	UserID       string `yaml:"user_id,omitempty"`
 	OperatorID   string `yaml:"operator_id,omitempty"`
@@ -318,7 +325,7 @@ func (r *RoutingDef) HasTarget() bool {
 	if r == nil {
 		return false
 	}
-	return len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
+	return len(r.TargetUsers) > 0 || len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
 }
 
 // ToActionRouting converts the YAML routing form to the canonical gateway type.
@@ -335,6 +342,7 @@ func (r *RoutingDef) ToActionRouting() gateway.ActionRouting {
 		}
 	}
 	return gateway.ActionRouting{
+		TargetUsers:            r.TargetUsers,
 		TargetRoles:            r.TargetRoles,
 		TargetGroups:           r.TargetGroups,
 		Channels:               r.Channels,
