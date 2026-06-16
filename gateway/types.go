@@ -221,6 +221,13 @@ type InvestigationContextPayload struct {
 	AgentType      string   `json:"agent_type"`
 	TenantID       string   `json:"tenant_id"`
 	ReasoningFacts []string `json:"reasoning_facts,omitempty"`
+	// TriggerEntityIDs are the KG entity ids the proposal was raised about —
+	// the seed set for a reactive investigation's grounded retrieval (OGA-378).
+	// Repeated by design: a proactive proposal carries exactly one (the
+	// triggering entity), while a convergence proposal may correlate several.
+	// Distinct from the execution-path single-source TriggerEntityID (OGA-321),
+	// which resolves the outcome entity's source edge and stays singular.
+	TriggerEntityIDs []string `json:"trigger_entity_ids,omitempty"`
 }
 
 // ApprovalDecision is the signal payload an operator (or the auto-approve timer)

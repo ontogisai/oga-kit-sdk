@@ -93,6 +93,15 @@ type Input struct {
 	// applies via agent.ResolveDependentArgsForTool (OGA-331) — see the
 	// two-conventions note in placeholders.go.
 	ProactivePlaceholders ProactivePlaceholderResolver
+
+	// InvestigationEntityIDs are the concrete KG entity ids a reactive
+	// investigation should ground on (OGA-378). When non-empty, the handler
+	// selects the deterministic InvestigationGroundingPlanner (seed retrieval
+	// from these ids) instead of the LLMToolPlanner. Empty on plain chat.
+	// These are concrete ids carried on the investigation forward — NOT the
+	// proactive {entity_id} placeholders (which only exist on the proactive
+	// path).
+	InvestigationEntityIDs []string
 }
 
 // Pipeline is the shared streaming orchestrator. Construct with NewPipeline
