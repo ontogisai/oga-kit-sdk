@@ -2,8 +2,10 @@ package streampipeline
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
+	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
 // NewDefaultStreamHandler returns a StreamHandlerFunc that drives the
@@ -16,10 +18,15 @@ import (
 //
 // The streaming path is the agent's REACTIVE surface — interactive operator
 // chat and the [Investigate] deep link (Frontier routes the follow-up here as
-// a free-text A2A message with intent="investigation"). Like the platform's
-// Knowledge Agent, it ALWAYS uses LLMToolPlanner: the LLM reads the operator's
-// message plus any injected investigation context and plans MCP tools
-// dynamically per request.
+// a free-text A2A message with intent="investigation"). It selects the planner
+// per request:
+//
+//   - When the inbound message carries concrete investigation entity ids
+//     (InvestigationContext.trigger_entity_ids, surfaced in the message
+//     metadata), it uses the deterministic InvestigationGroundingPlanner to
+//     seed grounded retrieval from those entities (OGA-378).
+//   - Otherwise (plain chat) it uses LLMToolPlanner, like the platform's
+//     Knowledge Agent: the LLM plans MCP tools dynamically per request.
 //
 // The profile's proactive_reasoning.grounding_strategy is deliberately NOT
 // consulted here. A grounding strategy is a deterministic plan tuned for an
@@ -27,9 +34,9 @@ import (
 // {entity_id} that only exist on the proactive event). Running it on the
 // reactive path would replay that rigid plan against an interactive query —
 // the placeholders pass through literally and tool calls fail (OGA-348). The
-// grounding strategy is consumed exclusively by the proactive handler
-// (NewProactiveMessageHandler → runProactiveReasoning), which constructs its
-// own GroundingStrategyPlanner.
+// investigation planner above is the reactive analogue: it takes CONCRETE ids
+// (no placeholders). The grounding strategy is consumed exclusively by the
+// proactive handler (NewProactiveMessageHandler → runProactiveReasoning).
 //
 // All MCP tool calls and LLM completions go through deps.Gateway —
 // the Platform Access Gateway — for centralised PBAC, audit, rate
@@ -46,10 +53,17 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 		profile := rt.Profile()
 		deps := rt.Deps()
 
-		// Reactive streaming always uses LLM-driven tool planning — identical
-		// to the Knowledge Agent. The grounding strategy is proactive-only
-		// (see the doc comment above and runProactiveReasoning in proactive.go).
-		planner := reactiveStreamPlanner(rt)
+		// Select the reactive planner per request. When the investigation
+		// forward carries concrete entity ids (OGA-378), ground deterministically
+		// on them; otherwise plan tools dynamically via the LLM. The proactive
+		// grounding strategy is never used here (see the doc comment + OGA-348).
+		investigationIDs := investigationEntityIDsFromMessage(msg.Params.Message)
+		var planner StreamPlanner
+		if len(investigationIDs) > 0 {
+			planner = NewInvestigationGroundingPlanner(investigationIDs)
+		} else {
+			planner = reactiveStreamPlanner(rt)
+		}
 
 		// Determine actor identity.
 		actor := agent.EventActor{
@@ -65,12 +79,13 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 		}
 
 		input := Input{
-			Query:          userText,
-			TenantID:       deps.TenantID,
-			PrincipalID:    "", // populated by gateway on outbound calls
-			Actor:          actor,
-			AssemblyPrompt: assemblyPrompt,
-			ToolNames:      agent.UniqueTools(profile),
+			Query:                  userText,
+			TenantID:               deps.TenantID,
+			PrincipalID:            "", // populated by gateway on outbound calls
+			Actor:                  actor,
+			AssemblyPrompt:         assemblyPrompt,
+			ToolNames:              agent.UniqueTools(profile),
+			InvestigationEntityIDs: investigationIDs,
 		}
 
 		// Bridge: streampipeline emits to a channel; we forward to the
@@ -119,4 +134,72 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 // handler (NewProactiveMessageHandler → runProactiveReasoning). See OGA-348.
 func reactiveStreamPlanner(rt *agent.DefaultRuntime) StreamPlanner {
 	return NewLLMToolPlanner(rt.Deps().Gateway, rt.Profile(), rt.PlannerConfig())
+}
+
+// Metadata keys carrying investigation context on an inbound A2A message
+// (set by Frontier when it force-routes an [Investigate] follow-up). These
+// mirror the platform's stateless-investigation contract
+// (internal/agent/investigation_stateless.go) by value.
+const (
+	metadataKeyInvestigationContext = "investigation_context"
+	metadataKeyTriggerEntityIDs     = "trigger_entity_ids"
+)
+
+// investigationEntityIDsFromMessage extracts the concrete investigation seed
+// entity ids from an inbound A2A message's metadata (OGA-378). Frontier, when
+// it force-routes an [Investigate] follow-up to the proposing agent, carries
+// the proposal's InvestigationContext in message metadata. Two shapes are
+// accepted (in priority order):
+//
+//  1. metadata["investigation_context"] — a JSON string of the
+//     InvestigationContextPayload; we read its trigger_entity_ids.
+//  2. metadata["trigger_entity_ids"]    — a direct array of ids (or a single
+//     string), for callers that forward only the ids.
+//
+// Returns nil when neither is present or no ids are found — the caller then
+// falls back to the LLM planner (plain chat).
+func investigationEntityIDsFromMessage(m *agent.Message) []string {
+	if m == nil || m.Metadata == nil {
+		return nil
+	}
+
+	// Shape 1: the serialized investigation context.
+	if raw, ok := m.Metadata[metadataKeyInvestigationContext]; ok {
+		if s, isStr := raw.(string); isStr && s != "" {
+			var ic gateway.InvestigationContextPayload
+			if err := json.Unmarshal([]byte(s), &ic); err == nil && len(ic.TriggerEntityIDs) > 0 {
+				return ic.TriggerEntityIDs
+			}
+		}
+	}
+
+	// Shape 2: a direct ids field.
+	if raw, ok := m.Metadata[metadataKeyTriggerEntityIDs]; ok {
+		return coerceStringSlice(raw)
+	}
+	return nil
+}
+
+// coerceStringSlice converts a metadata value that may be []any, []string, or
+// a single string into a []string (dropping non-string / empty elements).
+func coerceStringSlice(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case string:
+		if t == "" {
+			return nil
+		}
+		return []string{t}
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
