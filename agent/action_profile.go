@@ -272,20 +272,22 @@ func (p *DomainAgentProfile) CandidateActions(event *ProactiveEvent) []ActionDef
 }
 
 // RoutingDef is the kit-facing YAML form of a routing target. It mirrors
-// gateway.ActionRouting one-for-one but carries yaml tags (gateway.ActionRouting
-// has json tags only). The proactive handler converts it to gateway.ActionRouting
-// at submit time via ToActionRouting. At least one of TargetUserID / TargetRoles
-// / TargetGroups must be set.
+// gateway.ActionRouting but carries yaml tags (gateway.ActionRouting has json
+// tags only). The proactive handler converts it to gateway.ActionRouting at
+// submit time via ToActionRouting. At least one of TargetRoles / TargetGroups
+// must be set.
+//
+// Kit-authored routing addresses recipients by ROLE or GROUP only. Addressing a
+// specific user (by id or email) is non-portable across tenants and is rejected
+// at manifest validation (OGA-DKIT-VAL-1042) — per-user routing is a
+// tenant-override concern resolved at delivery time, never declared in a kit
+// bundle.
 type RoutingDef struct {
-	// TargetUserID addresses a specific user by id. When set, the role and
-	// group targets are ignored by the notification-router.
-	TargetUserID string `yaml:"target_user_id,omitempty"`
-
 	// TargetRoles lists platform roles whose members receive the notification
 	// (e.g. ["fm_operator"]). The most common form for kit-declared routing.
 	TargetRoles []string `yaml:"target_roles,omitempty"`
 
-	// TargetGroups lists operator groups (e.g. ["fm-managers-night-shift"]).
+	// TargetGroups lists user groups (e.g. ["fm-managers-night-shift"]).
 	TargetGroups []string `yaml:"target_groups,omitempty"`
 
 	// Channels constrains delivery channels: empty honors each recipient's
@@ -296,9 +298,19 @@ type RoutingDef struct {
 	// notification by this Go-duration string (e.g. "5s") so a convergence
 	// agent can correlate and supersede the proposal before the operator sees
 	// it. Empty / unset = "0" = no hold. Parsed + validated at load
-	// (OGA-DKIT-VAL-1041). Only meaningful on the primary proactive_reasoning.
+	// (OGA-DKIT-VAL-1042). Only meaningful on the primary proactive_reasoning.
 	// routing — ignored on escalation_policy.routing.
 	NotificationHoldWindow string `yaml:"notification_hold_window,omitempty"`
+
+	// TargetUserID / UserID / OperatorID are REJECTED catch fields. Kit routing
+	// must address recipients by target_roles / target_groups only — a user id
+	// or email is non-portable across tenants. These fields exist solely so the
+	// manifest loader produces the helpful OGA-DKIT-VAL-1050 error instead of a
+	// generic "unknown field" decode error. Always rejected at load by
+	// validateNoDirectUserRouting; never used for routing.
+	TargetUserID string `yaml:"target_user_id,omitempty"`
+	UserID       string `yaml:"user_id,omitempty"`
+	OperatorID   string `yaml:"operator_id,omitempty"`
 }
 
 // HasTarget reports whether at least one recipient target is populated.
@@ -306,7 +318,7 @@ func (r *RoutingDef) HasTarget() bool {
 	if r == nil {
 		return false
 	}
-	return r.TargetUserID != "" || len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
+	return len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
 }
 
 // ToActionRouting converts the YAML routing form to the canonical gateway type.
@@ -323,7 +335,6 @@ func (r *RoutingDef) ToActionRouting() gateway.ActionRouting {
 		}
 	}
 	return gateway.ActionRouting{
-		TargetUserID:           r.TargetUserID,
 		TargetRoles:            r.TargetRoles,
 		TargetGroups:           r.TargetGroups,
 		Channels:               r.Channels,

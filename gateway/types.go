@@ -9,8 +9,9 @@ import "time"
 // between the kit-facing contract and the platform-internal contract
 // structurally impossible.
 //
-// The SDK uses domain-agnostic terminology (TargetUserID, not OperatorID) so
-// any vertical kit can consume the contract without mental translation.
+// The SDK uses domain-agnostic terminology (TargetUserID / TargetUsers, not
+// OperatorID) so any vertical kit can consume the contract without mental
+// translation.
 //
 // Spec: .kiro/specs/proactive-action-handling/design.md — "SDK-canonical types".
 
@@ -97,17 +98,32 @@ const (
 // both for primary delivery (ActionProposal.Routing) and for escalation when
 // EscalationTimeout fires (ActionProposal.EscalationRouting).
 //
-// At least one of TargetUserID / TargetRoles / TargetGroups must be populated.
+// At least one of TargetUserID / TargetUsers / TargetRoles / TargetGroups must
+// be populated. The platform resolves every target form to a set of Tenant
+// Users at delivery time, so a single proposal may fan out to multiple
+// recipients. The recipient precedence is TargetUserID > TargetUsers >
+// TargetRoles > TargetGroups (notification-contact-resolution design,
+// OGA-356 addendum).
 type ActionRouting struct {
-	// TargetUserID addresses a specific user (operator OR supervisor) by id.
-	// When set, TargetRoles and TargetGroups are ignored.
+	// TargetUserID addresses a single specific user by id (a TenantUser.id).
+	// It is runtime/programmatic ONLY — escalation to a named supervisor,
+	// personalised-agent self-targeting, or any platform-constructed proposal.
+	// It is NEVER authored in a kit manifest (the manifest validator rejects a
+	// by-user routing key with OGA-DKIT-VAL-1050). When set, the other target
+	// forms are ignored.
 	TargetUserID string `json:"target_user_id,omitempty"`
+
+	// TargetUsers lists recipients by email address (a tenant-override config
+	// tier, not a kit-authored one). The platform resolves each email to an
+	// active Tenant User at delivery time; unresolvable emails are logged and
+	// skipped, never fabricated.
+	TargetUsers []string `json:"target_users,omitempty"`
 
 	// TargetRoles lists platform roles whose members should receive the
 	// notification (e.g., ["fm_manager"]).
 	TargetRoles []string `json:"target_roles,omitempty"`
 
-	// TargetGroups lists operator groups (e.g., "fm-managers-night-shift").
+	// TargetGroups lists user groups (e.g., "fm-managers-night-shift").
 	TargetGroups []string `json:"target_groups,omitempty"`
 
 	// Channels constrains delivery channels: nil/[] honors recipient
@@ -126,7 +142,7 @@ type ActionRouting struct {
 
 // HasTarget reports whether at least one recipient target is populated.
 func (r ActionRouting) HasTarget() bool {
-	return r.TargetUserID != "" || len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
+	return r.TargetUserID != "" || len(r.TargetUsers) > 0 || len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
 }
 
 // ActionProposal is the kit-author input contract for a proposed action. The
