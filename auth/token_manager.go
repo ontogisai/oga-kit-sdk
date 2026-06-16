@@ -94,13 +94,30 @@ func (tm *TokenManager) loadFromFile() error {
 
 	tm.mu.Lock()
 	tm.current = token
-	// Default expiry: assume 1h TTL if we can't determine from the token
-	if tm.expiresAt.IsZero() {
+	// The token file is the compact JSON of the platform ServiceToken; parse
+	// its expires_at so the renewal loop schedules against the real TTL rather
+	// than a 1h guess. Fall back to now+1h only when the field is unparseable.
+	if exp := parseTokenExpiry(token); !exp.IsZero() {
+		tm.expiresAt = exp
+	} else if tm.expiresAt.IsZero() {
 		tm.expiresAt = time.Now().Add(1 * time.Hour)
 	}
 	tm.mu.Unlock()
 
 	return nil
+}
+
+// parseTokenExpiry extracts expires_at from the compact ServiceToken JSON the
+// gateway issues. Returns the zero time when the token is not JSON or has no
+// expires_at (e.g. an opaque dev token).
+func parseTokenExpiry(token string) time.Time {
+	var st struct {
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal([]byte(token), &st); err != nil {
+		return time.Time{}
+	}
+	return st.ExpiresAt
 }
 
 func (tm *TokenManager) renewalLoop(ctx context.Context) {

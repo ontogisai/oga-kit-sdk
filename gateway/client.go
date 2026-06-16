@@ -24,6 +24,12 @@ type PlatformGatewayClient struct {
 
 	mu    sync.RWMutex
 	token string
+
+	// tokenProvider, when set, is the authoritative source of the current
+	// bearer token. It is wired to a TokenManager that performs sliding
+	// renewal against /auth/token/refresh, so the client always sends a
+	// fresh token. When nil, the client falls back to reading tokenPath.
+	tokenProvider func() string
 }
 
 // NewPlatformGatewayClient creates a new gateway client.
@@ -36,6 +42,16 @@ func NewPlatformGatewayClient(baseURL, tokenPath, tenantID string) *PlatformGate
 			Timeout: 120 * time.Second,
 		},
 	}
+}
+
+// SetTokenProvider wires an authoritative token source (typically a
+// *auth.TokenManager's Token method). Once set, every request reads the bearer
+// from the provider instead of the cached file value, so rotated tokens are
+// picked up immediately.
+func (c *PlatformGatewayClient) SetTokenProvider(provider func() string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tokenProvider = provider
 }
 
 // CallTool invokes an MCP tool via the Platform Access Gateway.
@@ -478,11 +494,20 @@ func (c *PlatformGatewayClient) setHeaders(req *http.Request) {
 
 func (c *PlatformGatewayClient) loadToken() string {
 	c.mu.RLock()
-	if c.token != "" {
-		defer c.mu.RUnlock()
-		return c.token
-	}
+	provider := c.tokenProvider
+	cached := c.token
 	c.mu.RUnlock()
+
+	// Authoritative source when wired (TokenManager with sliding renewal).
+	if provider != nil {
+		if tok := provider(); tok != "" {
+			return tok
+		}
+	}
+
+	if cached != "" {
+		return cached
+	}
 
 	if c.tokenPath == "" {
 		return ""
