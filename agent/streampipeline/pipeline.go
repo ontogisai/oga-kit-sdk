@@ -155,11 +155,29 @@ func (p *Pipeline) runInternal(
 	// 1. Plan
 	plan, narrative, err := planner.Plan(ctx, input.Query, input.ToolNames)
 	if err != nil {
-		emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
-			Code:    -32000,
-			Message: "planning failed: " + err.Error(),
-		})
-		return fmt.Errorf("planner.Plan: %w", err)
+		// Context cancellation is terminal — there is no point attempting a
+		// fallback against a dead context, and the operator should see the
+		// task fail rather than a degraded answer.
+		if ctx.Err() != nil {
+			emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
+				Code:    -32000,
+				Message: "planning failed: " + err.Error(),
+			})
+			return fmt.Errorf("planner.Plan: %w", err)
+		}
+		// Planning failed for a non-fatal reason — most commonly the LLM
+		// returned prose instead of the expected JSON tool plan (parse error),
+		// or a transient gateway hiccup. Degrade to a plain LLM answer so the
+		// operator still gets a useful response, mirroring the non-streaming
+		// PlanAndExecute path in agent/tool_planner.go. If the gateway is
+		// genuinely down, the assembly call inside runPlainAnswer fails and
+		// surfaces task/status{failed} — so a real transport failure is never
+		// masked as success.
+		logger.WarnContext(ctx, "streampipeline: planning failed, falling back to plain answer",
+			"error", err,
+		)
+		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter,
+			"Tool planning was unavailable; answering directly from the model.")
 	}
 
 	if narrative != nil && narrative.Text != "" {
@@ -168,7 +186,8 @@ func (p *Pipeline) runInternal(
 
 	if plan == nil || len(plan.Steps) == 0 {
 		// No plan — fall through to plain LLM answer (no tool grounding).
-		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter)
+		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter,
+			"No tool calls needed; answering directly.")
 	}
 
 	// Resolve proactive event placeholders ({entity_id}, {entity_properties.X},
@@ -266,8 +285,11 @@ func (p *Pipeline) runInternal(
 }
 
 // runPlainAnswer is invoked when the planner returns 0 steps (e.g., trivial
-// greeting, or LLM judges no tools needed). Streams a single LLM response as
-// task/artifact, no plan / tool / citation events.
+// greeting, or LLM judges no tools needed) or when planning failed and the
+// pipeline degrades to an ungrounded answer (per OGA-368). Streams a single
+// LLM response as task/artifact, no plan / tool / citation events. The
+// reasoningText is emitted as the leading task/reasoning event so the operator
+// sees why no tools were used.
 func (p *Pipeline) runPlainAnswer(
 	ctx context.Context,
 	gw gatewayClient,
@@ -276,8 +298,9 @@ func (p *Pipeline) runPlainAnswer(
 	tracker *agent.SpanTracker,
 	rootSpan string,
 	emitter *eventEmitter,
+	reasoningText string,
 ) error {
-	emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, "No tool calls needed; answering directly.", false)
+	emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, reasoningText, false)
 
 	if err := p.streamAssembly(ctx, gw, input, cfg, tracker, rootSpan, emitter, nil); err != nil {
 		emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
