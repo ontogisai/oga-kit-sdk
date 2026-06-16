@@ -113,10 +113,11 @@ type ActionRouting struct {
 	// forms are ignored.
 	TargetUserID string `json:"target_user_id,omitempty"`
 
-	// TargetUsers lists recipients by email address (a tenant-override config
-	// tier, not a kit-authored one). The platform resolves each email to an
-	// active Tenant User at delivery time; unresolvable emails are logged and
-	// skipped, never fabricated.
+	// TargetUsers lists recipients by email address — distribution addresses
+	// that a kit MAY declare in its manifest (emails are portable across
+	// tenants) or that may be set as a tenant override. The platform resolves
+	// each email to an active Tenant User at delivery time; unresolvable emails
+	// are logged and skipped, never fabricated.
 	TargetUsers []string `json:"target_users,omitempty"`
 
 	// TargetRoles lists platform roles whose members should receive the
