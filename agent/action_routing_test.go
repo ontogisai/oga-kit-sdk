@@ -80,13 +80,63 @@ func TestValidateActions_NoActionsNoRoutingRequired(t *testing.T) {
 }
 
 func TestRoutingDef_ToActionRouting(t *testing.T) {
-	r := &RoutingDef{TargetUserID: "op-1", TargetRoles: []string{"fm_operator"}, Channels: []string{"all"}}
+	r := &RoutingDef{TargetUsers: []string{"fm@ex.io"}, TargetRoles: []string{"fm_operator"}, Channels: []string{"all"}}
 	got := r.ToActionRouting()
-	if got.TargetUserID != "op-1" || len(got.TargetRoles) != 1 || got.Channels[0] != "all" {
+	if len(got.TargetRoles) != 1 || got.TargetRoles[0] != "fm_operator" || got.Channels[0] != "all" {
 		t.Errorf("unexpected conversion: %+v", got)
+	}
+	if len(got.TargetUsers) != 1 || got.TargetUsers[0] != "fm@ex.io" {
+		t.Errorf("ToActionRouting must propagate target_users (emails), got %+v", got.TargetUsers)
+	}
+	// By-user-id routing is not a kit-authored concept: ToActionRouting never
+	// propagates a user id (the field is a rejected catch-field; see
+	// TestValidateActions_RejectsDirectUserRouting).
+	if got.TargetUserID != "" {
+		t.Errorf("ToActionRouting must not propagate a by-id target, got %q", got.TargetUserID)
 	}
 	var nilR *RoutingDef
 	if nilR.ToActionRouting().HasTarget() {
 		t.Error("nil RoutingDef should convert to empty routing")
+	}
+}
+
+// TestValidateActions_TargetUsersAllowed asserts a kit may declare email
+// distribution addresses (target_users) — emails are portable, unlike a user id.
+func TestValidateActions_TargetUsersAllowed(t *testing.T) {
+	r := &RoutingDef{TargetUsers: []string{"fm-desk@ex.io"}}
+	if err := validateActions(profileWithActions(r, nil)); err != nil {
+		t.Errorf("target_users (email) routing should be allowed: %v", err)
+	}
+}
+
+// TestValidateActions_RejectsDirectUserRouting asserts the kit-author guardrail:
+// a manifest routing block that addresses a recipient directly by user id is
+// rejected with OGA-DKIT-VAL-1050 (by-id is non-portable; kits declare
+// target_users / target_roles / target_groups). The rejected catch-fields
+// (target_user_id / user_id / operator_id) exist solely to surface this code
+// instead of a generic decode error. Covers both primary and escalation routing.
+func TestValidateActions_RejectsDirectUserRouting(t *testing.T) {
+	cases := []struct {
+		name    string
+		routing *RoutingDef
+		esc     *EscalationPolicyDef
+	}{
+		{"primary target_user_id", &RoutingDef{TargetUserID: "user-1"}, nil},
+		{"primary user_id", &RoutingDef{UserID: "user-1"}, nil},
+		{"primary operator_id (legacy)", &RoutingDef{OperatorID: "op-1"}, nil},
+		{"escalation target_user_id",
+			&RoutingDef{TargetRoles: []string{"fm_operator"}},
+			&EscalationPolicyDef{Routing: RoutingDef{TargetUserID: "user-2"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateActions(profileWithActions(tc.routing, tc.esc))
+			if err == nil {
+				t.Fatalf("by-user-id routing should be rejected")
+			}
+			if got := codeOf(t, err); got != ErrCodeActionRoutingDirectUser {
+				t.Errorf("code = %s, want %s", got, ErrCodeActionRoutingDirectUser)
+			}
+		})
 	}
 }

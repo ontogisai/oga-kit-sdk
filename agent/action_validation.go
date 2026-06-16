@@ -39,9 +39,24 @@ func validateActions(p *DomainAgentProfile) error {
 // declares a primary routing target, and that any routing/escalation durations
 // parse. Called only when the profile has at least one action.
 func validateProactiveRouting(pr *ProactiveConfig) error {
-	if pr == nil || !pr.Routing.HasTarget() {
+	if pr == nil {
 		return newActionValidationError(ErrCodeActionRoutingRequired, "", "proactive_reasoning.routing",
-			"required (at least one of target_user_id/target_roles/target_groups) when actions are declared")
+			"required (at least one of target_users/target_roles/target_groups) when actions are declared")
+	}
+	// Reject by-user routing FIRST, so a routing block carrying only a by-user
+	// catch-field surfaces OGA-DKIT-VAL-1050 (not the generic routing-required
+	// 1041 — HasTarget intentionally ignores the catch-fields).
+	if err := validateNoDirectUserRouting(pr.Routing, "proactive_reasoning.routing"); err != nil {
+		return err
+	}
+	if pr.EscalationPolicy != nil {
+		if err := validateNoDirectUserRouting(&pr.EscalationPolicy.Routing, "proactive_reasoning.escalation_policy.routing"); err != nil {
+			return err
+		}
+	}
+	if !pr.Routing.HasTarget() {
+		return newActionValidationError(ErrCodeActionRoutingRequired, "", "proactive_reasoning.routing",
+			"required (at least one of target_users/target_roles/target_groups) when actions are declared")
 	}
 	if pr.Routing.NotificationHoldWindow != "" {
 		if _, err := time.ParseDuration(pr.Routing.NotificationHoldWindow); err != nil {
@@ -54,6 +69,31 @@ func validateProactiveRouting(pr *ProactiveConfig) error {
 			return newActionValidationError(ErrCodeActionEscalationDur, "", "proactive_reasoning.escalation_policy.timeout",
 				fmt.Sprintf("not a valid Go duration: %v", err))
 		}
+	}
+	return nil
+}
+
+// validateNoDirectUserRouting rejects a kit-authored routing block that
+// addresses a recipient directly by user id or email. Per-user routing is
+// non-portable across tenants — kit manifests may declare only target_roles /
+// target_groups. The by-user keys (target_user_id / user_id / operator_id) are
+// REJECTED catch-fields on RoutingDef; this surfaces the helpful
+// OGA-DKIT-VAL-1050 error instead of a generic decode failure. Programmatic
+// gateway construction is unaffected — this guards declarative manifests only.
+func validateNoDirectUserRouting(r *RoutingDef, fieldPath string) error {
+	if r == nil {
+		return nil
+	}
+	switch {
+	case r.TargetUserID != "":
+		return newActionValidationError(ErrCodeActionRoutingDirectUser, "", fieldPath+".target_user_id",
+			"by-user-id routing is not portable across tenants; use target_users (email) / target_roles / target_groups")
+	case r.UserID != "":
+		return newActionValidationError(ErrCodeActionRoutingDirectUser, "", fieldPath+".user_id",
+			"by-user-id routing is not portable across tenants; use target_users (email) / target_roles / target_groups")
+	case r.OperatorID != "":
+		return newActionValidationError(ErrCodeActionRoutingDirectUser, "", fieldPath+".operator_id",
+			"by-user-id routing is not portable across tenants; use target_users (email) / target_roles / target_groups")
 	}
 	return nil
 }

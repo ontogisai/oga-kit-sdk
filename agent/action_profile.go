@@ -272,20 +272,29 @@ func (p *DomainAgentProfile) CandidateActions(event *ProactiveEvent) []ActionDef
 }
 
 // RoutingDef is the kit-facing YAML form of a routing target. It mirrors
-// gateway.ActionRouting one-for-one but carries yaml tags (gateway.ActionRouting
-// has json tags only). The proactive handler converts it to gateway.ActionRouting
-// at submit time via ToActionRouting. At least one of TargetUserID / TargetRoles
-// / TargetGroups must be set.
+// gateway.ActionRouting but carries yaml tags (gateway.ActionRouting has json
+// tags only). The proactive handler converts it to gateway.ActionRouting at
+// submit time via ToActionRouting. At least one of TargetUsers / TargetRoles /
+// TargetGroups must be set.
+//
+// Kit-authored routing addresses recipients by EMAIL (target_users), ROLE
+// (target_roles), or GROUP (target_groups). Addressing a specific user by id is
+// non-portable across tenants and is rejected at manifest validation
+// (OGA-DKIT-VAL-1050) — by-id routing is a runtime/programmatic concern resolved
+// at delivery time, never declared in a kit bundle. Emails ARE portable as
+// distribution addresses, so target_users is allowed in manifests.
 type RoutingDef struct {
-	// TargetUserID addresses a specific user by id. When set, the role and
-	// group targets are ignored by the notification-router.
-	TargetUserID string `yaml:"target_user_id,omitempty"`
+	// TargetUsers lists recipients by email address — distribution addresses a
+	// kit can configure (e.g. an FM mailbox). The platform resolves each email
+	// to an active Tenant User at delivery time; unresolvable emails are logged
+	// and skipped, never fabricated.
+	TargetUsers []string `yaml:"target_users,omitempty"`
 
 	// TargetRoles lists platform roles whose members receive the notification
 	// (e.g. ["fm_operator"]). The most common form for kit-declared routing.
 	TargetRoles []string `yaml:"target_roles,omitempty"`
 
-	// TargetGroups lists operator groups (e.g. ["fm-managers-night-shift"]).
+	// TargetGroups lists user groups (e.g. ["fm-managers-night-shift"]).
 	TargetGroups []string `yaml:"target_groups,omitempty"`
 
 	// Channels constrains delivery channels: empty honors each recipient's
@@ -296,9 +305,19 @@ type RoutingDef struct {
 	// notification by this Go-duration string (e.g. "5s") so a convergence
 	// agent can correlate and supersede the proposal before the operator sees
 	// it. Empty / unset = "0" = no hold. Parsed + validated at load
-	// (OGA-DKIT-VAL-1041). Only meaningful on the primary proactive_reasoning.
+	// (OGA-DKIT-VAL-1042). Only meaningful on the primary proactive_reasoning.
 	// routing — ignored on escalation_policy.routing.
 	NotificationHoldWindow string `yaml:"notification_hold_window,omitempty"`
+
+	// TargetUserID / UserID / OperatorID are REJECTED catch fields. Kit routing
+	// may address recipients by email (target_users), role, or group — but NOT
+	// by user id, which is non-portable across tenants. These fields exist
+	// solely so the manifest loader produces the helpful OGA-DKIT-VAL-1050 error
+	// instead of a generic "unknown field" decode error. Always rejected at load
+	// by validateNoDirectUserRouting; never used for routing.
+	TargetUserID string `yaml:"target_user_id,omitempty"`
+	UserID       string `yaml:"user_id,omitempty"`
+	OperatorID   string `yaml:"operator_id,omitempty"`
 }
 
 // HasTarget reports whether at least one recipient target is populated.
@@ -306,7 +325,7 @@ func (r *RoutingDef) HasTarget() bool {
 	if r == nil {
 		return false
 	}
-	return r.TargetUserID != "" || len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
+	return len(r.TargetUsers) > 0 || len(r.TargetRoles) > 0 || len(r.TargetGroups) > 0
 }
 
 // ToActionRouting converts the YAML routing form to the canonical gateway type.
@@ -323,7 +342,7 @@ func (r *RoutingDef) ToActionRouting() gateway.ActionRouting {
 		}
 	}
 	return gateway.ActionRouting{
-		TargetUserID:           r.TargetUserID,
+		TargetUsers:            r.TargetUsers,
 		TargetRoles:            r.TargetRoles,
 		TargetGroups:           r.TargetGroups,
 		Channels:               r.Channels,
