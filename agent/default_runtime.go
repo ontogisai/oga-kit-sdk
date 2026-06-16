@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
+	"github.com/ontogisai/oga-kit-sdk/auth"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
@@ -36,6 +38,8 @@ type RuntimeDeps struct {
 	TenantID string
 	AgentID  string
 
+	tokenMgr *auth.TokenManager
+
 	mu     sync.RWMutex
 	closed bool
 }
@@ -51,18 +55,47 @@ func ConnectRuntimeDeps(ctx context.Context, cfg *RuntimeDepsConfig) (*RuntimeDe
 
 	gw := gateway.NewPlatformGatewayClient(cfg.GatewayURL, cfg.TokenPath, cfg.TenantID)
 
-	return &RuntimeDeps{
+	deps := &RuntimeDeps{
 		Gateway:  gw,
 		TenantID: cfg.TenantID,
 		AgentID:  cfg.AgentID,
-	}, nil
+	}
+
+	// Start sliding token renewal so the agent keeps a valid service token for
+	// its whole lifetime (the initial token is short-lived; the Sidecar Manager
+	// only mints the first one). The TokenManager refreshes at 50% TTL against
+	// the gateway's /auth/token/refresh endpoint and rewrites the token file;
+	// the gateway client reads the live token via the provider hook.
+	if cfg.TokenPath != "" {
+		tm, err := auth.NewTokenManager(ctx, &auth.TokenManagerConfig{
+			TokenPath:  cfg.TokenPath,
+			RefreshURL: strings.TrimRight(cfg.GatewayURL, "/") + "/auth/token/refresh",
+		})
+		if err != nil {
+			// Non-fatal: fall back to the static file token. The agent still
+			// works until the token expires; we log so the gap is visible.
+			slog.Warn("token manager init failed; running without token rotation",
+				"error", err, "token_path", cfg.TokenPath)
+		} else {
+			gw.SetTokenProvider(tm.Token)
+			deps.tokenMgr = tm
+		}
+	}
+
+	return deps, nil
 }
 
 // Close releases all resources held by the runtime dependencies.
 func (d *RuntimeDeps) Close() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return
+	}
 	d.closed = true
+	if d.tokenMgr != nil {
+		d.tokenMgr.Stop()
+	}
 }
 
 // StreamHandlerFunc is the pluggable streaming handler signature. The kit's
