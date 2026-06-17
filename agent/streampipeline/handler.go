@@ -23,9 +23,11 @@ import (
 // per request:
 //
 //   - When the inbound message carries concrete investigation entity ids
-//     (InvestigationContext.trigger_entity_ids, surfaced in the message
-//     metadata), it uses the deterministic InvestigationGroundingPlanner to
-//     seed grounded retrieval from those entities (OGA-378).
+//     (InvestigationContext seed ids, surfaced in the message metadata), it uses
+//     InvestigationLLMPlanner: it front-loads a deterministic kg_get_entity per
+//     seed entity (guaranteed grounding) and then lets the agent's full-toolbox
+//     LLM planner add question-relevant evidence (SOP, history, trends) — the
+//     same dynamic planner the chat path uses (OGA-378, Option 2).
 //   - Otherwise (plain chat) it uses LLMToolPlanner, like the platform's
 //     Knowledge Agent: the LLM plans MCP tools dynamically per request.
 //
@@ -35,9 +37,10 @@ import (
 // {entity_id} that only exist on the proactive event). Running it on the
 // reactive path would replay that rigid plan against an interactive query —
 // the placeholders pass through literally and tool calls fail (OGA-348). The
-// investigation planner above is the reactive analogue: it takes CONCRETE ids
-// (no placeholders). The grounding strategy is consumed exclusively by the
-// proactive handler (NewProactiveMessageHandler → runProactiveReasoning).
+// investigation planner above is the reactive analogue: it seeds on CONCRETE
+// ids (no placeholders) and reaches the rest of the toolbox via the LLM
+// planner. The grounding strategy is consumed exclusively by the proactive
+// handler (NewProactiveMessageHandler → runProactiveReasoning).
 //
 // All MCP tool calls and LLM completions go through deps.Gateway —
 // the Platform Access Gateway — for centralised PBAC, audit, rate
@@ -68,7 +71,10 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 		}
 		var planner StreamPlanner
 		if len(investigationIDs) > 0 {
-			planner = NewInvestigationGroundingPlanner(investigationIDs)
+			// Option 2 (OGA-378 rework): guarantee grounding on the proposal's
+			// concrete seed entities, then let the agent's full-toolbox LLM
+			// planner add question-relevant evidence (SOP, history, trends).
+			planner = NewInvestigationLLMPlanner(investigationIDs, reactiveStreamPlanner(rt))
 		} else {
 			planner = reactiveStreamPlanner(rt)
 		}
@@ -84,6 +90,15 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 		assemblyPrompt := ""
 		if profile.ProactiveReasoning != nil {
 			assemblyPrompt = profile.ProactiveReasoning.SystemPrompt
+		}
+		// On the investigation path, append the always-on concise-briefing format
+		// contract to the ASSEMBLY system prompt (not the planner input). This
+		// guarantees a succinct operator-facing verdict on every investigation,
+		// independent of how sparse the proposal context was. The planner builds
+		// its own system prompt (RequestPlan → PlanningSystemPrompt), so this
+		// never affects tool planning.
+		if hasInvCtx {
+			assemblyPrompt = appendInvestigationBriefingDirective(assemblyPrompt)
 		}
 
 		input := Input{
@@ -259,7 +274,8 @@ The proposal was raised because:
 {{- end}}
 {{- end}}
 
-Your job is to brief on whether THIS proposal is justified based on the evidence from the tool results. Do not propose a different action.]
+Brief the operator on whether THIS proposal is justified, grounded ONLY in the
+evidence from the tool results. Do not propose a different action.]
 
 {{.UserQuery}}`
 
@@ -294,6 +310,33 @@ func enrichQueryWithInvestigationContext(userText string, ic *investigationConte
 		return userText
 	}
 	return b.String()
+}
+
+// investigationBriefingDirective is the always-applied output-format contract
+// for the reactive [Investigate] briefing. It is decoupled from
+// investigationContextTemplate (which renders proposal context only when
+// anchoring fields are present) so that conciseness is enforced on EVERY
+// investigation briefing — even when the enriched context is sparse. It is
+// appended to the ASSEMBLY system prompt (consumed only by the final assembly
+// LLM call in pipeline.streamAssembly), so it constrains the operator-facing
+// briefing without affecting tool planning (the planner builds its own system
+// prompt via RequestPlan → PlanningSystemPrompt).
+const investigationBriefingDirective = `
+
+Keep the reply concise, succinct, and direct — at most ~200 words. Lead with a
+direct answer to the operator's question (for an approve/justify question, a
+one-line verdict first). Choose the format that communicates fastest — e.g. a
+compact table for sensor readings, a short labelled section for a distinct topic,
+brief bullets or a sentence or two otherwise. Ground every statement in the tool
+results; do not speculate about evidence you were not given, and say so plainly
+when it is insufficient.`
+
+// appendInvestigationBriefingDirective appends the always-on briefing format
+// contract to the assembly system prompt. Applied on every reactive
+// investigation regardless of how sparse the proposal context is, so the final
+// briefing is concise even when investigationContextTemplate rendered nothing.
+func appendInvestigationBriefingDirective(systemPrompt string) string {
+	return systemPrompt + investigationBriefingDirective
 }
 
 // nonEmptyStrings returns a copy of in with empty elements dropped.
