@@ -3,6 +3,7 @@ package streampipeline
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
@@ -79,7 +80,7 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 		}
 
 		input := Input{
-			Query:                  userText,
+			Query:                  enrichQueryWithInvestigationContext(userText, msg.Params.Message),
 			TenantID:               deps.TenantID,
 			PrincipalID:            "", // populated by gateway on outbound calls
 			Actor:                  actor,
@@ -202,4 +203,52 @@ func coerceStringSlice(v any) []string {
 	default:
 		return nil
 	}
+}
+
+// enrichQueryWithInvestigationContext augments the operator's question with the
+// proposal's reasoning_facts when the message carries an investigation context
+// (OGA-378 follow-up). This gives the assembly LLM the anomaly/proposal context
+// ("COP dropped below threshold", "high vibration alert") alongside the
+// grounded tool results, so it can produce a briefing that references WHY the
+// proposal was raised — not just the equipment properties.
+//
+// Returns the original userText unchanged when no reasoning_facts are found
+// (plain chat, or an investigation without facts).
+func enrichQueryWithInvestigationContext(userText string, m *agent.Message) string {
+	facts := investigationReasoningFactsFromMessage(m)
+	if len(facts) == 0 {
+		return userText
+	}
+	var b strings.Builder
+	b.WriteString(userText)
+	b.WriteString("\n\n[Investigation context — the proposal was raised because of these findings:\n")
+	for _, f := range facts {
+		b.WriteString("• ")
+		b.WriteString(f)
+		b.WriteByte('\n')
+	}
+	b.WriteString("Use these facts alongside the tool results to produce your briefing.]")
+	return b.String()
+}
+
+// investigationReasoningFactsFromMessage extracts the reasoning_facts from the
+// investigation context metadata (same source as investigationEntityIDsFromMessage).
+// Returns nil when absent or empty.
+func investigationReasoningFactsFromMessage(m *agent.Message) []string {
+	if m == nil || m.Metadata == nil {
+		return nil
+	}
+	raw, ok := m.Metadata[metadataKeyInvestigationContext]
+	if !ok {
+		return nil
+	}
+	s, isStr := raw.(string)
+	if !isStr || s == "" {
+		return nil
+	}
+	var ic gateway.InvestigationContextPayload
+	if err := json.Unmarshal([]byte(s), &ic); err != nil {
+		return nil
+	}
+	return ic.ReasoningFacts
 }
