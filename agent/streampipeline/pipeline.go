@@ -206,6 +206,21 @@ func (p *Pipeline) runInternal(
 	// and before emitPlan so chips show resolved values. See OGA-350.
 	substitutePlan(ctx, plan, input.ProactivePlaceholders, logger)
 
+	if traceEnabled() {
+		for i := range plan.Steps {
+			logger.InfoContext(ctx, "trace: grounding step (resolved args)",
+				"actor", input.Actor.ID,
+				"tenant_id", input.TenantID,
+				"step_index", i,
+				"name", plan.Steps[i].Name,
+				"tool", plan.Steps[i].ToolName,
+				"condition", plan.Steps[i].Condition,
+				"required", plan.Steps[i].Required,
+				"arguments", plan.Steps[i].Arguments,
+			)
+		}
+	}
+
 	if len(plan.Steps) > cfg.MaxSteps {
 		logger.WarnContext(ctx, "streampipeline: plan exceeds MaxSteps, truncating",
 			"plan_steps", len(plan.Steps),
@@ -365,6 +380,21 @@ func (p *Pipeline) streamAssembly(
 		MaxTokens: 2048,
 	}
 
+	// Trace: the effective reasoning prompt actually sent to the assembly LLM.
+	// This is the fully-composed system prompt (kit persona + locale overlay +
+	// the JSON-only / schema instruction RunSync appends) and the user prompt
+	// (the query plus the gathered tool-result context). Gated by OGA_AGENT_TRACE.
+	if traceEnabled() {
+		const promptCap = 8192
+		slog.InfoContext(ctx, "trace: effective reasoning prompt",
+			"actor", input.Actor.ID,
+			"tenant_id", input.TenantID,
+			"tool_results", len(results),
+			"system_prompt", truncateForTrace(systemPrompt, promptCap),
+			"user_prompt", truncateForTrace(userPrompt, promptCap),
+		)
+	}
+
 	asmCtx, cancel := context.WithTimeout(ctx, cfg.AssemblyTimeout)
 	defer cancel()
 
@@ -377,6 +407,8 @@ func (p *Pipeline) streamAssembly(
 		if streamErr == nil && tokenCh != nil {
 			first := true
 			anyContent := false
+			chunkCount := 0
+			artifactBytes := 0
 			for chunk := range tokenCh {
 				if asmCtx.Err() != nil {
 					break
@@ -388,9 +420,20 @@ func (p *Pipeline) streamAssembly(
 					emitter.emitArtifact(asmSpan, choice.Delta.Content, !first)
 					first = false
 					anyContent = true
+					chunkCount++
+					artifactBytes += len(choice.Delta.Content)
 				}
 			}
 			if anyContent {
+				if traceEnabled() {
+					slog.InfoContext(ctx, "trace: stream-collect complete",
+						"actor", input.Actor.ID,
+						"tenant_id", input.TenantID,
+						"mode", "stream",
+						"chunks", chunkCount,
+						"artifact_bytes", artifactBytes,
+					)
+				}
 				return nil
 			}
 			// Stream produced nothing — fall through to sync.
@@ -407,6 +450,15 @@ func (p *Pipeline) streamAssembly(
 		return errors.New("no choices in assembly response")
 	}
 	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if traceEnabled() {
+		slog.InfoContext(ctx, "trace: stream-collect complete",
+			"actor", input.Actor.ID,
+			"tenant_id", input.TenantID,
+			"mode", "sync_fallback",
+			"chunks", 1,
+			"artifact_bytes", len(answer),
+		)
+	}
 	emitter.emitArtifact(asmSpan, answer, false)
 	return nil
 }
@@ -452,6 +504,18 @@ func (p *Pipeline) runArtifact(
 	}
 
 	err := <-done
+	if traceEnabled() {
+		logger := deps.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.InfoContext(ctx, "trace: artifact assembled (stream-collected)",
+			"actor", input.Actor.ID,
+			"tenant_id", input.TenantID,
+			"artifact_bytes", final.artifact.Len(),
+			"citations", len(final.citations),
+		)
+	}
 	return final.artifact.String(), final.citations, err
 }
 
