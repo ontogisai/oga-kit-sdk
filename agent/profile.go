@@ -63,6 +63,18 @@ type ProactiveConfig struct {
 	ContextGatherTimeout string   `yaml:"context_gather_timeout,omitempty"`
 	ReasoningTimeout     string   `yaml:"reasoning_timeout,omitempty"`
 
+	// PlanningContext is OPTIONAL planner-safe domain vocabulary composed into
+	// the tool-planning prompt (PlanningSystemPrompt). Unlike SystemPrompt —
+	// which is written for proposal generation (prose output: a one-sentence
+	// description + a short reasoning) and must NOT leak into the JSON planner —
+	// this field carries only neutral domain hints (entity-type names,
+	// terminology, equipment-class vocabulary) that help the planner pick the
+	// right tools. Empty/absent (the common case) → the planner prompt has no
+	// domain block, just the neutral JSON-mandating template. Composing the
+	// proposal-framed SystemPrompt into the planner caused the model to reply
+	// in prose instead of JSON, failing plan parsing (OGA-387).
+	PlanningContext string `yaml:"planning_context,omitempty"`
+
 	// GroundingStrategy is the optional declarative tool-call plan.
 	// When non-empty, DefaultRuntime.HandleStream uses GroundingStrategyPlanner
 	// (deterministic, no LLM planning call). When empty, falls back to
