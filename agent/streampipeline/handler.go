@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"text/template"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
 )
@@ -225,50 +226,83 @@ func investigationSeedIDs(ic *investigationContext) []string {
 	return out
 }
 
+// investigationPromptData is the view model rendered into the assembly prompt
+// by investigationContextTemplate.
+type investigationPromptData struct {
+	ActionType      string
+	Description     string
+	ExpectedOutcome string
+	RiskLevel       string
+	ReasoningFacts  []string
+	UserQuery       string
+}
+
+// investigationContextTemplate is the proposal-anchoring block prepended to the
+// user's question (OGA-381 §5.3). Sections render only when their field is
+// non-empty; the trailing directive instructs the assembly LLM to brief on the
+// original proposal rather than re-propose.
+const investigationContextTemplate = `[Investigation context{{if .ActionType}} — the proposing agent recommended: "{{.ActionType}}"{{end}}
+{{- if .Description}}
+Description: {{.Description}}
+{{- end}}
+{{- if .ExpectedOutcome}}
+Expected outcome: {{.ExpectedOutcome}}
+{{- end}}
+{{- if .RiskLevel}}
+Risk level: {{.RiskLevel}}
+{{- end}}
+{{- if .ReasoningFacts}}
+
+The proposal was raised because:
+{{- range .ReasoningFacts}}
+• {{.}}
+{{- end}}
+{{- end}}
+
+Your job is to brief on whether THIS proposal is justified based on the evidence from the tool results. Do not propose a different action.]
+
+{{.UserQuery}}`
+
+var investigationContextTmpl = template.Must(
+	template.New("investigation_context").Parse(investigationContextTemplate),
+)
+
 // enrichQueryWithInvestigationContext prepends a proposal-anchoring block to the
 // user's question so the assembly LLM briefs on THE ORIGINAL proposal rather
-// than re-proposing from scratch (OGA-381 §5.3). Fields that are absent are
-// omitted; when no anchoring fields are present the query is returned unchanged.
+// than re-proposing from scratch (OGA-381 §5.3). It renders
+// investigationContextTemplate with the non-empty proposal fields; when no
+// anchoring fields are present (or the template fails) the query is returned
+// unchanged — enrichment is best-effort and never blocks the query.
 func enrichQueryWithInvestigationContext(userText string, ic *investigationContext) string {
-	if ic == nil || (ic.ActionType == "" && ic.Description == "" && ic.ExpectedOutcome == "" && len(ic.ReasoningFacts) == 0) {
+	if ic == nil {
 		return userText
 	}
+	facts := nonEmptyStrings(ic.ReasoningFacts)
+	if ic.ActionType == "" && ic.Description == "" && ic.ExpectedOutcome == "" && len(facts) == 0 {
+		return userText
+	}
+	data := investigationPromptData{
+		ActionType:      ic.ActionType,
+		Description:     ic.Description,
+		ExpectedOutcome: ic.ExpectedOutcome,
+		RiskLevel:       ic.RiskLevel,
+		ReasoningFacts:  facts,
+		UserQuery:       userText,
+	}
 	var b strings.Builder
-	b.WriteString("[Investigation context")
-	if ic.ActionType != "" {
-		b.WriteString(" — the proposing agent recommended: \"")
-		b.WriteString(ic.ActionType)
-		b.WriteString("\"")
+	if err := investigationContextTmpl.Execute(&b, data); err != nil {
+		return userText
 	}
-	b.WriteString("\n")
-	if ic.Description != "" {
-		b.WriteString("Description: ")
-		b.WriteString(ic.Description)
-		b.WriteString("\n")
-	}
-	if ic.ExpectedOutcome != "" {
-		b.WriteString("Expected outcome: ")
-		b.WriteString(ic.ExpectedOutcome)
-		b.WriteString("\n")
-	}
-	if ic.RiskLevel != "" {
-		b.WriteString("Risk level: ")
-		b.WriteString(ic.RiskLevel)
-		b.WriteString("\n")
-	}
-	if len(ic.ReasoningFacts) > 0 {
-		b.WriteString("\nThe proposal was raised because:\n")
-		for _, f := range ic.ReasoningFacts {
-			if f == "" {
-				continue
-			}
-			b.WriteString("• ")
-			b.WriteString(f)
-			b.WriteString("\n")
+	return b.String()
+}
+
+// nonEmptyStrings returns a copy of in with empty elements dropped.
+func nonEmptyStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
 		}
 	}
-	b.WriteString("\nYour job is to brief on whether THIS proposal is justified based on the evidence " +
-		"from the tool results. Do not propose a different action.]\n\n")
-	b.WriteString(userText)
-	return b.String()
+	return out
 }

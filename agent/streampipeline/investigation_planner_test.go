@@ -117,12 +117,17 @@ func TestEnrichQueryWithInvestigationContext(t *testing.T) {
 	}
 	out := enrichQueryWithInvestigationContext("Why this chiller?", ic)
 	for _, want := range []string{
-		"create_work_order", "Create a PM work order", "PM work order dispatched",
-		"COP dropped to 0.49", "Do not propose a different action", "Why this chiller?",
+		`recommended: "create_work_order"`, // literal quotes — text/template, not html/template (no &#34;)
+		"Create a PM work order", "PM work order dispatched",
+		"• COP dropped to 0.49", // bullet rendered literally, not escaped
+		"Risk level: high", "Do not propose a different action", "Why this chiller?",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("enriched query missing %q\n--- got ---\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "&#34;") || strings.Contains(out, "&bull;") {
+		t.Errorf("output is HTML-escaped — must use text/template:\n%s", out)
 	}
 
 	// No anchoring fields → query unchanged.
