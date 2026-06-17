@@ -3,9 +3,10 @@ package streampipeline
 import (
 	"context"
 	"encoding/json"
+	"strings"
+	"text/template"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
-	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
 // NewDefaultStreamHandler returns a StreamHandlerFunc that drives the
@@ -53,11 +54,18 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 		profile := rt.Profile()
 		deps := rt.Deps()
 
-		// Select the reactive planner per request. When the investigation
-		// forward carries concrete entity ids (OGA-378), ground deterministically
-		// on them; otherwise plan tools dynamically via the LLM. The proactive
-		// grounding strategy is never used here (see the doc comment + OGA-348).
-		investigationIDs := investigationEntityIDsFromMessage(msg.Params.Message)
+		// Select the reactive planner per request. When the investigation forward
+		// carries an enriched investigation context (OGA-381 — built server-side
+		// by Frontier's Enricher), ground deterministically on its seed ids AND
+		// anchor the assembly prompt to the original proposal; otherwise plan
+		// tools dynamically via the LLM. The proactive grounding strategy is never
+		// used here (see the doc comment + OGA-348).
+		invCtx, hasInvCtx := investigationContextFromMessage(msg.Params.Message)
+		var investigationIDs []string
+		if hasInvCtx {
+			investigationIDs = investigationSeedIDs(invCtx)
+			userText = enrichQueryWithInvestigationContext(userText, invCtx)
+		}
 		var planner StreamPlanner
 		if len(investigationIDs) > 0 {
 			planner = NewInvestigationGroundingPlanner(investigationIDs)
@@ -136,70 +144,165 @@ func reactiveStreamPlanner(rt *agent.DefaultRuntime) StreamPlanner {
 	return NewLLMToolPlanner(rt.Deps().Gateway, rt.Profile(), rt.PlannerConfig())
 }
 
-// Metadata keys carrying investigation context on an inbound A2A message
-// (set by Frontier when it force-routes an [Investigate] follow-up). These
-// mirror the platform's stateless-investigation contract
+// Metadata key carrying the enriched investigation context on an inbound A2A
+// message (set by Frontier when it force-routes an [Investigate] follow-up).
+// Mirrors the platform's stateless-investigation contract
 // (internal/agent/investigation_stateless.go) by value.
-const (
-	metadataKeyInvestigationContext = "investigation_context"
-	metadataKeyTriggerEntityIDs     = "trigger_entity_ids"
-)
+const metadataKeyInvestigationContext = "investigation_context"
 
-// investigationEntityIDsFromMessage extracts the concrete investigation seed
-// entity ids from an inbound A2A message's metadata (OGA-378). Frontier, when
-// it force-routes an [Investigate] follow-up to the proposing agent, carries
-// the proposal's InvestigationContext in message metadata. Two shapes are
-// accepted (in priority order):
-//
-//  1. metadata["investigation_context"] — a JSON string of the
-//     InvestigationContextPayload; we read its trigger_entity_ids.
-//  2. metadata["trigger_entity_ids"]    — a direct array of ids (or a single
-//     string), for callers that forward only the ids.
-//
-// Returns nil when neither is present or no ids are found — the caller then
-// falls back to the LLM planner (plain chat).
-func investigationEntityIDsFromMessage(m *agent.Message) []string {
-	if m == nil || m.Metadata == nil {
-		return nil
-	}
-
-	// Shape 1: the serialized investigation context.
-	if raw, ok := m.Metadata[metadataKeyInvestigationContext]; ok {
-		if s, isStr := raw.(string); isStr && s != "" {
-			var ic gateway.InvestigationContextPayload
-			if err := json.Unmarshal([]byte(s), &ic); err == nil && len(ic.TriggerEntityIDs) > 0 {
-				return ic.TriggerEntityIDs
-			}
-		}
-	}
-
-	// Shape 2: a direct ids field.
-	if raw, ok := m.Metadata[metadataKeyTriggerEntityIDs]; ok {
-		return coerceStringSlice(raw)
-	}
-	return nil
+// investigationContext is the local struct used to unmarshal the ENRICHED
+// investigation_context JSON forwarded by Frontier's Enricher (OGA-381 §6.3).
+// This is the fat, server-resolved shape — distinct from the thin wire handle
+// gateway.InvestigationContextPayload (which no longer carries these fields).
+// Reading it via a local struct keeps the SDK decoupled from the enriched
+// shape's evolution; older payloads that lack proposal-anchoring fields degrade
+// gracefully (zero-value strings are omitted from the prompt).
+type investigationContext struct {
+	ReasoningFacts   []string `json:"reasoning_facts"`
+	TargetEntityID   string   `json:"target_entity_id"`
+	TargetEventID    string   `json:"target_event_id"`
+	TriggerEntityIDs []string `json:"trigger_entity_ids"`
+	TriggerEventIDs  []string `json:"trigger_event_ids"`
+	Description      string   `json:"description"`
+	ActionType       string   `json:"action_type"`
+	ExpectedOutcome  string   `json:"expected_outcome"`
+	RiskLevel        string   `json:"risk_level"`
 }
 
-// coerceStringSlice converts a metadata value that may be []any, []string, or
-// a single string into a []string (dropping non-string / empty elements).
-func coerceStringSlice(v any) []string {
-	switch t := v.(type) {
-	case []string:
-		return t
-	case string:
-		if t == "" {
-			return nil
-		}
-		return []string{t}
-	case []any:
-		out := make([]string, 0, len(t))
-		for _, e := range t {
-			if s, ok := e.(string); ok && s != "" {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
+// investigationContextFromMessage parses the enriched investigation_context JSON
+// from an inbound A2A message's metadata (OGA-381). Frontier, when it
+// force-routes an [Investigate] follow-up to the proposing agent, injects the
+// Enricher-built context. Returns (nil, false) when absent or unparseable — the
+// caller then falls back to the LLM planner (plain chat).
+func investigationContextFromMessage(m *agent.Message) (*investigationContext, bool) {
+	if m == nil || m.Metadata == nil {
+		return nil, false
+	}
+	raw, ok := m.Metadata[metadataKeyInvestigationContext]
+	if !ok {
+		return nil, false
+	}
+	s, isStr := raw.(string)
+	if !isStr || s == "" {
+		return nil, false
+	}
+	var ic investigationContext
+	if err := json.Unmarshal([]byte(s), &ic); err != nil {
+		return nil, false
+	}
+	return &ic, true
+}
+
+// investigationSeedIDs returns the deduplicated grounding seed set for the
+// investigation grounding planner: the union of the singular target ids and the
+// plural trigger sets. For a simple proactive proposal these collapse to one
+// entity + one event; for a convergence proposal they expand to the
+// system-level target plus the N correlated individuals. Falls back to the
+// direct metadata array shape only when the enriched context yields nothing.
+func investigationSeedIDs(ic *investigationContext) []string {
+	if ic == nil {
 		return nil
 	}
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	add(ic.TargetEntityID)
+	add(ic.TargetEventID)
+	for _, id := range ic.TriggerEntityIDs {
+		add(id)
+	}
+	for _, id := range ic.TriggerEventIDs {
+		add(id)
+	}
+	return out
+}
+
+// investigationPromptData is the view model rendered into the assembly prompt
+// by investigationContextTemplate.
+type investigationPromptData struct {
+	ActionType      string
+	Description     string
+	ExpectedOutcome string
+	RiskLevel       string
+	ReasoningFacts  []string
+	UserQuery       string
+}
+
+// investigationContextTemplate is the proposal-anchoring block prepended to the
+// user's question (OGA-381 §5.3). Sections render only when their field is
+// non-empty; the trailing directive instructs the assembly LLM to brief on the
+// original proposal rather than re-propose.
+const investigationContextTemplate = `[Investigation context{{if .ActionType}} — the proposing agent recommended: "{{.ActionType}}"{{end}}
+{{- if .Description}}
+Description: {{.Description}}
+{{- end}}
+{{- if .ExpectedOutcome}}
+Expected outcome: {{.ExpectedOutcome}}
+{{- end}}
+{{- if .RiskLevel}}
+Risk level: {{.RiskLevel}}
+{{- end}}
+{{- if .ReasoningFacts}}
+
+The proposal was raised because:
+{{- range .ReasoningFacts}}
+• {{.}}
+{{- end}}
+{{- end}}
+
+Your job is to brief on whether THIS proposal is justified based on the evidence from the tool results. Do not propose a different action.]
+
+{{.UserQuery}}`
+
+var investigationContextTmpl = template.Must(
+	template.New("investigation_context").Parse(investigationContextTemplate),
+)
+
+// enrichQueryWithInvestigationContext prepends a proposal-anchoring block to the
+// user's question so the assembly LLM briefs on THE ORIGINAL proposal rather
+// than re-proposing from scratch (OGA-381 §5.3). It renders
+// investigationContextTemplate with the non-empty proposal fields; when no
+// anchoring fields are present (or the template fails) the query is returned
+// unchanged — enrichment is best-effort and never blocks the query.
+func enrichQueryWithInvestigationContext(userText string, ic *investigationContext) string {
+	if ic == nil {
+		return userText
+	}
+	facts := nonEmptyStrings(ic.ReasoningFacts)
+	if ic.ActionType == "" && ic.Description == "" && ic.ExpectedOutcome == "" && len(facts) == 0 {
+		return userText
+	}
+	data := investigationPromptData{
+		ActionType:      ic.ActionType,
+		Description:     ic.Description,
+		ExpectedOutcome: ic.ExpectedOutcome,
+		RiskLevel:       ic.RiskLevel,
+		ReasoningFacts:  facts,
+		UserQuery:       userText,
+	}
+	var b strings.Builder
+	if err := investigationContextTmpl.Execute(&b, data); err != nil {
+		return userText
+	}
+	return b.String()
+}
+
+// nonEmptyStrings returns a copy of in with empty elements dropped.
+func nonEmptyStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

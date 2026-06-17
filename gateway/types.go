@@ -163,9 +163,39 @@ type ActionProposal struct {
 	ReasoningFacts  []string       `json:"reasoning_facts,omitempty"`
 	ExpectedOutcome string         `json:"expected_outcome"`
 	Routing         ActionRouting  `json:"routing"` // primary delivery intent
-	TriggerEventID  string         `json:"trigger_event_id,omitempty"`
-	TriggerEntityID string         `json:"trigger_entity_id,omitempty"` // source entity that triggered the action; resolves relationships.source: event.entity_id
-	ProposedAt      time.Time      `json:"proposed_at"`
+
+	// TargetEntityID is the single entity the proposed action acts ON (the
+	// execution edge target). The execution path (OGA-321) creates an AFFECTS
+	// edge from the ActionResolution vertex to this entity on approval.
+	//   Simple proactive (single-equipment anomaly): the equipment entity
+	//     (typically == TriggerEntityIDs[0]).
+	//   Convergence (cross-equipment correlation): the system-level entity the
+	//     coordinated response targets (zone / plant room / building) — NOT one
+	//     of the individual correlated equipment pieces (those are TriggerEntityIDs).
+	// Renamed from the former TriggerEntityID (OGA-381 clean-cut).
+	TargetEntityID string `json:"target_entity_id,omitempty"`
+
+	// TargetEventID is the single EntityAnomalyEvent detected ON the target —
+	// the indexed trigger-cleared lookup key (OGA-326 FindPendingByTargetEventID).
+	//   Simple proactive: the one anomaly event (== TriggerEventIDs[0]).
+	//   Convergence: a NEW convergence-level EntityAnomalyEvent the convergence
+	//     agent materializes on TargetEntityID. The N correlated individual
+	//     events live in TriggerEventIDs.
+	// Renamed from the former singular TriggerEventID (OGA-381 clean-cut).
+	TargetEventID string `json:"target_event_id,omitempty"`
+
+	// TriggerEventIDs are the N anomaly events that led to this proposal — one
+	// for simple proactive, N correlated events for convergence. The reactive
+	// investigation grounding planner (OGA-378) seeds from these.
+	TriggerEventIDs []string `json:"trigger_event_ids,omitempty"`
+
+	// TriggerEntityIDs are the N equipment entities whose anomalies triggered
+	// this proposal — one for simple proactive (typically == TargetEntityID), N
+	// for convergence. The reactive investigation grounding planner seeds from
+	// these alongside TriggerEventIDs.
+	TriggerEntityIDs []string `json:"trigger_entity_ids,omitempty"`
+
+	ProposedAt time.Time `json:"proposed_at"`
 
 	// --- SDK packs these from the loaded profile (chosen action + escalation policy) ---
 
@@ -210,24 +240,23 @@ type ActionProposedEvent struct {
 	Timestamp            time.Time                    `json:"timestamp"`
 }
 
-// InvestigationContextPayload is the serializable investigation context
-// included in notification payloads. Channels render an [Investigate] button
-// only when this is populated; tapping it opens an investigation session keyed
-// by these fields.
+// InvestigationContextPayload is the thin "investigable handle" included in
+// notification payloads (NATS approval.required + channel notifications).
+// Channels render an [Investigate] button only when this is populated; its
+// fields identify the proposal so Frontier's investigation Enricher can resolve
+// the full context from the durable ActionProposal record at investigation time.
+//
+// It carries NO heavy fields (no reasoning_facts, no trigger/target ids). Those
+// are resolved server-side by Frontier (OGA-381 §6.2) and never travel on the
+// wire — eliminating wire-snapshot staleness and per-channel field drift. The
+// pre-OGA-381 ReasoningFacts and OGA-378 TriggerEntityIDs fields are removed
+// here (clean-cut, pre-MVP).
 type InvestigationContextPayload struct {
-	ProposalID     string   `json:"proposal_id"`
-	WorkflowID     string   `json:"workflow_id"`
-	AgentID        string   `json:"agent_id"`
-	AgentType      string   `json:"agent_type"`
-	TenantID       string   `json:"tenant_id"`
-	ReasoningFacts []string `json:"reasoning_facts,omitempty"`
-	// TriggerEntityIDs are the KG entity ids the proposal was raised about —
-	// the seed set for a reactive investigation's grounded retrieval (OGA-378).
-	// Repeated by design: a proactive proposal carries exactly one (the
-	// triggering entity), while a convergence proposal may correlate several.
-	// Distinct from the execution-path single-source TriggerEntityID (OGA-321),
-	// which resolves the outcome entity's source edge and stays singular.
-	TriggerEntityIDs []string `json:"trigger_entity_ids,omitempty"`
+	ProposalID string `json:"proposal_id"`
+	WorkflowID string `json:"workflow_id"` // == actionID; the Enricher resolves by it
+	AgentID    string `json:"agent_id"`    // proposing agent — channel display + force-route
+	AgentType  string `json:"agent_type"`
+	TenantID   string `json:"tenant_id"`
 }
 
 // ApprovalDecision is the signal payload an operator (or the auto-approve timer)
@@ -342,8 +371,15 @@ type SubmitActionInput struct {
 	ReasoningFacts  []string
 	ExpectedOutcome string
 	Routing         ActionRouting // at least one target field required; carries NotificationHoldWindow
-	TriggerEventID  string
-	TriggerEntityID string // source entity that triggered the action
+
+	// TargetEntityID / TargetEventID / TriggerEventIDs / TriggerEntityIDs mirror
+	// the ActionProposal fields (see ActionProposal doc comments). The SDK's
+	// default proactive handler populates them from the triggering event; a kit
+	// author with a custom handler sets them directly.
+	TargetEntityID   string
+	TargetEventID    string
+	TriggerEventIDs  []string
+	TriggerEntityIDs []string
 
 	// --- Profile-derived governance fields (packed by the SDK from the chosen action) ---
 	HumanActionMode     HumanActionMode
