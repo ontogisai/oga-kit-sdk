@@ -48,6 +48,16 @@ type ActionDef struct {
 	// LLM. When absent, the action is always a candidate. The reasoning LLM
 	// always makes the final selection.
 	Triggers []TriggerDef `yaml:"triggers,omitempty"`
+
+	// SummaryFields is the OPTIONAL curated set of outcome-entity property
+	// names surfaced in the post-decision resolution summary (OGA-382) — e.g.
+	// ["assignee", "due_date", "priority"] for a work-order action. The
+	// SummarizeResolution workflow step reads these from the created entity to
+	// populate ResolvedEntityRef.KeyProps. When empty, the platform falls back
+	// to a generic key-property set (label + a few common fields). These are
+	// property KEYS (identifiers), never translated; the rendered labels are
+	// resolved per-locale by the notification renderer.
+	SummaryFields []string `yaml:"summary_fields,omitempty"`
 }
 
 // OutcomeDef declares what an action produces. Exactly one of the two intents
