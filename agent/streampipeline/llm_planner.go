@@ -57,20 +57,9 @@ func (p *LLMToolPlanner) Plan(ctx context.Context, query string, tools []string)
 		return &ToolPlan{}, &PlanNarrative{Text: "No tools available; answering directly."}, nil
 	}
 
-	// Two-attempt retry loop matches the existing PlanAndExecute behavior.
-	var rawPlan *agent.ToolPlan
-	var err error
-	for attempt := 0; attempt < 2; attempt++ {
-		rawPlan, err = agent.RequestPlan(ctx, p.gw, p.profile, query, tools, p.cfg)
-		if err == nil {
-			break
-		}
-		if attempt == 0 {
-			p.logger.WarnContext(ctx, "streampipeline: LLM planning failed on first attempt, retrying",
-				"error", err,
-			)
-		}
-	}
+	// RequestPlan is self-correcting (OGA-387): on a parse failure it retries
+	// once with a corrective turn. No outer retry loop is needed here.
+	rawPlan, err := agent.RequestPlan(ctx, p.gw, p.profile, query, tools, p.cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("LLM planning: %w", err)
 	}

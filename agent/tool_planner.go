@@ -250,6 +250,14 @@ func UniqueTools(profile *DomainAgentProfile) []string {
 }
 
 // RequestPlan asks the LLM to produce a JSON ToolPlan for the user query.
+//
+// It is self-correcting: when the model returns prose instead of JSON (the
+// most common failure — ParsePlan fails on the leading character), it retries
+// ONCE with a corrective turn that echoes the bad reply and explicitly demands
+// a JSON-only plan object. Transport/empty-response errors are returned without
+// a corrective retry (resending the same prompt would not help). This is the
+// single retry point so BOTH the streaming pipeline and the non-streaming
+// PlanAndExecute inherit the behavior (OGA-387).
 func RequestPlan(
 	ctx context.Context,
 	gw GatewayClient,
@@ -259,27 +267,69 @@ func RequestPlan(
 	cfg PlannerConfig,
 ) (*ToolPlan, error) {
 	systemPrompt := PlanningSystemPrompt(profile, tools)
+	messages := []gateway.ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userText},
+	}
 
+	content, err := requestPlanContent(ctx, gw, cfg, messages)
+	if err != nil {
+		return nil, err
+	}
+	plan, parseErr := ParsePlan(content)
+	if parseErr == nil {
+		return plan, nil
+	}
+
+	// The model replied with prose (or otherwise-unparseable text). Retry once
+	// with a corrective turn: echo its bad reply as an assistant message, then
+	// a user message that demands a JSON-only plan object. Build a fresh slice
+	// so we never alias the original messages backing array.
+	correctiveMessages := make([]gateway.ChatMessage, 0, len(messages)+2)
+	correctiveMessages = append(correctiveMessages, messages...)
+	correctiveMessages = append(correctiveMessages,
+		gateway.ChatMessage{Role: "assistant", Content: content},
+		gateway.ChatMessage{Role: "user", Content: PlanCorrectionInstruction},
+	)
+	content2, err2 := requestPlanContent(ctx, gw, cfg, correctiveMessages)
+	if err2 != nil {
+		// Transport error on the corrective attempt — surface the original
+		// parse failure as the cause, since that is the real problem.
+		return nil, fmt.Errorf("planning corrective retry (after parse error %q): %w", parseErr.Error(), err2)
+	}
+	plan2, parseErr2 := ParsePlan(content2)
+	if parseErr2 != nil {
+		return nil, fmt.Errorf("parse plan JSON (after corrective retry): %w", parseErr2)
+	}
+	return plan2, nil
+}
+
+// requestPlanContent issues one planning chat completion and returns the
+// trimmed assistant content, or an error for transport / empty-response
+// failures.
+func requestPlanContent(
+	ctx context.Context,
+	gw GatewayClient,
+	cfg PlannerConfig,
+	messages []gateway.ChatMessage,
+) (string, error) {
 	req := &gateway.ChatCompletionRequest{
 		Model:     cfg.Model,
 		MaxTokens: cfg.MaxTokens,
-		Messages: []gateway.ChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userText},
-		},
+		Messages:  messages,
 	}
 	resp, err := gw.ChatCompletion(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("planning LLM call: %w", err)
+		return "", fmt.Errorf("planning LLM call: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return nil, errors.New("planning LLM call: no choices")
+		return "", errors.New("planning LLM call: no choices")
 	}
 	content := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if content == "" {
-		return nil, errors.New("planning LLM call: empty content")
+		return "", errors.New("planning LLM call: empty content")
 	}
-	return ParsePlan(content)
+	return content, nil
 }
 
 // ParsePlan parses the LLM's JSON response into a ToolPlan, tolerating
@@ -421,9 +471,14 @@ func plainAnswer(
 // produce a JSON tool-call plan.
 //
 // The prompt has three layers:
-//   - Layer 1 (top): kit-author domain prompt from
-//     profile.ProactiveReasoning.SystemPrompt — vertical guidance, output
-//     formats for proactive reasoning, equipment-type mappings, etc.
+//   - Layer 1 (top): OPTIONAL planner-safe domain vocabulary from
+//     profile.ProactiveReasoning.PlanningContext — entity-type names,
+//     terminology, equipment-class hints. This is deliberately NOT the
+//     proposal-framed ProactiveReasoning.SystemPrompt: that prompt instructs
+//     the model to emit a prose description + reasoning, which, prepended to
+//     a JSON-mandating planner prompt, made the model reply in prose and fail
+//     plan parsing (OGA-387). When PlanningContext is empty (the common case)
+//     the planner prompt has no domain block at all.
 //   - Layer 2: the shared PlannerPromptTemplate (see constants.go) — same
 //     RULES + TOOL USAGE PATTERNS + EXAMPLES the platform Knowledge Agent
 //     uses, so kit agents and the KA produce consistent plans.
@@ -432,8 +487,8 @@ func PlanningSystemPrompt(profile *DomainAgentProfile, tools []string) string {
 	currentTime := time.Now().UTC().Format(time.RFC3339)
 
 	var domainPrompt string
-	if profile != nil && profile.ProactiveReasoning != nil && profile.ProactiveReasoning.SystemPrompt != "" {
-		domainPrompt = profile.ProactiveReasoning.SystemPrompt + "\n\n"
+	if profile != nil && profile.ProactiveReasoning != nil && profile.ProactiveReasoning.PlanningContext != "" {
+		domainPrompt = profile.ProactiveReasoning.PlanningContext + "\n\n"
 	}
 
 	var toolList strings.Builder

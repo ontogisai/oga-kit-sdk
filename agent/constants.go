@@ -111,18 +111,32 @@ var StandardKnowledgeReadTools = []string{
 //
 // Placeholders (in fmt.Sprintf order):
 //
-//	%s (1st) — Domain prompt from profile.ProactiveReasoning.SystemPrompt
-//	           (kit-author content). Empty string if not provided.
+//	%s (1st) — OPTIONAL planner-safe domain vocabulary from
+//	           profile.ProactiveReasoning.PlanningContext (entity-type names,
+//	           terminology). Empty string when not provided (the common case).
+//	           This is NOT the proposal-framed ProactiveReasoning.SystemPrompt —
+//	           injecting that made the model reply in prose and fail plan
+//	           parsing (OGA-387).
 //	%s (2nd) — Current RFC3339 timestamp.
 //	%s (3rd) — Available MCP tool descriptions (one per line).
 //	%s (4th) — Current 4-digit year (for time-range rules).
 //	%s (5th) — Example RFC3339 timestamp (same as 2nd, used as example).
 //
-// The template is intentionally vertical-NEUTRAL. Vertical examples
-// (chillers, AHUs, Brick classes, FM workflows, etc.) belong in the
-// kit author's profile.ProactiveReasoning.SystemPrompt — they appear above
-// this template at runtime.
+// The template is intentionally vertical-NEUTRAL. Vertical planner vocabulary
+// (chillers, AHUs, Brick classes, FM workflows, etc.) belongs in the kit
+// author's profile.ProactiveReasoning.PlanningContext — it appears above this
+// template at runtime.
 // ─────────────────────────────────────────────────────────────────────────────
+// PlanCorrectionInstruction is the corrective user turn sent on the single
+// retry when the planner LLM returned prose instead of a JSON plan (OGA-387).
+// It is appended after the model's bad reply (echoed as an assistant message)
+// so the model can self-correct. Keep it blunt and format-only — it must not
+// reintroduce any task framing that competes with "return JSON".
+const PlanCorrectionInstruction = `Your previous response was not valid JSON and could not be parsed as a tool plan. ` +
+	`Respond with ONLY the JSON plan object and nothing else — no prose, no explanation, no markdown code fences. ` +
+	`The exact shape is {"steps":[{"tool_name":"<name>","arguments":{...},"depends_on":-1,"rationale":"<why>"}]}. ` +
+	`If no tools are needed to answer, return {"steps":[]}.`
+
 const PlannerPromptTemplate = `%sYou are a tool planning engine for a domain agent on the ONTOGIS AI Platform.
 Your job is to analyze the user's question and produce an execution plan using the
 MCP tools available to you. The platform will execute your plan and feed the
@@ -149,12 +163,16 @@ TOOL USAGE PATTERNS:
 
 ## Time-Series Queries
 You have access to REAL time-series tools connected to live sensor data:
-- kg_ts_read: Retrieve raw or downsampled measurements. Params: mode, source_id (or source_filter for KG-based discovery), metric, from, to.
-- kg_ts_analyze: Detect anomalies, threshold crossings, or forecast future values. Params: mode (anomaly|threshold|forecast), source_id (or source_filter for KG-based discovery), metric, from, to, plus mode-specific config.
+- kg_ts_read: Retrieve raw or downsampled measurements. Params: mode, metric (REQUIRED), source_id OR source_filter, from, to.
+- kg_ts_analyze: Detect anomalies, threshold crossings, or forecast future values. Params: mode (anomaly|threshold|forecast), metric (REQUIRED), source_id OR source_filter, from, to, plus mode-specific config.
 
-source_filter shape (use it instead of source_id when the user wants ALL sources of a given class or relationship rather than a specific source):
+REQUIRED ARGUMENTS — both tools reject the call (OGA-CORE-VAL-1001) if these are missing:
+- "metric" MUST be set to the concrete measurement name (e.g. "cop", "chilled_water_supply_temp", "vibration"). NEVER omit it, leave it empty, or guess blindly. If you do not know the metric, plan a kg_get_entity / kg_search step FIRST to read the entity's available metrics (or use the metric named in the triggering event), then set "metric" on a dependent step.
+- A SOURCE MUST be bound — supply EITHER "source_id" (a concrete sensor/source id) OR a "source_filter" whose "related_to" is the target entity_id (usually "<from step N>" pointing at a prior entity-resolution step). A source_filter with only "max_sources" and no "related_to"/"entity_type" identifies NO series and is invalid — never emit it.
+
+source_filter shape (use it instead of source_id when you want ALL sources of a given class or relationship rather than one specific source):
   {entity_type: "TemperatureSensor", related_to: "<entity_id>", relationship: "monitors", spatial_scope: {h3_cells: [...]}, max_sources: 10}
-The fields entity_type, related_to, relationship, spatial_scope, and max_sources are the only valid keys. Do NOT invent fields like "location", "zone", or "name" — use related_to with an entity_id instead.
+The fields entity_type, related_to, relationship, spatial_scope, and max_sources are the only valid keys. Do NOT invent fields like "location", "zone", or "name" — use related_to with an entity_id instead. "related_to" should be set to the target entity (set depends_on to the entity step and use "<from step N>").
 
 ALWAYS use these tools for sensor data, measurements, anomalies, thresholds, forecasts, and time-series questions.
 NEVER say "I don't have access to sensor data" or "I cannot retrieve real-time data" — use the tools.

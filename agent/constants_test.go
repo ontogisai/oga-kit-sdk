@@ -47,3 +47,24 @@ func TestPlannerPromptTemplate_DocumentsSourceFilter(t *testing.T) {
 		}
 	}
 }
+
+// TestPlannerPromptTemplate_MetricRequired is the OGA-387 regression guard:
+// the planner template MUST mandate the `metric` argument for the kg_ts_*
+// tools and warn against a source_filter that binds nothing (only max_sources).
+// Without this, the planner LLM omits `metric` and the tools reject the call
+// with OGA-CORE-VAL-1001 (the failure traced on the chiller investigation
+// route).
+func TestPlannerPromptTemplate_MetricRequired(t *testing.T) {
+	if !strings.Contains(PlannerPromptTemplate, "metric (REQUIRED)") {
+		t.Error("planner template must mark `metric` as REQUIRED for kg_ts_read/kg_ts_analyze (OGA-387)")
+	}
+	if !strings.Contains(PlannerPromptTemplate, "OGA-CORE-VAL-1001") {
+		t.Error("planner template should name the validation error the ts tools raise when metric/source is missing")
+	}
+	// Must warn against the exact bad shape seen in the trace: a source_filter
+	// with only max_sources and no related_to/entity_type.
+	if !strings.Contains(PlannerPromptTemplate, "max_sources") ||
+		!strings.Contains(PlannerPromptTemplate, "related_to") {
+		t.Error("planner template should warn that a source_filter must bind a source via related_to/entity_type, not only max_sources")
+	}
+}
