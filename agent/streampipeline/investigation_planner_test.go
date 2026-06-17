@@ -3,6 +3,7 @@ package streampipeline
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
@@ -66,44 +67,66 @@ func TestInvestigationGroundingPlanner_Empty(t *testing.T) {
 	}
 }
 
-func TestInvestigationEntityIDsFromMessage_ContextJSON(t *testing.T) {
+func TestInvestigationContextFromMessage_SeedUnion(t *testing.T) {
+	// Enriched context: singular target + plural triggers → deduped union seed.
 	ic := map[string]any{
 		"proposal_id":        "prop-1",
 		"agent_id":           "sgac1.fm-operations-agent",
-		"trigger_entity_ids": []string{"chiller-1", "ahu-2"},
+		"target_entity_id":   "chiller-1",
+		"target_event_id":    "evt-1",
+		"trigger_entity_ids": []string{"chiller-1", "ahu-2"}, // chiller-1 dup of target
+		"trigger_event_ids":  []string{"evt-1"},              // dup of target event
 	}
 	raw, _ := json.Marshal(ic)
 	m := &agent.Message{Metadata: map[string]any{
 		metadataKeyInvestigationContext: string(raw),
 	}}
-	got := investigationEntityIDsFromMessage(m)
-	if len(got) != 2 || got[0] != "chiller-1" || got[1] != "ahu-2" {
-		t.Errorf("got %v, want [chiller-1 ahu-2]", got)
+	got, ok := investigationContextFromMessage(m)
+	if !ok {
+		t.Fatal("expected investigation context")
+	}
+	seed := investigationSeedIDs(got)
+	// Union, deduped, target-first: chiller-1, evt-1, ahu-2.
+	if len(seed) != 3 || seed[0] != "chiller-1" || seed[1] != "evt-1" || seed[2] != "ahu-2" {
+		t.Errorf("seed = %v, want [chiller-1 evt-1 ahu-2]", seed)
 	}
 }
 
-func TestInvestigationEntityIDsFromMessage_DirectArray(t *testing.T) {
-	// JSON-decoded metadata yields []any, not []string — exercise coercion.
-	m := &agent.Message{Metadata: map[string]any{
-		metadataKeyTriggerEntityIDs: []any{"e1", "", "e2", 42},
-	}}
-	got := investigationEntityIDsFromMessage(m)
-	if len(got) != 2 || got[0] != "e1" || got[1] != "e2" {
-		t.Errorf("got %v, want [e1 e2] (blanks + non-strings dropped)", got)
-	}
-}
-
-func TestInvestigationEntityIDsFromMessage_None(t *testing.T) {
+func TestInvestigationContextFromMessage_None(t *testing.T) {
 	cases := []*agent.Message{
 		nil,
 		{Metadata: nil},
-		{Metadata: map[string]any{"intent": "investigation"}}, // no ids
-		{Metadata: map[string]any{metadataKeyInvestigationContext: "{not json"}},
-		{Metadata: map[string]any{metadataKeyInvestigationContext: `{"proposal_id":"p"}`}}, // no trigger_entity_ids
+		{Metadata: map[string]any{"intent": "investigation"}},                    // no context key
+		{Metadata: map[string]any{metadataKeyInvestigationContext: "{not json"}}, // unparseable
+		{Metadata: map[string]any{metadataKeyInvestigationContext: ""}},          // empty string
 	}
 	for i, m := range cases {
-		if got := investigationEntityIDsFromMessage(m); got != nil {
-			t.Errorf("case %d: got %v, want nil", i, got)
+		if _, ok := investigationContextFromMessage(m); ok {
+			t.Errorf("case %d: expected (nil,false)", i)
 		}
+	}
+}
+
+func TestEnrichQueryWithInvestigationContext(t *testing.T) {
+	ic := &investigationContext{
+		ActionType:      "create_work_order",
+		Description:     "Create a PM work order for Chiller CH-36A",
+		ExpectedOutcome: "PM work order dispatched within 30 minutes",
+		RiskLevel:       "high",
+		ReasoningFacts:  []string{"COP dropped to 0.49", "threshold: 0.7"},
+	}
+	out := enrichQueryWithInvestigationContext("Why this chiller?", ic)
+	for _, want := range []string{
+		"create_work_order", "Create a PM work order", "PM work order dispatched",
+		"COP dropped to 0.49", "Do not propose a different action", "Why this chiller?",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("enriched query missing %q\n--- got ---\n%s", want, out)
+		}
+	}
+
+	// No anchoring fields → query unchanged.
+	if got := enrichQueryWithInvestigationContext("plain", &investigationContext{}); got != "plain" {
+		t.Errorf("empty context should pass through: got %q", got)
 	}
 }

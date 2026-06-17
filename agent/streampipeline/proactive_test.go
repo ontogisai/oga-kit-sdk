@@ -74,11 +74,17 @@ func TestBuildSubmitActionInput(t *testing.T) {
 
 	in := buildSubmitActionInput(profile, action, event, decision)
 
-	if in.ActionName != "create_work_order" || in.TriggerEventID != "evt-1" {
+	if in.ActionName != "create_work_order" || in.TargetEventID != "evt-1" {
 		t.Errorf("unexpected base fields: %+v", in)
 	}
-	if in.TriggerEntityID != "CH-01" {
-		t.Errorf("trigger_entity_id = %q, want CH-01", in.TriggerEntityID)
+	if in.TargetEntityID != "CH-01" {
+		t.Errorf("target_entity_id = %q, want CH-01", in.TargetEntityID)
+	}
+	if len(in.TriggerEventIDs) != 1 || in.TriggerEventIDs[0] != "evt-1" {
+		t.Errorf("trigger_event_ids = %v, want [evt-1]", in.TriggerEventIDs)
+	}
+	if len(in.TriggerEntityIDs) != 1 || in.TriggerEntityIDs[0] != "CH-01" {
+		t.Errorf("trigger_entity_ids = %v, want [CH-01]", in.TriggerEntityIDs)
 	}
 	if in.HumanActionMode != gateway.HumanActionModeApproval || in.RiskLevel != gateway.RiskLevelLow {
 		t.Errorf("enum conversion wrong: mode=%s risk=%s", in.HumanActionMode, in.RiskLevel)
