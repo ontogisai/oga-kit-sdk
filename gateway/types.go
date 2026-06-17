@@ -321,7 +321,80 @@ type ApprovalResolvedEvent struct {
 	// proposal. Populated only when Status=superseded.
 	SupersedingIncidentID string `json:"superseding_incident_id,omitempty"`
 
+	// ResolutionSummary is the human-facing summary of what the agent actually
+	// did, built ONCE by the workflow from the real ActionExecutionResult + a
+	// read of the created entity, and rendered identically across every channel
+	// (web Actions Inbox, Telegram, future channels). Optional + backward-
+	// compatible: older consumers ignore it; channels that render it never
+	// rebuild it (single build site — OGA-382).
+	ResolutionSummary *ResolutionSummary `json:"resolution_summary,omitempty"`
+
 	CompletedAt time.Time `json:"completed_at"`
+}
+
+// ResolutionSummary is the human-facing summary of a resolved proposal's
+// outcome. Built once by the AgentApprovalWorkflow's SummarizeResolution step
+// from the REAL ActionExecutionResult + a read of the created entity; persisted
+// on the ActionResolution vertex (resolution_summary_json) and carried inline
+// on ApprovalResolvedEvent. Channels render it natively in the recipient's
+// locale — they never rebuild it (OGA-382).
+//
+// Real-data-only: every field derives from the actual execution result and the
+// persisted entity / external records. A failed execution yields
+// ExecutionStatus="failed" + Reason=<error> and NO fabricated created-entity.
+type ResolutionSummary struct {
+	// Status mirrors ApprovalResolvedEvent.Status:
+	// approved|rejected|acknowledged|dismissed|escalated|superseded|expired|auto_approved|failed.
+	Status string `json:"status"`
+
+	// ExecutionStatus is "executed" | "skipped" | "failed" | "not_applicable".
+	ExecutionStatus string `json:"execution_status"`
+
+	// Headline is an i18n KEY (e.g. "resolution.headline.approved"), rendered
+	// per-locale by the notification renderer — NOT prose.
+	Headline string `json:"headline,omitempty"`
+
+	// CreatedEntities are the entities execution created/affected that the
+	// human can follow up on. Empty for non-executing outcomes and failures.
+	CreatedEntities []ResolvedEntityRef `json:"created_entities,omitempty"`
+
+	// ExternalRecords are mirrored external-system records (CMMS, ticketing).
+	ExternalRecords []ExternalRef `json:"external_records,omitempty"`
+
+	// FollowUps are short, render-ready cues (i18n key + data args).
+	FollowUps []FollowUpHint `json:"follow_ups,omitempty"`
+
+	// DecidedBy is the operator who resolved the proposal. Empty for
+	// expired/superseded/auto_approved.
+	DecidedBy string `json:"decided_by,omitempty"`
+
+	// Reason carries the rejection rationale OR (ExecutionStatus=failed) the
+	// execution error message.
+	Reason string `json:"reason,omitempty"`
+}
+
+// ResolvedEntityRef is a created/affected entity the human can follow up on.
+type ResolvedEntityRef struct {
+	EntityID   string            `json:"entity_id"`
+	EntityType string            `json:"entity_type"`         // e.g. "sgac1_WorkOrder"
+	Label      string            `json:"label,omitempty"`     // human label (entity's display field)
+	KeyProps   map[string]string `json:"key_props,omitempty"` // a SMALL curated set (assignee, due, priority, ...)
+	DeepLink   string            `json:"deep_link,omitempty"` // web/app route to the entity
+}
+
+// ExternalRef is a mirrored external-system record (CMMS, ticketing, ...).
+type ExternalRef struct {
+	System   string `json:"system"`        // e.g. "maximo"
+	RecordID string `json:"record_id"`     // e.g. "WO-1234"
+	URL      string `json:"url,omitempty"` // deep link into the external system
+}
+
+// FollowUpHint is a short, render-ready cue: an i18n key plus data args (e.g.
+// key "resolution.followup.assigned_due" with args {assignee, due}). The key is
+// translated per-locale; the args are data, never translated.
+type FollowUpHint struct {
+	Key  string            `json:"key"`
+	Args map[string]string `json:"args,omitempty"`
 }
 
 // LevelDecision is one level's decision record within
