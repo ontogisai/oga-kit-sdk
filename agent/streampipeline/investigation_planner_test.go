@@ -205,3 +205,123 @@ func TestEnrichQueryWithInvestigationContext(t *testing.T) {
 		t.Errorf("empty context should pass through: got %q", got)
 	}
 }
+
+// seqStreamPlanner returns a different (plan, err) per call so tests can model
+// "empty first plan, then a corrective re-plan" sequences (OGA-398).
+type seqStreamPlanner struct {
+	plans   []*ToolPlan
+	errs    []error
+	calls   int
+	queries []string
+}
+
+func (f *seqStreamPlanner) Plan(_ context.Context, query string, _ []string) (*ToolPlan, *PlanNarrative, error) {
+	i := f.calls
+	f.calls++
+	f.queries = append(f.queries, query)
+	var pl *ToolPlan
+	if i < len(f.plans) {
+		pl = f.plans[i]
+	}
+	var err error
+	if i < len(f.errs) {
+		err = f.errs[i]
+	}
+	return pl, &PlanNarrative{Text: "inner"}, err
+}
+
+func TestInvestigationLLMPlanner_EmptyThenCorrectiveReplanSucceeds(t *testing.T) {
+	inner := &seqStreamPlanner{plans: []*ToolPlan{
+		{}, // 1st: empty → triggers corrective re-plan
+		{Steps: []ToolPlanStep{{Name: "sop", ToolName: "kg_doc_content", DependsOn: -1}}}, // 2nd: real evidence
+	}}
+	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
+	plan, _, err := p.Plan(context.Background(), "Is this justified?", []string{"kg_doc_content"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("inner planner calls = %d, want exactly 2 (one corrective re-plan)", inner.calls)
+	}
+	// seed + the corrective plan's step.
+	if len(plan.Steps) != 2 || plan.Steps[0].ToolName != "kg_get_entity" || plan.Steps[1].ToolName != "kg_doc_content" {
+		t.Fatalf("steps = %+v, want [kg_get_entity, kg_doc_content]", plan.Steps)
+	}
+	// The corrective turn used the forceful directive.
+	if !strings.Contains(inner.queries[1], "You returned NO tool calls") {
+		t.Errorf("corrective query missing forceful directive:\n%s", inner.queries[1])
+	}
+}
+
+func TestInvestigationLLMPlanner_EmptyTwiceDegradesWithLimitedEvidence(t *testing.T) {
+	inner := &seqStreamPlanner{plans: []*ToolPlan{{}, {}}} // empty both times
+	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
+	plan, narrative, err := p.Plan(context.Background(), "q", []string{"kg_doc_content"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("inner calls = %d, want 2 (one corrective re-plan, then degrade)", inner.calls)
+	}
+	if len(plan.Steps) != 1 || plan.Steps[0].ToolName != "kg_get_entity" {
+		t.Fatalf("degraded plan = %+v, want seed-only kg_get_entity", plan.Steps)
+	}
+	if narrative == nil || !strings.Contains(narrative.Text, "Limited evidence") {
+		t.Errorf("degraded narrative must flag limited evidence, got %q", narrative.Text)
+	}
+}
+
+func TestInvestigationLLMPlanner_PlanningErrorDoesNotReplan(t *testing.T) {
+	inner := &seqStreamPlanner{errs: []error{context.DeadlineExceeded}}
+	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
+	plan, narrative, err := p.Plan(context.Background(), "q", nil)
+	if err != nil {
+		t.Fatalf("Plan should degrade, not error: %v", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1 (a transport/context error is not re-planned)", inner.calls)
+	}
+	if len(plan.Steps) != 1 || plan.Steps[0].ToolName != "kg_get_entity" {
+		t.Fatalf("degraded plan = %+v, want seed-only", plan.Steps)
+	}
+	if narrative == nil || !strings.Contains(narrative.Text, "Limited evidence") {
+		t.Errorf("degraded narrative must flag limited evidence, got %q", narrative.Text)
+	}
+}
+
+func TestBuildInvestigationPlannerQuery_NoAssemblyConstraints(t *testing.T) {
+	ic := &investigationContext{
+		ActionType:     "flag_equipment_condition",
+		Description:    "Record a degraded condition for CH-36A",
+		RiskLevel:      "low",
+		ReasoningFacts: []string{"COP dropped to 0.49", "threshold: 0.7"},
+	}
+	out := buildInvestigationPlannerQuery("Is this justified?", ic)
+
+	// Carries factual proposal context + the operator's question.
+	for _, want := range []string{
+		`recommended: "flag_equipment_condition"`,
+		"Record a degraded condition",
+		"COP dropped to 0.49",
+		"gather the evidence",
+		"Is this justified?",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("planner query missing %q\n--- got ---\n%s", want, out)
+		}
+	}
+	// MUST NOT carry the assembly-only constraints (the OGA-398 root cause).
+	for _, forbidden := range []string{
+		"grounded ONLY in the evidence",
+		"Do not propose a different action",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("planner query leaked assembly-only constraint %q — this is the bug being fixed:\n%s", forbidden, out)
+		}
+	}
+
+	// No anchoring fields → passthrough.
+	if got := buildInvestigationPlannerQuery("plain", &investigationContext{}); got != "plain" {
+		t.Errorf("empty context should pass through: got %q", got)
+	}
+}

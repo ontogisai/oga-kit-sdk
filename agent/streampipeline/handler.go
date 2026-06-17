@@ -65,8 +65,15 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 		// used here (see the doc comment + OGA-348).
 		invCtx, hasInvCtx := investigationContextFromMessage(msg.Params.Message)
 		var investigationIDs []string
+		// plannerQuery carries a PLANNING framing for the StreamPlanner (OGA-398):
+		// the factual proposal context + the operator's question, WITHOUT the
+		// assembly-only "ground ONLY in results / do not re-propose" directive
+		// that (when fed to a planner) suppresses evidence gathering and yields
+		// an empty plan. The assembly still gets the full anchoring via userText.
+		var plannerQuery string
 		if hasInvCtx {
 			investigationIDs = investigationSeedIDs(invCtx)
+			plannerQuery = buildInvestigationPlannerQuery(userText, invCtx)
 			userText = enrichQueryWithInvestigationContext(userText, invCtx)
 		}
 		var planner StreamPlanner
@@ -103,6 +110,7 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 
 		input := Input{
 			Query:                  userText,
+			PlannerQuery:           plannerQuery,
 			TenantID:               deps.TenantID,
 			PrincipalID:            "", // populated by gateway on outbound calls
 			Actor:                  actor,
@@ -307,6 +315,66 @@ func enrichQueryWithInvestigationContext(userText string, ic *investigationConte
 	}
 	var b strings.Builder
 	if err := investigationContextTmpl.Execute(&b, data); err != nil {
+		return userText
+	}
+	return b.String()
+}
+
+// investigationPlannerTemplate is the PLANNING-framed proposal context handed
+// to the StreamPlanner (OGA-398). Unlike investigationContextTemplate (which
+// instructs the ASSEMBLY LLM to "ground ONLY in the tool results" and "not
+// propose a different action"), this template asks the planner to GATHER the
+// evidence needed to assess the proposal — it deliberately omits those
+// assembly-only constraints, which otherwise read to a planner as "use what
+// you have, don't fetch more" and produce an empty plan. The detailed
+// evidence-class hints (SOP / trend / history) are appended by the
+// InvestigationLLMPlanner (augmentInvestigationQuery), which also knows the
+// seed entities are already being fetched.
+const investigationPlannerTemplate = `[Investigation — assess a proactive proposal{{if .ActionType}}; the proposing agent recommended: "{{.ActionType}}"{{end}}.
+{{- if .Description}}
+What it proposes: {{.Description}}
+{{- end}}
+{{- if .RiskLevel}}
+Risk level: {{.RiskLevel}}
+{{- end}}
+{{- if .ReasoningFacts}}
+It was raised because:
+{{- range .ReasoningFacts}}
+• {{.}}
+{{- end}}
+{{- end}}
+
+Plan the tool calls that gather the evidence needed to assess this proposal and
+answer the operator's question.]
+
+{{.UserQuery}}`
+
+var investigationPlannerTmpl = template.Must(
+	template.New("investigation_planner").Parse(investigationPlannerTemplate),
+)
+
+// buildInvestigationPlannerQuery renders the planner-framed investigation query
+// (OGA-398). It carries the factual proposal context + the operator's question
+// but NONE of the assembly-only directives. When no anchoring fields are
+// present it returns the user text unchanged (the planner still gets the raw
+// question + the InvestigationLLMPlanner's evidence-class augmentation).
+func buildInvestigationPlannerQuery(userText string, ic *investigationContext) string {
+	if ic == nil {
+		return userText
+	}
+	facts := nonEmptyStrings(ic.ReasoningFacts)
+	if ic.ActionType == "" && ic.Description == "" && len(facts) == 0 {
+		return userText
+	}
+	data := investigationPromptData{
+		ActionType:     ic.ActionType,
+		Description:    ic.Description,
+		RiskLevel:      ic.RiskLevel,
+		ReasoningFacts: facts,
+		UserQuery:      userText,
+	}
+	var b strings.Builder
+	if err := investigationPlannerTmpl.Execute(&b, data); err != nil {
 		return userText
 	}
 	return b.String()

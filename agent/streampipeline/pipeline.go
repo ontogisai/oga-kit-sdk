@@ -62,8 +62,20 @@ type Deps struct {
 
 // Input is the per-request configuration the pipeline needs from its caller.
 type Input struct {
-	// Query is the user's message text.
+	// Query is the user's message text. Used for the final LLM ASSEMBLY call
+	// (the briefing). On the investigation path this carries the proposal
+	// anchoring + the "ground ONLY in the tool results / do not re-propose"
+	// directive so the briefing judges the original proposal correctly.
 	Query string
+
+	// PlannerQuery, when non-empty, is the text handed to the StreamPlanner
+	// instead of Query (OGA-398). It carries a PLANNING framing (what evidence
+	// does answering this question require?) WITHOUT the assembly-only
+	// constraints that live in Query ("ground ONLY in results", "do not
+	// re-propose") — those instructions, fed to a planner, suppress evidence
+	// gathering and produce an empty plan. Empty → the planner uses Query
+	// (plain chat / non-investigation paths are unaffected).
+	PlannerQuery string
 
 	// TenantID identifies the tenant. Embedded in events for observability.
 	TenantID string
@@ -162,7 +174,14 @@ func (p *Pipeline) runInternal(
 	emitter := newEmitter(events, uuid.New().String(), input.Actor)
 
 	// 1. Plan
-	plan, narrative, err := planner.Plan(ctx, input.Query, input.ToolNames)
+	// The planner gets PlannerQuery when set (OGA-398) — a planning-framed
+	// query without the assembly-only constraints in Query that otherwise
+	// suppress evidence gathering. Falls back to Query (plain chat path).
+	plannerQuery := input.Query
+	if strings.TrimSpace(input.PlannerQuery) != "" {
+		plannerQuery = input.PlannerQuery
+	}
+	plan, narrative, err := planner.Plan(ctx, plannerQuery, input.ToolNames)
 	if err != nil {
 		// Context cancellation is terminal — there is no point attempting a
 		// fallback against a dead context, and the operator should see the

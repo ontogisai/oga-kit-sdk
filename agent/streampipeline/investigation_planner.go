@@ -3,6 +3,7 @@ package streampipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // maxInvestigationEntities caps how many seed entities a reactive investigation
@@ -75,10 +76,27 @@ func (p *InvestigationLLMPlanner) Plan(ctx context.Context, query string, tools 
 
 	// Ask the LLM to plan complementary evidence retrieval over the full toolbox.
 	llmPlan, _, err := p.llm.Plan(ctx, augmentInvestigationQuery(query, p.entityIDs), tools)
+
+	// Empty (but not errored) first plan: the planner declined to gather any
+	// evidence. Do ONE corrective re-plan with a forceful directive before
+	// degrading (OGA-398, mirrors the OGA-387 corrective retry). The LLM still
+	// chooses the tools, so dynamic/follow-up planning is preserved — this only
+	// raises the floor when the planner degenerates to nothing. A transport/
+	// context error is NOT re-planned (retrying a dead context is pointless).
+	if err == nil && (llmPlan == nil || len(llmPlan.Steps) == 0) {
+		llmPlan, _, err = p.llm.Plan(ctx, correctInvestigationQuery(query, p.entityIDs), tools)
+	}
+
 	if err != nil || llmPlan == nil || len(llmPlan.Steps) == 0 {
 		// Degrade to seed-only grounding — never fail the investigation on an
-		// LLM planning hiccup (the briefing still grounds on the entities).
-		return &ToolPlan{Steps: seed}, investigationNarrative(p.entityIDs), nil
+		// LLM planning hiccup. Surface it (OGA-398 transparency): WARN for
+		// telemetry, and a limited-evidence narrative so the briefing is not a
+		// silent clean verdict built on the entity record alone.
+		slog.WarnContext(ctx, "streampipeline: investigation planner produced no evidence steps after corrective re-plan; degrading to seed-only grounding",
+			"seed_entities", len(p.entityIDs),
+			"plan_err", err,
+		)
+		return &ToolPlan{Steps: seed}, degradedInvestigationNarrative(p.entityIDs), nil
 	}
 
 	offset := len(seed)
@@ -108,6 +126,39 @@ func augmentInvestigationQuery(query string, ids []string) string {
 			"governing SOP (kg_doc_content), prior work orders, or similar past "+
 			"incidents (kg_vector). Do not re-list the seed entities.]",
 		describeEntities(ids))
+}
+
+// correctInvestigationQuery is the forceful re-plan directive used when the
+// first planning attempt returned zero steps (OGA-398). It is deliberately
+// stronger than augmentInvestigationQuery: it tells the planner that returning
+// no tools is not acceptable for judging a proposal, and names the evidence
+// classes it must gather — while still letting the LLM choose the concrete
+// tools and arguments (and add anything the operator's question needs).
+func correctInvestigationQuery(query string, ids []string) string {
+	return query + fmt.Sprintf(
+		"\n\n[You returned NO tool calls. That is not sufficient to assess a "+
+			"proposal or answer the operator. %s already being retrieved via "+
+			"kg_get_entity — now plan the tool calls that gather the supporting "+
+			"evidence: the governing SOP/threshold (kg_doc_content), the recent "+
+			"sensor trend for the affected metric (kg_ts_read / kg_ts_analyze), "+
+			"prior work orders / history (kg_query_entities), and any related "+
+			"equipment (kg_traverse) or past incidents (kg_vector) relevant to "+
+			"the question. Return a non-empty plan.]",
+		describeEntities(ids))
+}
+
+// degradedInvestigationNarrative is emitted as the planner's task/reasoning
+// when the investigation degraded to seed-only grounding (the LLM planned no
+// evidence steps even after the corrective re-plan). It is operator-visible so
+// the briefing's limited basis is explicit rather than a silent clean verdict
+// (OGA-398 transparency).
+func degradedInvestigationNarrative(ids []string) *PlanNarrative {
+	return &PlanNarrative{
+		Text: fmt.Sprintf("Limited evidence: I could retrieve only the entity record for %s — "+
+			"the governing SOP, recent sensor trend, and work-order history were not gathered, "+
+			"so this assessment is based on the equipment record alone.",
+			describeEntities(ids)),
+	}
 }
 
 func investigationNarrative(ids []string) *PlanNarrative {
