@@ -6,79 +6,118 @@ import (
 )
 
 // maxInvestigationEntities caps how many seed entities a reactive investigation
-// grounds on, bounding the plan size when a convergence proposal correlates
-// many entities. The typical proactive case has exactly one.
+// grounds on, bounding the seed-step count when a convergence proposal
+// correlates many entities. The typical proactive case has exactly one.
 const maxInvestigationEntities = 5
 
-// InvestigationGroundingPlanner is the reactive-safe, deterministic planner for
-// the [Investigate] follow-up (OGA-378). Unlike GroundingStrategyPlanner (which
-// reads the kit's proactive grounding_strategy and resolves {entity_id}
-// placeholders that only exist on the proactive path), this planner is seeded
-// by CONCRETE entity ids carried on the investigation forward
-// (InvestigationContext.trigger_entity_ids). It emits a fixed, domain-agnostic
-// retrieval plan per entity so the agent's briefing is grounded in real KG data
-// rather than a plain LLM completion.
+// InvestigationLLMPlanner is the reactive [Investigate] planner (OGA-378,
+// reworked per Option 2). It combines guaranteed grounding with the agent's
+// FULL tool union, replacing the original fixed two-tool plan
+// (kg_get_entity + kg_traverse) that could not reach the SOP / history / trend
+// evidence the proposal was based on — which forced the briefing to speculate.
 //
-// Per seed entity (capped at maxInvestigationEntities) it plans:
-//   - kg_get_entity{entity_id}      — the entity's real properties (the core
-//     grounding; valid for every entity type)
-//   - kg_traverse{start_entity_id}  — 1-hop neighbors (related equipment),
-//     all relationship types, outgoing
+// Per request it:
 //
-// Both steps are non-Required: a stale/missing id or an empty traversal
-// degrades gracefully (logged, skipped) and the assembly still grounds on
-// whatever resolved. When no entity resolves, the pipeline's plain-answer
-// fallback (OGA-368) still produces a useful response.
-type InvestigationGroundingPlanner struct {
+//  1. ALWAYS front-loads a kg_get_entity per concrete seed entity
+//     (InvestigationContext target/trigger ids) so the briefing is anchored to
+//     the proposal's actual subject — deterministic, never skipped, even if
+//     the LLM plan is empty or the planning call fails.
+//  2. Delegates to the agent's LLM tool planner (the SAME planner the reactive
+//     chat surface uses, carrying the full profile tool union) to add
+//     question-relevant evidence retrieval — the governing SOP via
+//     kg_doc_content, recent trends via kg_ts_read / kg_ts_analyze, prior work
+//     orders via kg_query_entities, related equipment via kg_traverse, etc. The
+//     LLM picks whatever the operator's question and the proposal demand.
+//
+// The seed steps guarantee grounding; the LLM steps give the briefing the same
+// evidence base the proactive path had — without replaying the proactive
+// grounding_strategy's event-only placeholders (the OGA-348 hazard).
+type InvestigationLLMPlanner struct {
 	entityIDs []string
+	llm       StreamPlanner
 }
 
-// NewInvestigationGroundingPlanner constructs the planner for the given seed
-// entity ids. Callers pass InvestigationContext.trigger_entity_ids; the planner
-// dedupes, drops blanks, and caps the list.
-func NewInvestigationGroundingPlanner(entityIDs []string) *InvestigationGroundingPlanner {
-	return &InvestigationGroundingPlanner{entityIDs: normalizeEntityIDs(entityIDs)}
+// NewInvestigationLLMPlanner constructs the planner for the given seed entity
+// ids and an inner LLM planner (typically the profile's reactive
+// LLMToolPlanner, which carries the full tool union). Callers pass the
+// InvestigationContext seed ids; the planner dedupes, drops blanks, and caps at
+// maxInvestigationEntities.
+func NewInvestigationLLMPlanner(entityIDs []string, llm StreamPlanner) *InvestigationLLMPlanner {
+	return &InvestigationLLMPlanner{entityIDs: normalizeEntityIDs(entityIDs), llm: llm}
 }
 
-// Plan builds the deterministic per-entity retrieval plan. The query is unused
-// (the seed entities, not the prose, drive grounding); tools are unused (the
-// plan references fixed platform Tier-1 tools).
-func (p *InvestigationGroundingPlanner) Plan(_ context.Context, _ string, _ []string) (*ToolPlan, *PlanNarrative, error) {
-	if len(p.entityIDs) == 0 {
-		// Nothing to ground on — empty plan; the pipeline falls back to a
-		// plain answer (no hard failure).
-		return &ToolPlan{}, &PlanNarrative{Text: "No investigation entities supplied; answering directly."}, nil
-	}
-
-	steps := make([]ToolPlanStep, 0, len(p.entityIDs)*2)
+// Plan builds a seed kg_get_entity step for each concrete entity, then appends
+// the inner LLM planner's complementary steps with their DependsOn indices
+// offset past the seed steps (DependsOn is an index into the executed-steps
+// slice; prepending N seed steps shifts every dependent LLM step by N). The LLM
+// is told the seed entities are already being fetched so it plans ADDITIONAL
+// evidence rather than re-listing them.
+//
+// The plan never fails on an LLM hiccup: an empty/errored inner plan degrades
+// to seed-only grounding so the briefing still anchors on the entities.
+func (p *InvestigationLLMPlanner) Plan(ctx context.Context, query string, tools []string) (*ToolPlan, *PlanNarrative, error) {
+	seed := make([]ToolPlanStep, 0, len(p.entityIDs))
 	for i, id := range p.entityIDs {
-		steps = append(steps, ToolPlanStep{
-			Name:      fmt.Sprintf("entity_%d", i),
+		seed = append(seed, ToolPlanStep{
+			Name:      fmt.Sprintf("seed_entity_%d", i),
 			ToolName:  "kg_get_entity",
 			Arguments: map[string]any{"entity_id": id},
 			DependsOn: -1,
-			Rationale: fmt.Sprintf("Retrieve the triggering entity %s and its properties", id),
-			Required:  false,
-		})
-		steps = append(steps, ToolPlanStep{
-			Name:     fmt.Sprintf("neighbors_%d", i),
-			ToolName: "kg_traverse",
-			Arguments: map[string]any{
-				"start_entity_id": id,
-				"direction":       "outgoing",
-				"max_depth":       1,
-			},
-			DependsOn: -1,
-			Rationale: fmt.Sprintf("Find equipment and locations related to %s (1 hop)", id),
+			Rationale: fmt.Sprintf("Ground the briefing on the proposal's entity %s", id),
 			Required:  false,
 		})
 	}
 
-	narrative := &PlanNarrative{
-		Text: fmt.Sprintf("Investigating the proposal — gathering live data on %s from the knowledge graph...",
-			describeEntities(p.entityIDs)),
+	// No inner planner (defensive) → seed-only grounding.
+	if p.llm == nil {
+		return &ToolPlan{Steps: seed}, investigationNarrative(p.entityIDs), nil
 	}
-	return &ToolPlan{Steps: steps}, narrative, nil
+
+	// Ask the LLM to plan complementary evidence retrieval over the full toolbox.
+	llmPlan, _, err := p.llm.Plan(ctx, augmentInvestigationQuery(query, p.entityIDs), tools)
+	if err != nil || llmPlan == nil || len(llmPlan.Steps) == 0 {
+		// Degrade to seed-only grounding — never fail the investigation on an
+		// LLM planning hiccup (the briefing still grounds on the entities).
+		return &ToolPlan{Steps: seed}, investigationNarrative(p.entityIDs), nil
+	}
+
+	offset := len(seed)
+	merged := make([]ToolPlanStep, 0, offset+len(llmPlan.Steps))
+	merged = append(merged, seed...)
+	for _, s := range llmPlan.Steps {
+		if s.DependsOn >= 0 {
+			s.DependsOn += offset
+		}
+		merged = append(merged, s)
+	}
+	return &ToolPlan{Steps: merged}, investigationNarrative(p.entityIDs), nil
+}
+
+// augmentInvestigationQuery appends a planning directive telling the LLM that
+// the seed entities are already being retrieved, so it should plan
+// COMPLEMENTARY evidence (SOP, history, trends) rather than re-listing them.
+func augmentInvestigationQuery(query string, ids []string) string {
+	if len(ids) == 0 {
+		return query
+	}
+	return query + fmt.Sprintf(
+		"\n\n[Planning note: %s already being retrieved via kg_get_entity. Plan "+
+			"ADDITIONAL tools to answer the operator's question and, where relevant, "+
+			"assess the proposal — e.g. recent sensor readings/trends (kg_ts_read, "+
+			"kg_ts_analyze), related equipment (kg_traverse, kg_query_entities), the "+
+			"governing SOP (kg_doc_content), prior work orders, or similar past "+
+			"incidents (kg_vector). Do not re-list the seed entities.]",
+		describeEntities(ids))
+}
+
+func investigationNarrative(ids []string) *PlanNarrative {
+	if len(ids) == 0 {
+		return &PlanNarrative{Text: "Investigating the proposal — answering from the available context..."}
+	}
+	return &PlanNarrative{
+		Text: fmt.Sprintf("Investigating the proposal — gathering live data on %s plus supporting evidence from the knowledge graph...",
+			describeEntities(ids)),
+	}
 }
 
 // normalizeEntityIDs trims blanks, dedupes (preserving first-seen order), and
