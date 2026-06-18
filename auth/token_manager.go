@@ -161,15 +161,27 @@ func (tm *TokenManager) refresh(ctx context.Context) error {
 	for attempt := range maxAttempts {
 		newToken, expiresAt, err := tm.doRefresh(ctx, currentToken)
 		if err == nil {
-			// Atomic file write
-			if err := tm.atomicWriteToken(newToken); err != nil {
-				return fmt.Errorf("write token file: %w", err)
-			}
-
+			// Adopt the rotated token in memory FIRST. This is the live identity
+			// the gateway client serves outbound requests from (via the token
+			// provider). The gateway shortens the OLD token's expiry to
+			// now+overlap the instant it issues the new one, so we MUST switch
+			// to the new token even if we cannot persist it — otherwise the next
+			// renewal presents the burned old token and the gateway 401s
+			// ("old token invalid: token has expired"), bricking the agent
+			// (OGA-400).
 			tm.mu.Lock()
 			tm.current = newToken
 			tm.expiresAt = expiresAt
 			tm.mu.Unlock()
+
+			// Persistence is best-effort. The file only lets a process restart
+			// resume without a cold re-fetch; a write failure (e.g. the
+			// read-only credential mount kit sidecars run with) must NOT discard
+			// the freshly-issued token.
+			if werr := tm.atomicWriteToken(newToken); werr != nil {
+				slog.Warn("token refreshed in memory but file persist failed (continuing)",
+					"error", werr, "path", tm.tokenPath)
+			}
 
 			slog.Info("token refreshed", "expires_at", expiresAt, "attempt", attempt+1)
 			return nil
