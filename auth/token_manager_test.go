@@ -99,3 +99,51 @@ func TestTokenManager_RefreshRoundTrip(t *testing.T) {
 		t.Error("rotated token was not written back to the file")
 	}
 }
+
+// TestTokenManager_RefreshAdoptsTokenWhenPersistFails is the OGA-400 regression
+// guard. Kit agent sidecars run with the credential dir bind-mounted read-only,
+// so atomicWriteToken fails. Because the gateway shortens the OLD token's
+// expiry the instant it issues the new one, the SDK MUST still adopt the new
+// token in memory even when it cannot persist it — otherwise the next renewal
+// presents the burned old token and the gateway 401s, bricking the agent.
+func TestTokenManager_RefreshAdoptsTokenWhenPersistFails(t *testing.T) {
+	newExpiry := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      `{"token_id":"tok-2","agent_id":"sgac1.fm-operations-agent","tenant_id":"sgac1","expires_at":"` + newExpiry.Format(time.RFC3339Nano) + `","signature":"sig2"}`,
+			"expires_at": newExpiry,
+		})
+	}))
+	defer srv.Close()
+
+	// Load the initial token from a real file, then redirect tokenPath into a
+	// non-existent directory so atomicWriteToken (os.CreateTemp on the dir)
+	// fails — simulating the read-only credential mount.
+	loadPath := writeTokenFile(t, time.Now().Add(2*time.Minute))
+	tm := &TokenManager{tokenPath: loadPath, refreshURL: srv.URL, client: srv.Client()}
+	if err := tm.loadFromFile(); err != nil {
+		t.Fatalf("loadFromFile: %v", err)
+	}
+	oldToken := tm.Token()
+	tm.tokenPath = filepath.Join(t.TempDir(), "does-not-exist", "service-token")
+
+	// Refresh must succeed (no error) despite the unwritable path.
+	if err := tm.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh returned error on persist failure, want nil: %v", err)
+	}
+
+	// The in-memory token MUST be the rotated one, not the burned old token.
+	got := tm.Token()
+	if got == oldToken {
+		t.Fatal("refresh kept the old token after a persist failure — agent would be locked out")
+	}
+	if parseTokenExpiry(got) != newExpiry {
+		t.Errorf("current token expiry = %v, want rotated %v", parseTokenExpiry(got), newExpiry)
+	}
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if !tm.expiresAt.Equal(newExpiry) {
+		t.Errorf("expiresAt = %v, want %v (renewal must schedule against the new TTL)", tm.expiresAt, newExpiry)
+	}
+}
