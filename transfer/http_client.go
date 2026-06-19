@@ -23,6 +23,13 @@ type HTTPCommitClient struct {
 	tenantID   string
 	kitID      string
 	tokenPath  string
+	// tokenProvider, when set, is called on every request to obtain the
+	// bearer token. It takes precedence over tokenPath. This is the
+	// OGA-404 workload-identity path: a loader sidecar mints its token via
+	// auth.TokenManager (bootstrap-mint) and passes tm.Token here, so the
+	// commit client presents a valid Authorization header without a token
+	// file. See auth.WorkloadTokenProviderFromEnv.
+	tokenProvider func() string
 
 	httpClient *http.Client
 }
@@ -56,9 +63,28 @@ func WithTimeout(d time.Duration) HTTPCommitClientOption {
 // request to obtain the bearer token. Leaving this empty puts the
 // client in "no Authorization header" mode — fine for dev-mode
 // gateways (OGA-228) but not for production deployments.
+//
+// Deprecated for production loaders: the platform no longer deploys a
+// token file (OGA-404 Phase 2/3). Use [WithTokenProvider] with a
+// bootstrap-mint token manager instead. WithTokenPath is retained for
+// backward compatibility and as a [WithTokenProvider] fallback.
 func WithTokenPath(path string) HTTPCommitClientOption {
 	return func(c *HTTPCommitClient) {
 		c.tokenPath = strings.TrimSpace(path)
+	}
+}
+
+// WithTokenProvider supplies a function called on every request to obtain the
+// bearer token. It takes precedence over [WithTokenPath]. This is the OGA-404
+// workload-identity path: a non-agent sidecar (loader, MCP server) mints its
+// platform workload token from a bootstrap identity via auth.TokenManager and
+// passes tm.Token here, so the commit client authenticates to the gateway
+// without a token file. A nil fn is ignored.
+func WithTokenProvider(fn func() string) HTTPCommitClientOption {
+	return func(c *HTTPCommitClient) {
+		if fn != nil {
+			c.tokenProvider = fn
+		}
 	}
 }
 
@@ -203,10 +229,14 @@ func (c *HTTPCommitClient) postJSON(ctx context.Context, path string, body any) 
 	return respBody, nil
 }
 
-// loadToken reads the bearer token from the configured file path on
-// every request. Caching is intentional null for dev — production
-// callers wire in a real token watcher via [WithHTTPClient].
+// loadToken returns the bearer token for a request. A configured
+// tokenProvider (OGA-404 workload-identity bootstrap-mint) takes
+// precedence; otherwise it falls back to reading the token file at
+// tokenPath. Returns "" (no Authorization header) when neither is set.
 func (c *HTTPCommitClient) loadToken() string {
+	if c.tokenProvider != nil {
+		return strings.TrimSpace(c.tokenProvider())
+	}
 	if c.tokenPath == "" {
 		return ""
 	}
