@@ -269,3 +269,81 @@ func TestHTTPCommitClient_NilCompleteRequest(t *testing.T) {
 		t.Error("Complete with nil request should fail")
 	}
 }
+
+// TestHTTPCommitClient_WithTokenProvider verifies the OGA-404 workload-identity
+// path: a token provider supplies the bearer the gateway sees on every call,
+// without any token file.
+func TestHTTPCommitClient_WithTokenProvider(t *testing.T) {
+	t.Parallel()
+	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit",
+		transfer.WithTokenProvider(func() string { return "minted-workload-jwt" }))
+	if err != nil {
+		t.Fatalf("NewHTTPCommitClient: %v", err)
+	}
+
+	if _, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
+		InlineBody: json.RawMessage(`{"x":1}`),
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gate.lastAuthHeader != "Bearer minted-workload-jwt" {
+		t.Errorf("Authorization = %q, want %q", gate.lastAuthHeader, "Bearer minted-workload-jwt")
+	}
+}
+
+// TestHTTPCommitClient_TokenProviderTakesPrecedence verifies the provider wins
+// over a configured token path.
+func TestHTTPCommitClient_TokenProviderTakesPrecedence(t *testing.T) {
+	t.Parallel()
+	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit",
+		transfer.WithTokenPath("/nonexistent/token/file"),
+		transfer.WithTokenProvider(func() string { return "provider-wins" }))
+	if err != nil {
+		t.Fatalf("NewHTTPCommitClient: %v", err)
+	}
+
+	if _, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
+		InlineBody: json.RawMessage(`{"x":1}`),
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gate.lastAuthHeader != "Bearer provider-wins" {
+		t.Errorf("Authorization = %q, want %q (provider must take precedence over token path)",
+			gate.lastAuthHeader, "Bearer provider-wins")
+	}
+}
+
+// TestHTTPCommitClient_NoTokenNoHeader verifies the dev fallback: with neither a
+// provider nor a token path, no Authorization header is sent.
+func TestHTTPCommitClient_NoTokenNoHeader(t *testing.T) {
+	t.Parallel()
+	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
+	if _, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
+		InlineBody: json.RawMessage(`{"x":1}`),
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gate.lastAuthHeader != "" {
+		t.Errorf("Authorization = %q, want empty (no token configured)", gate.lastAuthHeader)
+	}
+}
+
+// TestHTTPCommitClient_EmptyProviderTokenNoHeader verifies a provider returning
+// "" yields no Authorization header (rather than "Bearer ").
+func TestHTTPCommitClient_EmptyProviderTokenNoHeader(t *testing.T) {
+	t.Parallel()
+	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit",
+		transfer.WithTokenProvider(func() string { return "" }))
+	if _, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
+		InlineBody: json.RawMessage(`{"x":1}`),
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gate.lastAuthHeader != "" {
+		t.Errorf("Authorization = %q, want empty (provider returned empty token)", gate.lastAuthHeader)
+	}
+}
