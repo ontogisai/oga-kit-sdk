@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 
@@ -61,28 +62,77 @@ func ConnectRuntimeDeps(ctx context.Context, cfg *RuntimeDepsConfig) (*RuntimeDe
 		AgentID:  cfg.AgentID,
 	}
 
-	// Start sliding token renewal so the agent keeps a valid service token for
-	// its whole lifetime (the initial token is short-lived; the Sidecar Manager
-	// only mints the first one). The TokenManager refreshes at 50% TTL against
-	// the gateway's /auth/token/refresh endpoint and rewrites the token file;
-	// the gateway client reads the live token via the provider hook.
-	if cfg.TokenPath != "" {
-		tm, err := auth.NewTokenManager(ctx, &auth.TokenManagerConfig{
-			TokenPath:  cfg.TokenPath,
-			RefreshURL: strings.TrimRight(cfg.GatewayURL, "/") + "/auth/token/refresh",
-		})
-		if err != nil {
-			// Non-fatal: fall back to the static file token. The agent still
-			// works until the token expires; we log so the gap is visible.
-			slog.Warn("token manager init failed; running without token rotation",
-				"error", err, "token_path", cfg.TokenPath)
-		} else {
-			gw.SetTokenProvider(tm.Token)
-			deps.tokenMgr = tm
-		}
+	// Acquire + rotate the workload token. The mode is selected by the
+	// manager-injected environment (OGA-404): bootstrap-mint when
+	// AGENT_BOOTSTRAP_KIND is set, else the legacy token-file + refresh path.
+	tm, err := buildTokenManager(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if tm != nil {
+		gw.SetTokenProvider(tm.Token)
+		deps.tokenMgr = tm
 	}
 
 	return deps, nil
+}
+
+// buildTokenManager selects how the agent acquires + rotates its gateway token
+// (OGA-404), driven by the environment the Sidecar Manager injects:
+//
+//   - Bootstrap-mint (preferred): when AGENT_BOOTSTRAP_KIND is set, the workload
+//     token is minted from a durable bootstrap identity (a Kubernetes projected
+//     ServiceAccount token, or a SecretStore secret) at the gateway's
+//     /auth/token/issue endpoint — at boot and on every renewal. No token file,
+//     no refresh-with-the-old-token. AGENT_REGISTRATION_ID ("{tenant}.{name}",
+//     manager-injected) is the identity the mint endpoint authorizes against.
+//     A mint failure here is FATAL: the agent cannot prove identity and must not
+//     start serving.
+//   - Legacy file+refresh (migration fallback): when only TokenPath is set, the
+//     initial token is read from the mounted file and rotated via
+//     /auth/token/refresh. Init failure is non-fatal (the static file token
+//     still serves until expiry).
+//   - Neither: returns (nil, nil) — the agent runs without a managed token.
+func buildTokenManager(ctx context.Context, cfg *RuntimeDepsConfig) (*auth.TokenManager, error) {
+	base := strings.TrimRight(cfg.GatewayURL, "/")
+
+	provider, err := auth.BootstrapFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("resolve bootstrap identity: %w", err)
+	}
+	if provider != nil {
+		regID := os.Getenv("AGENT_REGISTRATION_ID")
+		if regID == "" {
+			regID = cfg.AgentID
+		}
+		tm, mErr := auth.NewTokenManager(ctx, &auth.TokenManagerConfig{
+			Bootstrap:           provider,
+			IssueURL:            base + "/auth/token/issue",
+			AgentRegistrationID: regID,
+		})
+		if mErr != nil {
+			return nil, fmt.Errorf("mint workload token: %w", mErr)
+		}
+		slog.Info("workload token: bootstrap-mint mode", "agent_registration_id", regID)
+		return tm, nil
+	}
+
+	if cfg.TokenPath != "" {
+		tm, mErr := auth.NewTokenManager(ctx, &auth.TokenManagerConfig{
+			TokenPath:  cfg.TokenPath,
+			RefreshURL: base + "/auth/token/refresh",
+		})
+		if mErr != nil {
+			// Non-fatal: fall back to the static file token. The agent still
+			// works until the token expires; we log so the gap is visible.
+			slog.Warn("token manager init failed; running without token rotation",
+				"error", mErr, "token_path", cfg.TokenPath)
+			return nil, nil
+		}
+		return tm, nil
+	}
+
+	return nil, nil
 }
 
 // Close releases all resources held by the runtime dependencies.
