@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -97,18 +98,28 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 	}
 
 	deps := Deps{Gateway: rt.Deps().Gateway, Logger: slog.Default(), Config: DefaultConfig()}
+	persona := ""
+	var grounding []agent.GroundingStep
+	if profile.ProactiveReasoning != nil {
+		persona = profile.ProactiveReasoning.SystemPrompt
+		grounding = profile.ProactiveReasoning.GroundingStrategy
+	}
 	input := Input{
 		Query:          proactiveQuery(event),
 		TenantID:       event.TenantID,
 		Actor:          agent.EventActor{Type: "domain_agent", ID: profile.AgentID, DisplayName: profile.Name},
 		AssemblyPrompt: proactiveAssemblyPrompt(profile, candidates),
-		// Resolve grounding-step placeholders ({entity_id}, {entity_type},
-		// {entity_properties.X}, {time_minus_24h}, ...) from the triggering
-		// event so kg_get_entity({entity_id}) sees the real id rather than the
-		// literal token (OGA-350).
-		ProactivePlaceholders: NewProactivePlaceholderResolver(event, time.Now()),
+		// Persona + palette for the planner. The proactive palette is the
+		// profile tool union (kg_* + Tier-3) ONLY — it never contains an
+		// agent-delegation capability (OGA-419 Property 5). The grounding
+		// strategy is passed as ADVISORY hints (same struct as the profile),
+		// and the resolved event facts seed the planner so it derives concrete
+		// tool arguments without {placeholder} substitution.
+		Persona:           PlannerPersona{SystemPrompt: persona, Tools: agent.UniqueTools(profile)},
+		GroundingStrategy: grounding,
+		SeedFacts:         proactiveSeedFacts(event),
 	}
-	planner := NewGroundingStrategyPlanner(profile)
+	planner := NewLLMToolPlanner(deps.Gateway, agent.DefaultPlannerConfig())
 
 	decision, _, err := RunSync[agent.ActionDecision](ctx, NewPipeline(), deps, input, planner, schema)
 	if err != nil {
@@ -254,6 +265,47 @@ func proactiveQuery(e *agent.ProactiveEvent) string {
 		fmt.Fprintf(&b, ", severity %s", e.Severity)
 	}
 	b.WriteString(". Decide what action, if any, to propose.")
+	return b.String()
+}
+
+// proactiveSeedFacts renders the triggering event as a readable facts block the
+// planner grounds on (OGA-419). It replaces the former {placeholder}
+// substitution (OGA-350): instead of templating tool arguments, the concrete
+// event facts (entity_id, type, severity, payload) are given to the LLM, which
+// derives the tool arguments itself in the ReAct loop. Payload keys are sorted
+// for deterministic output.
+func proactiveSeedFacts(e *agent.ProactiveEvent) string {
+	if e == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Triggering event facts:\n")
+	fmt.Fprintf(&b, "- event_type: %s\n", e.EventType)
+	if e.EventID != "" {
+		fmt.Fprintf(&b, "- event_id: %s\n", e.EventID)
+	}
+	if e.EntityID != "" {
+		fmt.Fprintf(&b, "- entity_id: %s\n", e.EntityID)
+	}
+	if e.EntityType != "" {
+		fmt.Fprintf(&b, "- entity_type: %s\n", e.EntityType)
+	}
+	if e.Severity != "" {
+		fmt.Fprintf(&b, "- severity: %s\n", e.Severity)
+	}
+	if e.H3Cell != "" {
+		fmt.Fprintf(&b, "- h3_cell: %s\n", e.H3Cell)
+	}
+	if len(e.Payload) > 0 {
+		keys := make([]string, 0, len(e.Payload))
+		for k := range e.Payload {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&b, "- %s: %v\n", k, e.Payload[k])
+		}
+	}
 	return b.String()
 }
 

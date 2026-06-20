@@ -3,7 +3,6 @@ package streampipeline
 import (
 	"context"
 	"fmt"
-	"log/slog"
 )
 
 // maxInvestigationEntities caps how many seed entities a reactive investigation
@@ -12,103 +11,68 @@ import (
 const maxInvestigationEntities = 5
 
 // InvestigationLLMPlanner is the reactive [Investigate] planner (OGA-378,
-// reworked per Option 2). It combines guaranteed grounding with the agent's
-// FULL tool union, replacing the original fixed two-tool plan
-// (kg_get_entity + kg_traverse) that could not reach the SOP / history / trend
-// evidence the proposal was based on — which forced the briefing to speculate.
+// adapted to the ReAct loop in OGA-419). It guarantees grounding on the
+// proposal's concrete seed entities, then delegates to an inner LLM planner for
+// question-relevant evidence (SOP, history, trends) — the same dynamic planner
+// the reactive chat surface uses.
 //
-// Per request it:
+// Per turn:
 //
-//  1. ALWAYS front-loads a kg_get_entity per concrete seed entity
-//     (InvestigationContext target/trigger ids) so the briefing is anchored to
-//     the proposal's actual subject — deterministic, never skipped, even if
-//     the LLM plan is empty or the planning call fails.
-//  2. Delegates to the agent's LLM tool planner (the SAME planner the reactive
-//     chat surface uses, carrying the full profile tool union) to add
-//     question-relevant evidence retrieval — the governing SOP via
-//     kg_doc_content, recent trends via kg_ts_read / kg_ts_analyze, prior work
-//     orders via kg_query_entities, related equipment via kg_traverse, etc. The
-//     LLM picks whatever the operator's question and the proposal demand.
+//  1. While not every seed entity has been fetched, it emits ONE deterministic
+//     kg_get_entity for the next seed (one per turn). This anchors the briefing
+//     on the proposal's actual subject even if the LLM later gathers nothing.
+//  2. Once all seeds are fetched, it delegates to the inner LLM planner (which
+//     sees the seed observations in PlanState.History and plans complementary
+//     evidence retrieval over the full toolbox).
 //
-// The seed steps guarantee grounding; the LLM steps give the briefing the same
-// evidence base the proactive path had — without replaying the proactive
-// grounding_strategy's event-only placeholders (the OGA-348 hazard).
+// It is stateless: the number of seeds already fetched is derived from
+// len(PlanState.History), since the loop calls Next sequentially and the seed
+// steps are issued first.
 type InvestigationLLMPlanner struct {
 	entityIDs []string
-	llm       StreamPlanner
+	inner     Planner
 }
 
 // NewInvestigationLLMPlanner constructs the planner for the given seed entity
-// ids and an inner LLM planner (typically the profile's reactive
-// LLMToolPlanner, which carries the full tool union). Callers pass the
-// InvestigationContext seed ids; the planner dedupes, drops blanks, and caps at
-// maxInvestigationEntities.
-func NewInvestigationLLMPlanner(entityIDs []string, llm StreamPlanner) *InvestigationLLMPlanner {
-	return &InvestigationLLMPlanner{entityIDs: normalizeEntityIDs(entityIDs), llm: llm}
+// ids and an inner planner (typically the profile's reactive LLMToolPlanner).
+// Ids are deduped, blank-stripped, and capped at maxInvestigationEntities.
+func NewInvestigationLLMPlanner(entityIDs []string, inner Planner) *InvestigationLLMPlanner {
+	return &InvestigationLLMPlanner{entityIDs: normalizeEntityIDs(entityIDs), inner: inner}
 }
 
-// Plan builds a seed kg_get_entity step for each concrete entity, then appends
-// the inner LLM planner's complementary steps with their DependsOn indices
-// offset past the seed steps (DependsOn is an index into the executed-steps
-// slice; prepending N seed steps shifts every dependent LLM step by N). The LLM
-// is told the seed entities are already being fetched so it plans ADDITIONAL
-// evidence rather than re-listing them.
-//
-// The plan never fails on an LLM hiccup: an empty/errored inner plan degrades
-// to seed-only grounding so the briefing still anchors on the entities.
-func (p *InvestigationLLMPlanner) Plan(ctx context.Context, query string, tools []string) (*ToolPlan, *PlanNarrative, error) {
-	seed := make([]ToolPlanStep, 0, len(p.entityIDs))
-	for i, id := range p.entityIDs {
-		seed = append(seed, ToolPlanStep{
-			Name:      fmt.Sprintf("seed_entity_%d", i),
-			ToolName:  "kg_get_entity",
-			Arguments: map[string]any{"entity_id": id},
-			DependsOn: -1,
-			Rationale: fmt.Sprintf("Ground the briefing on the proposal's entity %s", id),
-			Required:  false,
-		})
-	}
+// Next front-loads the seed kg_get_entity steps, then delegates to the inner
+// planner with the query augmented to tell the LLM the seeds are already being
+// retrieved (so it plans ADDITIONAL evidence rather than re-listing them).
+func (p *InvestigationLLMPlanner) Next(ctx context.Context, st *PlanState) (*Decision, error) {
+	fetched := len(st.History)
 
-	// No inner planner (defensive) → seed-only grounding.
-	if p.llm == nil {
-		return &ToolPlan{Steps: seed}, investigationNarrative(p.entityIDs), nil
-	}
-
-	// Ask the LLM to plan complementary evidence retrieval over the full toolbox.
-	llmPlan, _, err := p.llm.Plan(ctx, augmentInvestigationQuery(query, p.entityIDs), tools)
-
-	// Empty (but not errored) first plan: the planner declined to gather any
-	// evidence. Do ONE corrective re-plan with a forceful directive before
-	// degrading (OGA-398, mirrors the OGA-387 corrective retry). The LLM still
-	// chooses the tools, so dynamic/follow-up planning is preserved — this only
-	// raises the floor when the planner degenerates to nothing. A transport/
-	// context error is NOT re-planned (retrying a dead context is pointless).
-	if err == nil && (llmPlan == nil || len(llmPlan.Steps) == 0) {
-		llmPlan, _, err = p.llm.Plan(ctx, correctInvestigationQuery(query, p.entityIDs), tools)
-	}
-
-	if err != nil || llmPlan == nil || len(llmPlan.Steps) == 0 {
-		// Degrade to seed-only grounding — never fail the investigation on an
-		// LLM planning hiccup. Surface it (OGA-398 transparency): WARN for
-		// telemetry, and a limited-evidence narrative so the briefing is not a
-		// silent clean verdict built on the entity record alone.
-		slog.WarnContext(ctx, "streampipeline: investigation planner produced no evidence steps after corrective re-plan; degrading to seed-only grounding",
-			"seed_entities", len(p.entityIDs),
-			"plan_err", err,
-		)
-		return &ToolPlan{Steps: seed}, degradedInvestigationNarrative(p.entityIDs), nil
-	}
-
-	offset := len(seed)
-	merged := make([]ToolPlanStep, 0, offset+len(llmPlan.Steps))
-	merged = append(merged, seed...)
-	for _, s := range llmPlan.Steps {
-		if s.DependsOn >= 0 {
-			s.DependsOn += offset
+	if fetched < len(p.entityIDs) {
+		id := p.entityIDs[fetched]
+		narrative := ""
+		if fetched == 0 {
+			narrative = investigationNarrative(p.entityIDs).Text
 		}
-		merged = append(merged, s)
+		return &Decision{
+			Narrative: narrative,
+			Step: &ToolPlanStep{
+				Name:      fmt.Sprintf("seed_entity_%d", fetched),
+				ToolName:  "kg_get_entity",
+				Arguments: map[string]any{"entity_id": id},
+				DependsOn: -1,
+				Rationale: fmt.Sprintf("Ground the briefing on the proposal's entity %s", id),
+			},
+		}, nil
 	}
-	return &ToolPlan{Steps: merged}, investigationNarrative(p.entityIDs), nil
+
+	// Seeds done. Defensive: no inner planner → finalize on seed-only grounding.
+	if p.inner == nil {
+		return &Decision{Done: true}, nil
+	}
+
+	// Delegate, augmenting the query so the LLM plans complementary evidence.
+	augmented := *st
+	augmented.Query = augmentInvestigationQuery(st.Query, p.entityIDs)
+	return p.inner.Next(ctx, &augmented)
 }
 
 // augmentInvestigationQuery appends a planning directive telling the LLM that
@@ -119,46 +83,13 @@ func augmentInvestigationQuery(query string, ids []string) string {
 		return query
 	}
 	return query + fmt.Sprintf(
-		"\n\n[Planning note: %s already being retrieved via kg_get_entity. Plan "+
-			"ADDITIONAL tools to answer the operator's question and, where relevant, "+
-			"assess the proposal — e.g. recent sensor readings/trends (kg_ts_read, "+
+		"\n\n[Planning note: %s already retrieved via kg_get_entity. Gather "+
+			"ADDITIONAL evidence to answer the operator and, where relevant, assess "+
+			"the proposal — e.g. recent sensor readings/trends (kg_ts_read, "+
 			"kg_ts_analyze), related equipment (kg_traverse, kg_query_entities), the "+
 			"governing SOP (kg_doc_content), prior work orders, or similar past "+
-			"incidents (kg_vector). Do not re-list the seed entities.]",
+			"incidents (kg_vector). Do not re-fetch the seed entities.]",
 		describeEntities(ids))
-}
-
-// correctInvestigationQuery is the forceful re-plan directive used when the
-// first planning attempt returned zero steps (OGA-398). It is deliberately
-// stronger than augmentInvestigationQuery: it tells the planner that returning
-// no tools is not acceptable for judging a proposal, and names the evidence
-// classes it must gather — while still letting the LLM choose the concrete
-// tools and arguments (and add anything the operator's question needs).
-func correctInvestigationQuery(query string, ids []string) string {
-	return query + fmt.Sprintf(
-		"\n\n[You returned NO tool calls. That is not sufficient to assess a "+
-			"proposal or answer the operator. %s already being retrieved via "+
-			"kg_get_entity — now plan the tool calls that gather the supporting "+
-			"evidence: the governing SOP/threshold (kg_doc_content), the recent "+
-			"sensor trend for the affected metric (kg_ts_read / kg_ts_analyze), "+
-			"prior work orders / history (kg_query_entities), and any related "+
-			"equipment (kg_traverse) or past incidents (kg_vector) relevant to "+
-			"the question. Return a non-empty plan.]",
-		describeEntities(ids))
-}
-
-// degradedInvestigationNarrative is emitted as the planner's task/reasoning
-// when the investigation degraded to seed-only grounding (the LLM planned no
-// evidence steps even after the corrective re-plan). It is operator-visible so
-// the briefing's limited basis is explicit rather than a silent clean verdict
-// (OGA-398 transparency).
-func degradedInvestigationNarrative(ids []string) *PlanNarrative {
-	return &PlanNarrative{
-		Text: fmt.Sprintf("Limited evidence: I could retrieve only the entity record for %s — "+
-			"the governing SOP, recent sensor trend, and work-order history were not gathered, "+
-			"so this assessment is based on the equipment record alone.",
-			describeEntities(ids)),
-	}
 }
 
 func investigationNarrative(ids []string) *PlanNarrative {
