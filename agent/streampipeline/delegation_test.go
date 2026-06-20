@@ -223,3 +223,74 @@ func jsonContains(t *testing.T, payload any, substr string) bool {
 	}
 	return strings.Contains(string(b), substr)
 }
+
+// TestEffectiveDelegations_ProfileConfig verifies the default-opt-out,
+// config-driven Knowledge Agent delegation wiring (OGA-419): the KA delegation
+// is added only when spec.reactive_delegation.knowledge_agent is true, is
+// absent otherwise, and is deduplicated against an explicit handler-option
+// delegation for the same tool.
+func TestEffectiveDelegations_ProfileConfig(t *testing.T) {
+	t.Parallel()
+
+	hasKA := func(ds []AgentDelegation) bool {
+		for _, d := range ds {
+			if d.ToolName == "ask_knowledge_agent" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default opt-out: nil profile / nil config / false → no KA delegation.
+	if got := effectiveDelegations(nil, nil); hasKA(got) {
+		t.Error("nil profile must not enable KA delegation")
+	}
+	if got := effectiveDelegations(&agent.DomainAgentProfile{}, nil); hasKA(got) {
+		t.Error("profile without reactive_delegation must not enable KA delegation")
+	}
+	off := &agent.DomainAgentProfile{ReactiveDelegation: &agent.ReactiveDelegationConfig{KnowledgeAgent: false}}
+	if got := effectiveDelegations(off, nil); hasKA(got) {
+		t.Error("knowledge_agent:false must not enable KA delegation")
+	}
+
+	// Opt-in via config → KA delegation present with the canonical descriptor.
+	on := &agent.DomainAgentProfile{ReactiveDelegation: &agent.ReactiveDelegationConfig{KnowledgeAgent: true}}
+	got := effectiveDelegations(on, nil)
+	if !hasKA(got) {
+		t.Fatal("knowledge_agent:true must enable KA delegation")
+	}
+	for _, d := range got {
+		if d.ToolName == "ask_knowledge_agent" {
+			if d.AgentName != "knowledge-agent" || d.Description == "" {
+				t.Errorf("KA delegation descriptor malformed: %+v", d)
+			}
+		}
+	}
+
+	// Explicit custom delegations are preserved and merged.
+	custom := []AgentDelegation{{ToolName: "ask_analytics", AgentName: "analytics-agent", Description: "Ask analytics"}}
+	merged := effectiveDelegations(on, custom)
+	if !hasKA(merged) || !func() bool {
+		for _, d := range merged {
+			if d.ToolName == "ask_analytics" {
+				return true
+			}
+		}
+		return false
+	}() {
+		t.Errorf("expected both custom and KA delegations, got %+v", merged)
+	}
+
+	// Dedup: an explicit ask_knowledge_agent option is not duplicated by config.
+	explicitKA := []AgentDelegation{{ToolName: "ask_knowledge_agent", AgentName: "knowledge-agent", Description: "explicit"}}
+	deduped := effectiveDelegations(on, explicitKA)
+	count := 0
+	for _, d := range deduped {
+		if d.ToolName == "ask_knowledge_agent" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly one ask_knowledge_agent delegation after dedup, got %d", count)
+	}
+}

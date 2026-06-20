@@ -46,6 +46,27 @@ type DomainAgentProfile struct {
 	// EventSubscriptions lists the ontology entity types whose mutations wake
 	// this agent (matched against ingestion.resolved.{tenant}.{entity_type}).
 	EventSubscriptions []EventSubscription `yaml:"event_subscriptions,omitempty"`
+
+	// ReactiveDelegation configures whether this agent's REACTIVE surface
+	// (interactive chat + the [Investigate] deep link) may delegate to other
+	// platform agents. Default opt-out: absent → the agent does not delegate.
+	// The proactive proposal path is never affected (palette purity, Property 5).
+	// See OGA-419.
+	ReactiveDelegation *ReactiveDelegationConfig `yaml:"reactive_delegation,omitempty"`
+}
+
+// ReactiveDelegationConfig gates reactive agent-delegation capabilities on a
+// domain agent. It is consumed ONLY by the reactive stream handler
+// (NewDefaultStreamHandler); the proactive proposal palette never reads it.
+type ReactiveDelegationConfig struct {
+	// KnowledgeAgent, when true, adds the reactive `ask_knowledge_agent`
+	// capability so the agent's ReAct planner may stream the platform Knowledge
+	// Agent's grounded answer in for broad knowledge-graph questions outside its
+	// own tools. Default false (opt-out). The downstream KA must be reachable at
+	// the gateway name "knowledge-agent" and PBAC level (a) must allow the call;
+	// otherwise the delegation degrades to a failed observation and the loop
+	// continues. See OGA-419 G3.
+	KnowledgeAgent bool `yaml:"knowledge_agent,omitempty"`
 }
 
 // SkillDef defines a skill in the agent profile.
