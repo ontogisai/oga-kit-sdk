@@ -65,6 +65,31 @@ func RunSync[T any](
 	}
 }
 
+// RunText drives the pipeline and returns the assembled artifact text plus the
+// consolidated citations, draining the streaming events to a buffer
+// (stream->collect). It is the non-streaming entry point for callers that need
+// a single answer string rather than an event stream — e.g. the platform
+// Knowledge Agent's synchronous message/send path, or any non-streaming channel
+// (Telegram, etc.). Both this and RunSync[T] share the same underlying drain,
+// so a non-streaming caller exercises the exact same ReAct loop as the
+// streaming path — there is one engine, not two (OGA-419).
+//
+// Errors propagate from the pipeline (planning/assembly transport failures).
+// An empty answer with nil error means the loop produced no artifact text
+// (the caller decides how to surface that).
+func RunText(
+	ctx context.Context,
+	p *Pipeline,
+	deps Deps,
+	input Input,
+	planner Planner,
+) (string, []agent.CitationSource, error) {
+	if p == nil {
+		p = NewPipeline()
+	}
+	return p.runArtifact(ctx, deps, input, planner)
+}
+
 // jsonInput augments the assembly prompt to instruct strict JSON-only output
 // conforming to the schema. The retryHint (empty on the first attempt) appends
 // the prior failure so the second attempt can self-correct.
