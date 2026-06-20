@@ -45,9 +45,46 @@ import (
 // All MCP tool calls and LLM completions go through deps.Gateway —
 // the Platform Access Gateway — for centralised PBAC, audit, rate
 // limiting, and tenant attribution.
-func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
+// handlerConfig holds options applied to the reactive stream handler.
+type handlerConfig struct {
+	delegations []AgentDelegation
+}
+
+// HandlerOption configures NewDefaultStreamHandler.
+type HandlerOption func(*handlerConfig)
+
+// WithAgentDelegation enables a reactive-only agent-delegation capability: the
+// domain agent's Investigate/chat loop may call ToolName to stream the named
+// downstream agent's answer in (OGA-419 G3). Add multiple for several
+// delegations. The proactive proposal path never receives these — palette
+// purity (Property 5) is preserved by construction (the proactive handler does
+// not consult this option).
+func WithAgentDelegation(d AgentDelegation) HandlerOption {
+	return func(hc *handlerConfig) {
+		if d.ToolName != "" && d.AgentName != "" {
+			hc.delegations = append(hc.delegations, d)
+		}
+	}
+}
+
+// WithKnowledgeAgentDelegation is the common case of WithAgentDelegation: it
+// lets a domain agent consult the platform Knowledge Agent for knowledge-graph
+// questions via the reactive `ask_knowledge_agent` capability.
+func WithKnowledgeAgentDelegation() HandlerOption {
+	return WithAgentDelegation(AgentDelegation{
+		ToolName:    "ask_knowledge_agent",
+		AgentName:   "knowledge-agent",
+		Description: "Ask the platform Knowledge Agent a knowledge-graph question (entities, relationships, documents, history) and receive a grounded answer. Use for broad KG lookups outside your own tools; pass the question in the \"question\" argument.",
+	})
+}
+
+func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHandlerFunc {
 	if cfg.ToolTimeout == 0 {
 		cfg = DefaultConfig()
+	}
+	hc := &handlerConfig{}
+	for _, opt := range opts {
+		opt(hc)
 	}
 	pipeline := NewPipeline()
 
@@ -123,8 +160,9 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 			// Investigate session reasons with the same advised tools as the
 			// proposal. (ask_knowledge_agent delegation is added by the platform
 			// wiring, not here — it is a reactive-only capability.)
-			Persona:           reactivePersona(profile),
+			Persona:           reactivePersona(profile, hc.delegations),
 			GroundingStrategy: reactiveGroundingHints(profile),
+			Delegations:       hc.delegations,
 		}
 
 		// Bridge: streampipeline emits to a channel; we forward to the
@@ -176,13 +214,21 @@ func reactiveStreamPlanner(rt *agent.DefaultRuntime) Planner {
 }
 
 // reactivePersona builds the planner persona for the reactive path: the domain
-// system prompt (when the profile declares one) plus the profile tool union.
-func reactivePersona(profile *agent.DomainAgentProfile) PlannerPersona {
+// system prompt (when the profile declares one) plus the profile tool union,
+// extended with any agent-delegation capabilities (rendered into the palette so
+// the planner can choose them — OGA-419 G3).
+func reactivePersona(profile *agent.DomainAgentProfile, delegations []AgentDelegation) PlannerPersona {
 	sys := ""
 	if profile != nil && profile.ProactiveReasoning != nil {
 		sys = profile.ProactiveReasoning.SystemPrompt
 	}
-	return PlannerPersona{SystemPrompt: sys, Tools: agent.UniqueTools(profile)}
+	tools := agent.UniqueTools(profile)
+	var schemas []agent.ToolSchema
+	for _, d := range delegations {
+		tools = append(tools, d.ToolName)
+		schemas = append(schemas, agent.ToolSchema{Name: d.ToolName, Description: d.Description})
+	}
+	return PlannerPersona{SystemPrompt: sys, Tools: tools, ToolSchemas: schemas}
 }
 
 // reactiveGroundingHints returns the profile grounding strategy so the reactive

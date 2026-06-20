@@ -130,6 +130,32 @@ type Input struct {
 	// re-deriving it: proactive event facts, or the reactive investigation
 	// context. Empty for plain reactive chat.
 	SeedFacts string
+
+	// Delegations declares agent-delegation capabilities available on this path
+	// (OGA-419 G3). Each entry maps a palette tool name (e.g. "ask_knowledge_agent")
+	// to a downstream agent the loop invokes via PlatformAccess.InvokeAgentStream
+	// — streaming its events nested under a task/agent_call span — instead of
+	// PlatformAccess.CallTool. Reactive-only: the proactive proposal path leaves
+	// this empty so a second non-deterministic reasoner can never sit inside the
+	// proposal evidence chain (Property 5).
+	Delegations []AgentDelegation
+}
+
+// AgentDelegation maps a planner palette tool name to a downstream agent the
+// pipeline invokes via streaming delegation (OGA-419 G3). The ToolName appears
+// in the planner's palette; when the planner selects it, the loop emits
+// task/agent_call, streams the sub-agent's events re-parented under that call,
+// emits task/agent_result, and appends the sub-agent's final answer as the
+// turn's observation.
+type AgentDelegation struct {
+	// ToolName is the palette name the planner selects to trigger delegation
+	// (e.g. "ask_knowledge_agent").
+	ToolName string
+	// AgentName is the downstream agent's gateway name (e.g. "knowledge-agent").
+	AgentName string
+	// Description is rendered into the decision prompt so the planner knows when
+	// to use the delegation.
+	Description string
 }
 
 // Pipeline is the shared streaming orchestrator. Construct with NewPipeline
@@ -207,6 +233,16 @@ func (p *Pipeline) runInternal(
 	allCitations := make([]agent.CitationSource, 0)
 	decided := make([]ToolPlanStep, 0, cfg.MaxSteps) // for the evolving task/plan
 
+	// Delegation palette: palette tool names that trigger streaming agent
+	// delegation instead of a tool call (OGA-419 G3). Empty on the proactive
+	// path (Property 5).
+	delegations := make(map[string]AgentDelegation, len(input.Delegations))
+	for _, d := range input.Delegations {
+		if d.ToolName != "" && d.AgentName != "" {
+			delegations[d.ToolName] = d
+		}
+	}
+
 	for turn := 0; turn < cfg.MaxSteps; turn++ {
 		st := &PlanState{
 			Query:             plannerQuery,
@@ -283,6 +319,17 @@ func (p *Pipeline) runInternal(
 		emitter.emitPlan(rootSpan, &ToolPlan{Steps: decided})
 
 		toolSpan := tracker.ChildSpan(rootSpan)
+
+		// Delegation: the planner selected an agent-delegation capability. Stream
+		// the sub-agent under this turn (re-parented) instead of calling an MCP
+		// tool (OGA-419 G3). The sub-agent's final answer becomes this turn's
+		// observation so the loop reasons over it next turn.
+		if d, ok := delegations[step.ToolName]; ok {
+			result, cites := p.runDelegation(ctx, gw, d, step, idx, input, emitter, toolSpan, rootSpan, cfg)
+			results = append(results, result)
+			allCitations = append(allCitations, cites...)
+			continue
+		}
 
 		// Condition is advisory under ReAct (LLM steps carry none); honored for
 		// precomputed seed/grounding steps that set it.
@@ -554,6 +601,215 @@ func (p *Pipeline) runArtifact(
 	return final.artifact.String(), final.citations, err
 }
 
+// runDelegation streams a sub-agent under the current turn (OGA-419 G3). It
+// emits task/agent_call, invokes the sub-agent via PlatformAccess.InvokeAgentStream,
+// re-parents and forwards the sub-agent's events nested under the call span,
+// accumulates the sub-agent's final artifact text + citations, emits
+// task/agent_result, and returns the artifact as this turn's observation so the
+// planner reasons over it next turn. The sub-agent's own terminal task/status
+// events are NOT forwarded — task/agent_result is the completion signal for the
+// delegation. Bounded by the per-step ToolTimeout; one hop (the sub-agent is a
+// leaf and must not call back).
+func (p *Pipeline) runDelegation(
+	ctx context.Context,
+	gw PlatformAccess,
+	d AgentDelegation,
+	step ToolPlanStep,
+	idx int,
+	input Input,
+	emitter *eventEmitter,
+	callSpan, rootSpan string,
+	cfg Config,
+) (ToolStepResult, []agent.CitationSource) {
+	subQuery := delegationQuery(step, input.Query)
+	actor := agent.EventActor{Type: "sub_agent", ID: d.AgentName, DisplayName: d.AgentName}
+
+	emitter.emitAgentCall(callSpan, rootSpan, actor, &agent.AgentCallPayload{
+		TargetAgent:       d.AgentName,
+		AgentType:         "platform",
+		Task:              subQuery,
+		SupportsStreaming: true,
+	})
+
+	res := ToolStepResult{StepIndex: idx, ToolName: d.ToolName}
+
+	delCtx, cancel := context.WithTimeout(ctx, cfg.ToolTimeout)
+	defer cancel()
+
+	start := time.Now()
+	msg := map[string]any{"role": "user", "parts": []map[string]any{{"text": subQuery}}}
+	stream, err := gw.InvokeAgentStream(delCtx, d.AgentName, msg)
+	if err != nil {
+		res.Success = false
+		res.Error = fmt.Sprintf("delegate to %s: %v", d.AgentName, err)
+		res.LatencyMs = time.Since(start).Milliseconds()
+		emitter.emitAgentResult(callSpan, rootSpan, actor, &agent.AgentResultPayload{
+			AgentID: d.AgentName, Success: false, Error: res.Error, LatencyMs: res.LatencyMs,
+		})
+		return res, nil
+	}
+
+	var (
+		answer    strings.Builder
+		citations []agent.CitationSource
+		subFailed string
+	)
+	for raw := range stream {
+		if raw == nil {
+			continue
+		}
+		evt := decodeDelegatedEvent(*raw)
+		if evt == nil {
+			continue
+		}
+		switch evt.Type {
+		case agent.EventTypeArtifact:
+			answer.WriteString(artifactText(evt.Payload))
+			emitter.emitForwarded(callSpan, 1, evt)
+		case agent.EventTypeCitation:
+			citations = append(citations, citationSources(evt.Payload)...)
+			emitter.emitForwarded(callSpan, 1, evt)
+		case agent.EventTypeStatus:
+			// The sub-agent's terminal status is not forwarded; capture a
+			// failure reason so the observation is honest.
+			if st := statusError(evt.Payload); st != "" {
+				subFailed = st
+			}
+		default:
+			// reasoning, plan, tool_call, tool_result, agent_call/result — all
+			// forwarded nested under the delegation call for full transparency.
+			emitter.emitForwarded(callSpan, 1, evt)
+		}
+	}
+
+	res.LatencyMs = time.Since(start).Milliseconds()
+	res.Content = strings.TrimSpace(answer.String())
+	res.Success = subFailed == "" && res.Content != ""
+	if subFailed != "" {
+		res.Error = subFailed
+	} else if res.Content == "" {
+		res.Error = "sub-agent returned no answer"
+	}
+
+	summary := res.Content
+	if len(summary) > cfg.MaxArtifactSummaryBytes {
+		summary = summary[:cfg.MaxArtifactSummaryBytes] + "..."
+	}
+	if !res.Success && summary == "" {
+		summary = res.Error
+	}
+	emitter.emitAgentResult(callSpan, rootSpan, actor, &agent.AgentResultPayload{
+		AgentID: d.AgentName, Success: res.Success, Summary: summary, LatencyMs: res.LatencyMs, Error: res.Error,
+	})
+	return res, citations
+}
+
+// delegationQuery extracts the sub-question for a delegation from the planner's
+// chosen arguments (question/query/task), falling back to the original query.
+func delegationQuery(step ToolPlanStep, fallback string) string {
+	for _, k := range []string{"question", "query", "task", "input"} {
+		if v, ok := step.Arguments[k]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return s
+			}
+		}
+	}
+	return fallback
+}
+
+// decodeDelegatedEvent decodes a sub-agent SSE data payload into a StreamEvent.
+// It accepts both a bare StreamEvent and an A2A JSON-RPC envelope wrapping one
+// under "result". Returns nil when neither shape yields a typed event.
+func decodeDelegatedEvent(raw json.RawMessage) *agent.StreamEvent {
+	var evt agent.StreamEvent
+	if err := json.Unmarshal(raw, &evt); err == nil && evt.Type != "" {
+		return &evt
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && len(env.Result) > 0 {
+		var inner agent.StreamEvent
+		if err := json.Unmarshal(env.Result, &inner); err == nil && inner.Type != "" {
+			return &inner
+		}
+	}
+	return nil
+}
+
+// artifactText extracts the concatenated text from an artifact payload. The
+// payload arrives as map[string]any (a StreamEvent unmarshalled with Payload any).
+func artifactText(payload any) string {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	parts, ok := m["parts"].([]any)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if pm, ok := p.(map[string]any); ok {
+			if t, ok := pm["text"].(string); ok {
+				b.WriteString(t)
+			}
+		}
+	}
+	return b.String()
+}
+
+// citationSources extracts citation sources from a citation payload map.
+func citationSources(payload any) []agent.CitationSource {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	srcs, ok := m["sources"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]agent.CitationSource, 0, len(srcs))
+	for _, s := range srcs {
+		sm, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		cs := agent.CitationSource{}
+		if v, ok := sm["type"].(string); ok {
+			cs.Type = v
+		}
+		if v, ok := sm["id"].(string); ok {
+			cs.ID = v
+		}
+		if v, ok := sm["label"].(string); ok {
+			cs.Label = v
+		}
+		if cs.ID != "" || cs.Label != "" {
+			out = append(out, cs)
+		}
+	}
+	return out
+}
+
+// statusError returns the failure message from a status payload map when the
+// state is "failed", else "".
+func statusError(payload any) string {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if state, _ := m["state"].(string); state != agent.TaskStateFailed {
+		return ""
+	}
+	if em, ok := m["error"].(map[string]any); ok {
+		if msg, ok := em["message"].(string); ok && msg != "" {
+			return msg
+		}
+	}
+	return "sub-agent failed"
+}
+
 // --- eventEmitter: helper for sequence numbering + event construction ---
 
 type eventEmitter struct {
@@ -726,6 +982,45 @@ func (e *eventEmitter) emitStatus(spanID string, state string, statusErr *agent.
 		Type:    agent.EventTypeStatus,
 		Payload: &agent.StatusPayload{State: state, Error: statusErr},
 	})
+}
+
+func (e *eventEmitter) emitAgentCall(spanID, parentSpan string, actor agent.EventActor, payload *agent.AgentCallPayload) {
+	e.emit(&agent.StreamEvent{
+		SpanID:       spanID,
+		ParentSpanID: parentSpan,
+		Depth:        1,
+		Actor:        actor,
+		Type:         agent.EventTypeAgentCall,
+		Payload:      payload,
+	})
+}
+
+func (e *eventEmitter) emitAgentResult(spanID, parentSpan string, actor agent.EventActor, payload *agent.AgentResultPayload) {
+	e.emit(&agent.StreamEvent{
+		SpanID:       spanID,
+		ParentSpanID: parentSpan,
+		Depth:        1,
+		Actor:        actor,
+		Type:         agent.EventTypeAgentResult,
+		Payload:      payload,
+	})
+}
+
+// emitForwarded re-emits a sub-agent's StreamEvent nested under the delegation
+// call span. The sub-agent's Actor is preserved (so the UI attributes the work
+// to the sub-agent); its span is re-parented to the call span when it is a
+// root-level sub-agent event, and its depth is offset so it renders nested.
+// emit() re-stamps TaskID + Sequence with this task's numbering.
+func (e *eventEmitter) emitForwarded(callSpan string, callDepth int, evt *agent.StreamEvent) {
+	fwd := *evt
+	if fwd.ParentSpanID == "" {
+		fwd.ParentSpanID = callSpan
+	}
+	fwd.Depth = callDepth + 1 + evt.Depth
+	// Clear the wire-stamped numbering so emit() assigns this task's own.
+	fwd.TaskID = ""
+	fwd.Sequence = 0
+	e.emit(&fwd)
 }
 
 // Compile-time check: the gateway package's PlatformGatewayClient must

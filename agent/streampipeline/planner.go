@@ -97,6 +97,14 @@ type PlannerPersona struct {
 	// Tools is the union of MCP tool names available to this agent on this path
 	// — the palette that bounds what the planner may call.
 	Tools []string
+
+	// ToolSchemas optionally carries richer per-tool detail (description +
+	// JSON-Schema inputs) for the tools in the palette. When present, the
+	// decision prompt renders each tool's argument names + types so the model
+	// emits correct arguments instead of guessing (OGA-419 G1). The Knowledge
+	// Agent populates these from discovered MCP tools; tools without a matching
+	// schema render as bare names.
+	ToolSchemas []agent.ToolSchema
 }
 
 // Decision is the planner's output for a single turn.
