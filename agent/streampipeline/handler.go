@@ -67,15 +67,40 @@ func WithAgentDelegation(d AgentDelegation) HandlerOption {
 	}
 }
 
-// WithKnowledgeAgentDelegation is the common case of WithAgentDelegation: it
-// lets a domain agent consult the platform Knowledge Agent for knowledge-graph
-// questions via the reactive `ask_knowledge_agent` capability.
-func WithKnowledgeAgentDelegation() HandlerOption {
-	return WithAgentDelegation(AgentDelegation{
+// knowledgeAgentDelegation is the canonical reactive Knowledge Agent delegation
+// descriptor. It is enabled per-agent through the profile
+// (spec.reactive_delegation.knowledge_agent: true) — see effectiveDelegations —
+// rather than a compile-time handler option, so kit authors opt in via config,
+// default opt-out (OGA-419 G3).
+func knowledgeAgentDelegation() AgentDelegation {
+	return AgentDelegation{
 		ToolName:    "ask_knowledge_agent",
 		AgentName:   "knowledge-agent",
 		Description: "Ask the platform Knowledge Agent a knowledge-graph question (entities, relationships, documents, history) and receive a grounded answer. Use for broad KG lookups outside your own tools; pass the question in the \"question\" argument.",
-	})
+	}
+}
+
+// effectiveDelegations merges the explicit handler-option delegations (custom
+// downstream agents wired via WithAgentDelegation) with the profile-driven
+// Knowledge Agent delegation (spec.reactive_delegation.knowledge_agent). The KA
+// delegation is default opt-out: it is added ONLY when the profile enables it,
+// and is deduplicated by ToolName so an explicit option for the same tool wins.
+func effectiveDelegations(profile *agent.DomainAgentProfile, explicit []AgentDelegation) []AgentDelegation {
+	out := append([]AgentDelegation(nil), explicit...)
+	if profile != nil && profile.ReactiveDelegation != nil && profile.ReactiveDelegation.KnowledgeAgent {
+		ka := knowledgeAgentDelegation()
+		dup := false
+		for _, d := range out {
+			if d.ToolName == ka.ToolName {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, ka)
+		}
+	}
+	return out
 }
 
 func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHandlerFunc {
@@ -93,6 +118,13 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 
 		profile := rt.Profile()
 		deps := rt.Deps()
+
+		// Effective reactive delegations = explicit handler-option delegations
+		// (custom downstream agents) + the profile-driven Knowledge Agent
+		// delegation when spec.reactive_delegation.knowledge_agent is true
+		// (default opt-out). Reactive-only — proactive palette purity is
+		// preserved because the proactive handler never builds this set.
+		delegations := effectiveDelegations(profile, hc.delegations)
 
 		// Select the reactive planner per request. When the investigation forward
 		// carries an enriched investigation context (OGA-381 — built server-side
@@ -158,11 +190,12 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 			// profile tool union; the domain-agent reactive path ALSO carries the
 			// profile grounding strategy as advisory hints (OGA-419) so an
 			// Investigate session reasons with the same advised tools as the
-			// proposal. (ask_knowledge_agent delegation is added by the platform
-			// wiring, not here — it is a reactive-only capability.)
-			Persona:           reactivePersona(profile, hc.delegations),
+			// proposal. ask_knowledge_agent delegation is added by profile config
+			// (spec.reactive_delegation.knowledge_agent) — default opt-out — and is
+			// a reactive-only capability (the proactive handler never reads it).
+			Persona:           reactivePersona(profile, delegations),
 			GroundingStrategy: reactiveGroundingHints(profile),
-			Delegations:       hc.delegations,
+			Delegations:       delegations,
 		}
 
 		// Bridge: streampipeline emits to a channel; we forward to the
