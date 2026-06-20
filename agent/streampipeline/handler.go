@@ -76,7 +76,7 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 			plannerQuery = buildInvestigationPlannerQuery(userText, invCtx)
 			userText = enrichQueryWithInvestigationContext(userText, invCtx)
 		}
-		var planner StreamPlanner
+		var planner Planner
 		if len(investigationIDs) > 0 {
 			// Option 2 (OGA-378 rework): guarantee grounding on the proposal's
 			// concrete seed entities, then let the agent's full-toolbox LLM
@@ -117,6 +117,14 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 			AssemblyPrompt:         assemblyPrompt,
 			ToolNames:              agent.UniqueTools(profile),
 			InvestigationEntityIDs: investigationIDs,
+			// Persona + palette for the ReAct planner. Reactive palette is the
+			// profile tool union; the domain-agent reactive path ALSO carries the
+			// profile grounding strategy as advisory hints (OGA-419) so an
+			// Investigate session reasons with the same advised tools as the
+			// proposal. (ask_knowledge_agent delegation is added by the platform
+			// wiring, not here — it is a reactive-only capability.)
+			Persona:           reactivePersona(profile),
+			GroundingStrategy: reactiveGroundingHints(profile),
 		}
 
 		// Bridge: streampipeline emits to a channel; we forward to the
@@ -163,8 +171,28 @@ func NewDefaultStreamHandler(cfg Config) agent.StreamHandlerFunc {
 // event and references event placeholders (e.g. {entity_id}) that do not exist
 // on a reactive query. The grounding strategy is consumed only by the proactive
 // handler (NewProactiveMessageHandler → runProactiveReasoning). See OGA-348.
-func reactiveStreamPlanner(rt *agent.DefaultRuntime) StreamPlanner {
-	return NewLLMToolPlanner(rt.Deps().Gateway, rt.Profile(), rt.PlannerConfig())
+func reactiveStreamPlanner(rt *agent.DefaultRuntime) Planner {
+	return NewLLMToolPlanner(rt.Deps().Gateway, rt.PlannerConfig())
+}
+
+// reactivePersona builds the planner persona for the reactive path: the domain
+// system prompt (when the profile declares one) plus the profile tool union.
+func reactivePersona(profile *agent.DomainAgentProfile) PlannerPersona {
+	sys := ""
+	if profile != nil && profile.ProactiveReasoning != nil {
+		sys = profile.ProactiveReasoning.SystemPrompt
+	}
+	return PlannerPersona{SystemPrompt: sys, Tools: agent.UniqueTools(profile)}
+}
+
+// reactiveGroundingHints returns the profile grounding strategy so the reactive
+// Investigate path reasons with the same advised tools as the proactive path
+// (OGA-419). Hints are advisory under the ReAct loop — never a forced chain.
+func reactiveGroundingHints(profile *agent.DomainAgentProfile) []agent.GroundingStep {
+	if profile == nil || profile.ProactiveReasoning == nil {
+		return nil
+	}
+	return profile.ProactiveReasoning.GroundingStrategy
 }
 
 // Metadata key carrying the enriched investigation context on an inbound A2A

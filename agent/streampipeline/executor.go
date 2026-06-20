@@ -11,12 +11,22 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
-// gatewayClient is the minimal subset of *gateway.PlatformGatewayClient the
-// pipeline uses. Defined as an interface so tests can supply a fake.
-type gatewayClient interface {
+// PlatformAccess is the contract the pipeline depends on for tool calls, LLM
+// completions, and (reactive) agent delegation. Named for the ROLE it provides,
+// NOT for one implementor: *gateway.PlatformGatewayClient (kit sidecars, via the
+// Platform Gateway) and the platform Knowledge Agent's adapter (direct to the
+// MCP tool server + LLM proxy) both satisfy it. Defined as an interface so tests
+// can supply a fake.
+//
+// InvokeAgentStream backs the reactive `ask_knowledge_agent` delegation
+// (OGA-419). The real gateway client implements it; an adapter that does not
+// delegate (e.g. the KA's own) may return an unsupported error — it is never
+// called unless the agent's palette includes a delegation capability.
+type PlatformAccess interface {
 	CallTool(ctx context.Context, tool string, params any) (json.RawMessage, error)
 	ChatCompletion(ctx context.Context, req *gateway.ChatCompletionRequest) (*gateway.ChatCompletionResponse, error)
 	ChatCompletionStream(ctx context.Context, req *gateway.ChatCompletionRequest) (<-chan *gateway.ChatChunk, error)
+	InvokeAgentStream(ctx context.Context, agentName string, msg any) (<-chan *json.RawMessage, error)
 }
 
 // executeStep runs one ToolPlanStep against the gateway, applying placeholder
@@ -24,7 +34,7 @@ type gatewayClient interface {
 // It does NOT evaluate Condition — the pipeline does that before calling here.
 func executeStep(
 	ctx context.Context,
-	gw gatewayClient,
+	gw PlatformAccess,
 	step ToolPlanStep,
 	stepIndex int,
 	priorResults []ToolStepResult,

@@ -10,7 +10,7 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
-// fakeGateway is a minimal gatewayClient stub for tests.
+// fakeGateway is a minimal PlatformAccess stub for tests.
 type fakeGateway struct {
 	tools           map[string]json.RawMessage
 	toolErrors      map[string]error
@@ -75,28 +75,40 @@ func (f *fakeGateway) ChatCompletionStream(_ context.Context, _ *gateway.ChatCom
 	return ch, nil
 }
 
-// fakePlanner returns a fixed plan + narrative.
-type fakePlanner struct {
-	plan      *ToolPlan
-	narrative *PlanNarrative
+func (f *fakeGateway) InvokeAgentStream(_ context.Context, _ string, _ any) (<-chan *json.RawMessage, error) {
+	return nil, errors.New("InvokeAgentStream not supported in this test")
+}
+
+// scriptedPlanner is a Planner test double (OGA-419). It yields the configured
+// steps one per turn (indexed by len(PlanState.History) — the loop appends one
+// observation per turn, including skips), then signals Done. The narrative is
+// attached to the first turn only. When err is set it is returned on errOnTurn.
+type scriptedPlanner struct {
+	steps     []ToolPlanStep
+	narrative string
 	err       error
+	errOnTurn int
 }
 
-func (p *fakePlanner) Plan(_ context.Context, _ string, _ []string) (*ToolPlan, *PlanNarrative, error) {
-	return p.plan, p.narrative, p.err
+func (p *scriptedPlanner) Next(_ context.Context, st *PlanState) (*Decision, error) {
+	turn := len(st.History)
+	if p.err != nil && turn == p.errOnTurn {
+		return nil, p.err
+	}
+	if turn >= len(p.steps) {
+		return &Decision{Done: true}, nil
+	}
+	narr := ""
+	if turn == 0 {
+		narr = p.narrative
+	}
+	step := p.steps[turn]
+	return &Decision{Narrative: narr, Step: &step}, nil
 }
 
-// runPipelineForTest is a helper that runs Pipeline.Run with a fake gateway
-// (via the streampipeline-internal gatewayClient interface) and collects events.
-//
-// Pipeline.Run takes a *gateway.PlatformGatewayClient on its public Deps,
-// but the internal executor uses the gatewayClient interface — so we route
-// the fake through a small shim: build a Pipeline with Deps containing
-// nil gateway, then patch the exec function. Easier: temporarily expose a
-// test-only Run path that takes the interface.
-//
-// We accomplish this by adding RunWithClient below for testability.
-func runPipelineForTest(t *testing.T, gw gatewayClient, planner StreamPlanner, input Input) []*agent.StreamEvent {
+// runPipelineForTest runs Pipeline.runInternal with a fake PlatformAccess and a
+// scripted Planner, collecting all emitted events.
+func runPipelineForTest(t *testing.T, gw PlatformAccess, planner Planner, input Input) []*agent.StreamEvent {
 	t.Helper()
 	pipeline := NewPipeline()
 	events := make(chan *agent.StreamEvent, 64)
@@ -125,11 +137,11 @@ func TestPipeline_PlanWithSteps(t *testing.T) {
 		},
 		streamChunks: []string{"Hello", " world"},
 	}
-	planner := &fakePlanner{
-		plan: &ToolPlan{Steps: []ToolPlanStep{
+	planner := &scriptedPlanner{
+		steps: []ToolPlanStep{
 			{Name: "search", ToolName: "kg_search", DependsOn: -1},
-		}},
-		narrative: &PlanNarrative{Text: "Planning..."},
+		},
+		narrative: "Planning...",
 	}
 
 	events := runPipelineForTest(t, gw, planner, Input{
@@ -166,12 +178,12 @@ func TestPipeline_RequiredStepFailure_StopsPipeline(t *testing.T) {
 			"kg_must_succeed": errors.New("backend unavailable"),
 		},
 	}
-	planner := &fakePlanner{
-		plan: &ToolPlan{Steps: []ToolPlanStep{
+	planner := &scriptedPlanner{
+		steps: []ToolPlanStep{
 			{Name: "first", ToolName: "kg_must_succeed", DependsOn: -1, Required: true},
 			{Name: "second", ToolName: "kg_after", DependsOn: -1},
-		}},
-		narrative: &PlanNarrative{Text: "Planning..."},
+		},
+		narrative: "Planning...",
 	}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "q"})
@@ -209,12 +221,12 @@ func TestPipeline_NonRequiredStepFailure_Continues(t *testing.T) {
 		},
 		streamChunks: []string{"answer"},
 	}
-	planner := &fakePlanner{
-		plan: &ToolPlan{Steps: []ToolPlanStep{
+	planner := &scriptedPlanner{
+		steps: []ToolPlanStep{
 			{Name: "optional", ToolName: "kg_optional", DependsOn: -1, Required: false},
 			{Name: "ok", ToolName: "kg_after", DependsOn: -1},
-		}},
-		narrative: &PlanNarrative{Text: "Planning..."},
+		},
+		narrative: "Planning...",
 	}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "q"})
@@ -240,11 +252,11 @@ func TestPipeline_ConditionalSkip_EmitsToolCallSkipped(t *testing.T) {
 		tools:        map[string]json.RawMessage{},
 		streamChunks: []string{"answer"},
 	}
-	planner := &fakePlanner{
-		plan: &ToolPlan{Steps: []ToolPlanStep{
+	planner := &scriptedPlanner{
+		steps: []ToolPlanStep{
 			{Name: "skipped", ToolName: "kg_skipped", DependsOn: -1, Condition: "false"},
-		}},
-		narrative: &PlanNarrative{Text: "Planning..."},
+		},
+		narrative: "Planning...",
 	}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "q"})
@@ -275,10 +287,7 @@ func TestPipeline_ConditionalSkip_EmitsToolCallSkipped(t *testing.T) {
 
 func TestPipeline_EmptyPlan_PlainAnswer(t *testing.T) {
 	gw := &fakeGateway{streamChunks: []string{"hi there"}}
-	planner := &fakePlanner{
-		plan:      &ToolPlan{},
-		narrative: &PlanNarrative{Text: "No tools..."},
-	}
+	planner := &scriptedPlanner{narrative: "No tools..."}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "hello"})
 
@@ -307,7 +316,7 @@ func TestPipeline_EmptyPlan_PlainAnswer(t *testing.T) {
 // the artifact, and complete — never emit task/status{failed}.
 func TestPipeline_PlannerError_FallsBackToPlainAnswer(t *testing.T) {
 	gw := &fakeGateway{streamChunks: []string{"Here is", " a briefing."}}
-	planner := &fakePlanner{err: errors.New("parse plan JSON: invalid character 'I' looking for beginning of value")}
+	planner := &scriptedPlanner{err: errors.New("parse plan JSON: invalid character 'I' looking for beginning of value")}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "investigate this proposal"})
 
@@ -363,7 +372,7 @@ func TestPipeline_PlannerError_AssemblyAlsoFails_EmitsFailed(t *testing.T) {
 		// non-streaming ChatCompletion, which also errors.
 		completionErr: errors.New("gateway unreachable"),
 	}
-	planner := &fakePlanner{err: errors.New("parse plan JSON: invalid character 'I' looking for beginning of value")}
+	planner := &scriptedPlanner{err: errors.New("parse plan JSON: invalid character 'I' looking for beginning of value")}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "q"})
 
@@ -385,7 +394,7 @@ func TestPipeline_PlannerError_AssemblyAlsoFails_EmitsFailed(t *testing.T) {
 // NOT attempt a fallback and surfaces task/status{failed} (per OGA-368).
 func TestPipeline_PlannerError_ContextCancelled_EmitsFailed(t *testing.T) {
 	gw := &fakeGateway{streamChunks: []string{"should not be used"}}
-	planner := &fakePlanner{err: context.Canceled}
+	planner := &scriptedPlanner{err: context.Canceled}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before running so ctx.Err() != nil
@@ -466,16 +475,16 @@ func TestPipeline_DependentStep_ChipExcludesPriorResult(t *testing.T) {
 		},
 		streamChunks: []string{"Done."},
 	}
-	planner := &fakePlanner{
-		plan: &ToolPlan{Steps: []ToolPlanStep{
+	planner := &scriptedPlanner{
+		steps: []ToolPlanStep{
 			{Name: "search", ToolName: "kg_search", DependsOn: -1, Arguments: map[string]any{"query": "chiller"}},
 			{Name: "reason", ToolName: "kg_reason", DependsOn: 0, Arguments: map[string]any{
 				"mode":            "root_cause",
 				"start_entity_id": "<from step 0>",
 				"stop_conditions": map[string]any{"max_depth": 5},
 			}},
-		}},
-		narrative: &PlanNarrative{Text: "Planning..."},
+		},
+		narrative: "Planning...",
 	}
 
 	events := runPipelineForTest(t, gw, planner, Input{Query: "what caused the chiller fault?"})
@@ -534,12 +543,12 @@ func TestPipeline_ExecutorDoesNotMutatePlanArguments(t *testing.T) {
 		"mode":            "impact_chain",
 		"start_entity_id": "<from step 0>",
 	}
-	planner := &fakePlanner{
-		plan: &ToolPlan{Steps: []ToolPlanStep{
+	planner := &scriptedPlanner{
+		steps: []ToolPlanStep{
 			{Name: "search", ToolName: "kg_search", DependsOn: -1},
 			{Name: "reason", ToolName: "kg_reason", DependsOn: 0, Arguments: originalArgs},
-		}},
-		narrative: &PlanNarrative{Text: "Planning..."},
+		},
+		narrative: "Planning...",
 	}
 
 	_ = runPipelineForTest(t, gw, planner, Input{Query: "q"})

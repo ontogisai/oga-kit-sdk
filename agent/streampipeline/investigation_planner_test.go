@@ -9,112 +9,114 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/agent"
 )
 
-// fakeStreamPlanner is a test double for the inner LLM planner.
-type fakeStreamPlanner struct {
-	plan     *ToolPlan
+// fakeNextPlanner is a Planner test double for the inner LLM planner.
+type fakeNextPlanner struct {
+	decision *Decision
 	err      error
-	gotQuery string
-	gotTools []string
 	calls    int
+	gotState *PlanState
 }
 
-func (f *fakeStreamPlanner) Plan(_ context.Context, query string, tools []string) (*ToolPlan, *PlanNarrative, error) {
+func (f *fakeNextPlanner) Next(_ context.Context, st *PlanState) (*Decision, error) {
 	f.calls++
-	f.gotQuery = query
-	f.gotTools = tools
-	return f.plan, &PlanNarrative{Text: "inner"}, f.err
+	f.gotState = st
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.decision, nil
 }
 
-func TestInvestigationLLMPlanner_SeedThenLLM(t *testing.T) {
-	inner := &fakeStreamPlanner{
-		plan: &ToolPlan{Steps: []ToolPlanStep{
-			{Name: "sop", ToolName: "kg_doc_content", Arguments: map[string]any{"query": "chiller COP SOP"}, DependsOn: -1},
-			// Dependent LLM step: depends on the inner plan's step 0 (the SOP).
-			{Name: "history", ToolName: "kg_query_entities", Arguments: map[string]any{"entity_type": "WorkOrder"}, DependsOn: 0},
-		}},
-	}
+func TestInvestigationLLMPlanner_SeedFirstThenDelegate(t *testing.T) {
+	inner := &fakeNextPlanner{decision: &Decision{
+		Narrative: "inner",
+		Step:      &ToolPlanStep{Name: "sop", ToolName: "kg_doc_content", DependsOn: -1},
+	}}
 	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
-	plan, narrative, err := p.Plan(context.Background(), "Is this justified?", []string{"kg_get_entity", "kg_doc_content", "kg_query_entities"})
+
+	// Turn 0 (empty history) → deterministic seed kg_get_entity, with narrative.
+	d0, err := p.Next(context.Background(), &PlanState{Query: "Is this justified?"})
 	if err != nil {
-		t.Fatalf("Plan: %v", err)
+		t.Fatalf("Next turn 0: %v", err)
 	}
-	if narrative == nil || narrative.Text == "" {
-		t.Error("expected a non-empty narrative")
+	if d0.Done || d0.Step == nil {
+		t.Fatalf("turn 0 should yield a seed step, got %+v", d0)
 	}
-	// 1 seed + 2 LLM steps.
-	if len(plan.Steps) != 3 {
-		t.Fatalf("steps = %d, want 3 (1 seed + 2 LLM)", len(plan.Steps))
+	if d0.Step.ToolName != "kg_get_entity" || d0.Step.Arguments["entity_id"] != "chiller-1" || d0.Step.DependsOn != -1 {
+		t.Errorf("seed step = %+v, want kg_get_entity{chiller-1} DependsOn -1", d0.Step)
 	}
-	// Seed step is the guaranteed kg_get_entity, DependsOn -1.
-	seed := plan.Steps[0]
-	if seed.ToolName != "kg_get_entity" || seed.Arguments["entity_id"] != "chiller-1" || seed.DependsOn != -1 {
-		t.Errorf("seed step = %+v, want kg_get_entity{chiller-1} DependsOn -1", seed)
+	if d0.Narrative == "" {
+		t.Error("expected a non-empty narrative on the first seed turn")
 	}
-	// LLM step 0 had no dependency → stays -1.
-	if plan.Steps[1].ToolName != "kg_doc_content" || plan.Steps[1].DependsOn != -1 {
-		t.Errorf("step 1 = %+v, want kg_doc_content DependsOn -1", plan.Steps[1])
+	if inner.calls != 0 {
+		t.Errorf("inner planner must NOT be called while seeding, calls=%d", inner.calls)
 	}
-	// LLM step 1 depended on inner index 0 → offset by len(seed)=1 → 1.
-	if plan.Steps[2].ToolName != "kg_query_entities" || plan.Steps[2].DependsOn != 1 {
-		t.Errorf("step 2 DependsOn = %d, want 1 (inner 0 + offset 1)", plan.Steps[2].DependsOn)
+
+	// Turn 1 (one observation present) → delegate to the inner LLM planner.
+	d1, err := p.Next(context.Background(), &PlanState{
+		Query:   "Is this justified?",
+		History: []ToolStepResult{{ToolName: "kg_get_entity", Success: true, Content: `{"id":"chiller-1"}`}},
+	})
+	if err != nil {
+		t.Fatalf("Next turn 1: %v", err)
 	}
-	// The LLM received the full tool list + the augmentation directive.
-	if len(inner.gotTools) != 3 {
-		t.Errorf("inner tools = %v, want full toolbox passed through", inner.gotTools)
+	if inner.calls != 1 {
+		t.Fatalf("inner planner calls = %d, want 1 after seeds done", inner.calls)
 	}
-	if !strings.Contains(inner.gotQuery, "ADDITIONAL tools") || !strings.Contains(inner.gotQuery, "Is this justified?") {
-		t.Errorf("inner query missing augmentation or original text:\n%s", inner.gotQuery)
+	if d1.Step == nil || d1.Step.ToolName != "kg_doc_content" {
+		t.Errorf("turn 1 should delegate to inner (kg_doc_content), got %+v", d1)
+	}
+	// The inner planner received the augmented query (plan complementary evidence).
+	if inner.gotState == nil || !strings.Contains(inner.gotState.Query, "ADDITIONAL evidence") {
+		t.Errorf("inner query missing augmentation:\n%v", inner.gotState)
 	}
 }
 
-func TestInvestigationLLMPlanner_LLMFailDegradesToSeed(t *testing.T) {
-	for _, inner := range []*fakeStreamPlanner{
-		{err: context.DeadlineExceeded}, // planning error
-		{plan: &ToolPlan{}},             // empty plan
-		{plan: nil},                     // nil plan
-	} {
-		p := NewInvestigationLLMPlanner([]string{"chiller-1", "ahu-2"}, inner)
-		plan, _, err := p.Plan(context.Background(), "q", nil)
-		if err != nil {
-			t.Fatalf("Plan should not error on inner failure: %v", err)
-		}
-		// Seed-only: 2 kg_get_entity steps, both grounding the entities.
-		if len(plan.Steps) != 2 {
-			t.Fatalf("steps = %d, want 2 (seed-only on inner failure)", len(plan.Steps))
-		}
-		for i, s := range plan.Steps {
-			if s.ToolName != "kg_get_entity" {
-				t.Errorf("seed step %d = %s, want kg_get_entity", i, s.ToolName)
-			}
-		}
-	}
-}
-
-func TestInvestigationLLMPlanner_NilInnerPlanner(t *testing.T) {
+func TestInvestigationLLMPlanner_NilInnerFinalizesAfterSeeds(t *testing.T) {
 	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, nil)
-	plan, _, err := p.Plan(context.Background(), "q", nil)
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
+
+	// Seed turn.
+	d0, err := p.Next(context.Background(), &PlanState{Query: "q"})
+	if err != nil || d0.Step == nil || d0.Step.ToolName != "kg_get_entity" {
+		t.Fatalf("turn 0 should seed, got %+v err=%v", d0, err)
 	}
-	if len(plan.Steps) != 1 || plan.Steps[0].ToolName != "kg_get_entity" {
-		t.Fatalf("nil inner planner should yield seed-only plan, got %+v", plan.Steps)
+	// After seeds, nil inner → Done.
+	d1, err := p.Next(context.Background(), &PlanState{
+		Query:   "q",
+		History: []ToolStepResult{{ToolName: "kg_get_entity", Success: true, Content: "{}"}},
+	})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if !d1.Done {
+		t.Errorf("nil inner planner should finalize after seeds, got %+v", d1)
 	}
 }
 
 func TestInvestigationLLMPlanner_DedupAndCap(t *testing.T) {
 	ids := []string{"a", "a", "", "b", "c", "d", "e", "f", "g"} // 7 distinct non-empty, cap 5
-	inner := &fakeStreamPlanner{plan: &ToolPlan{}}              // empty → seed-only
-	p := NewInvestigationLLMPlanner(ids, inner)
-	plan, _, err := p.Plan(context.Background(), "", nil)
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
+	p := NewInvestigationLLMPlanner(ids, nil)
+
+	// Drive seed turns and collect the seeded entity ids.
+	var seeded []string
+	for i := 0; i < maxInvestigationEntities+1; i++ {
+		history := make([]ToolStepResult, i)
+		d, err := p.Next(context.Background(), &PlanState{History: history})
+		if err != nil {
+			t.Fatalf("Next %d: %v", i, err)
+		}
+		if d.Done {
+			break
+		}
+		if d.Step.ToolName != "kg_get_entity" {
+			t.Fatalf("turn %d not a seed: %+v", i, d.Step)
+		}
+		seeded = append(seeded, d.Step.Arguments["entity_id"].(string))
 	}
-	// Capped at maxInvestigationEntities seed steps.
-	if len(plan.Steps) != maxInvestigationEntities {
-		t.Fatalf("seed steps = %d, want %d (cap)", len(plan.Steps), maxInvestigationEntities)
+	if len(seeded) != maxInvestigationEntities {
+		t.Fatalf("seed turns = %d, want %d (cap)", len(seeded), maxInvestigationEntities)
 	}
-	if plan.Steps[0].Arguments["entity_id"] != "a" {
-		t.Errorf("first entity = %v, want a (dedup, blanks dropped)", plan.Steps[0].Arguments["entity_id"])
+	if seeded[0] != "a" || seeded[1] != "b" {
+		t.Errorf("seeds = %v, want dedup + blanks dropped starting [a b ...]", seeded)
 	}
 }
 
@@ -206,88 +208,13 @@ func TestEnrichQueryWithInvestigationContext(t *testing.T) {
 	}
 }
 
-// seqStreamPlanner returns a different (plan, err) per call so tests can model
-// "empty first plan, then a corrective re-plan" sequences (OGA-398).
-type seqStreamPlanner struct {
-	plans   []*ToolPlan
-	errs    []error
-	calls   int
-	queries []string
-}
-
-func (f *seqStreamPlanner) Plan(_ context.Context, query string, _ []string) (*ToolPlan, *PlanNarrative, error) {
-	i := f.calls
-	f.calls++
-	f.queries = append(f.queries, query)
-	var pl *ToolPlan
-	if i < len(f.plans) {
-		pl = f.plans[i]
-	}
-	var err error
-	if i < len(f.errs) {
-		err = f.errs[i]
-	}
-	return pl, &PlanNarrative{Text: "inner"}, err
-}
-
-func TestInvestigationLLMPlanner_EmptyThenCorrectiveReplanSucceeds(t *testing.T) {
-	inner := &seqStreamPlanner{plans: []*ToolPlan{
-		{}, // 1st: empty → triggers corrective re-plan
-		{Steps: []ToolPlanStep{{Name: "sop", ToolName: "kg_doc_content", DependsOn: -1}}}, // 2nd: real evidence
-	}}
-	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
-	plan, _, err := p.Plan(context.Background(), "Is this justified?", []string{"kg_doc_content"})
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	if inner.calls != 2 {
-		t.Fatalf("inner planner calls = %d, want exactly 2 (one corrective re-plan)", inner.calls)
-	}
-	// seed + the corrective plan's step.
-	if len(plan.Steps) != 2 || plan.Steps[0].ToolName != "kg_get_entity" || plan.Steps[1].ToolName != "kg_doc_content" {
-		t.Fatalf("steps = %+v, want [kg_get_entity, kg_doc_content]", plan.Steps)
-	}
-	// The corrective turn used the forceful directive.
-	if !strings.Contains(inner.queries[1], "You returned NO tool calls") {
-		t.Errorf("corrective query missing forceful directive:\n%s", inner.queries[1])
-	}
-}
-
-func TestInvestigationLLMPlanner_EmptyTwiceDegradesWithLimitedEvidence(t *testing.T) {
-	inner := &seqStreamPlanner{plans: []*ToolPlan{{}, {}}} // empty both times
-	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
-	plan, narrative, err := p.Plan(context.Background(), "q", []string{"kg_doc_content"})
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	if inner.calls != 2 {
-		t.Fatalf("inner calls = %d, want 2 (one corrective re-plan, then degrade)", inner.calls)
-	}
-	if len(plan.Steps) != 1 || plan.Steps[0].ToolName != "kg_get_entity" {
-		t.Fatalf("degraded plan = %+v, want seed-only kg_get_entity", plan.Steps)
-	}
-	if narrative == nil || !strings.Contains(narrative.Text, "Limited evidence") {
-		t.Errorf("degraded narrative must flag limited evidence, got %q", narrative.Text)
-	}
-}
-
-func TestInvestigationLLMPlanner_PlanningErrorDoesNotReplan(t *testing.T) {
-	inner := &seqStreamPlanner{errs: []error{context.DeadlineExceeded}}
-	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
-	plan, narrative, err := p.Plan(context.Background(), "q", nil)
-	if err != nil {
-		t.Fatalf("Plan should degrade, not error: %v", err)
-	}
-	if inner.calls != 1 {
-		t.Fatalf("inner calls = %d, want 1 (a transport/context error is not re-planned)", inner.calls)
-	}
-	if len(plan.Steps) != 1 || plan.Steps[0].ToolName != "kg_get_entity" {
-		t.Fatalf("degraded plan = %+v, want seed-only", plan.Steps)
-	}
-	if narrative == nil || !strings.Contains(narrative.Text, "Limited evidence") {
-		t.Errorf("degraded narrative must flag limited evidence, got %q", narrative.Text)
-	}
-}
+// seqStreamPlanner and the corrective-re-plan / degraded-narrative tests
+// (OGA-398) were removed in OGA-419: under the ReAct loop the inner planner is
+// invoked one turn at a time (Next), so the planner no longer pre-composes a
+// full plan, performs an empty-plan corrective re-plan, or emits a degraded
+// "limited evidence" narrative. The augmented-query directive
+// (augmentInvestigationQuery) plus the loop's per-turn re-prompting replace
+// that behavior. Seed grounding is still guaranteed (see SeedFirstThenDelegate).
 
 func TestBuildInvestigationPlannerQuery_NoAssemblyConstraints(t *testing.T) {
 	ic := &investigationContext{

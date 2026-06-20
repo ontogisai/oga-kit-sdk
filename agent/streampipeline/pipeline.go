@@ -37,6 +37,11 @@ type Config struct {
 	// MaxArtifactSummaryBytes caps task/tool_result.summary length.
 	// Default 200.
 	MaxArtifactSummaryBytes int
+
+	// NoProgressLimit stops the ReAct loop early when the planner repeats an
+	// identical (tool, args) action or returns K consecutive empty/failed
+	// observations (OGA-419, Property 3). Default 2.
+	NoProgressLimit int
 }
 
 // DefaultConfig returns conservative production defaults.
@@ -48,14 +53,18 @@ func DefaultConfig() Config {
 		MaxSteps:                10,
 		MaxResultPreviewBytes:   2048,
 		MaxArtifactSummaryBytes: 200,
+		NoProgressLimit:         2,
 	}
 }
 
 // Deps wires platform services into the pipeline. The Gateway is the single
-// access point — all MCP tool calls and LLM completions go through it for
-// uniform PBAC, audit, rate limiting, and tenant attribution (OGA-303).
+// access point — all MCP tool calls, LLM completions, and (reactive) agent
+// delegation go through it for uniform PBAC, audit, rate limiting, and tenant
+// attribution (OGA-303). Typed as the PlatformAccess interface (OGA-419) so the
+// platform Knowledge Agent can supply an adapter to its own MCP + LLM endpoints
+// instead of the Platform Gateway client.
 type Deps struct {
-	Gateway *gateway.PlatformGatewayClient
+	Gateway PlatformAccess
 	Logger  *slog.Logger
 	Config  Config
 }
@@ -95,17 +104,6 @@ type Input struct {
 	// to the StreamPlanner. May be empty if the planner doesn't need it.
 	ToolNames []string
 
-	// ProactivePlaceholders resolves grounding-step argument placeholders for
-	// the proactive path ({entity_id}, {entity_type}, {entity_properties.X},
-	// {time_minus_24h}, ...). It is set by runProactiveReasoning from the
-	// triggering ProactiveEvent. Nil on the reactive path — the LLMToolPlanner
-	// emits concrete arguments, so there is nothing to substitute. See OGA-350.
-	//
-	// Distinct from the dependent-step (<from step N>) resolution the executor
-	// applies via agent.ResolveDependentArgsForTool (OGA-331) — see the
-	// two-conventions note in placeholders.go.
-	ProactivePlaceholders ProactivePlaceholderResolver
-
 	// InvestigationEntityIDs are the concrete KG entity ids a reactive
 	// investigation should ground on (OGA-378). When non-empty, the handler
 	// selects the deterministic InvestigationGroundingPlanner (seed retrieval
@@ -114,6 +112,24 @@ type Input struct {
 	// proactive {entity_id} placeholders (which only exist on the proactive
 	// path).
 	InvestigationEntityIDs []string
+
+	// Persona is the system prompt + tool palette handed to the planner each
+	// turn (OGA-419). For a domain agent it is built from the profile; for the
+	// Knowledge Agent it is built from its planner prompt + kg_* tools. The
+	// Tools slice bounds what the planner may call (the palette guardrail — e.g.
+	// the proactive palette excludes any agent-delegation capability).
+	Persona PlannerPersona
+
+	// GroundingStrategy is the kit-declared grounding strategy surfaced to the
+	// planner as ADVISORY hints (OGA-419). Populated when the agent has a
+	// profile strategy (domain agents, both proactive and reactive paths);
+	// empty for profile-less platform agents (the Knowledge Agent).
+	GroundingStrategy []agent.GroundingStep
+
+	// SeedFacts is resolved factual context the planner grounds on without
+	// re-deriving it: proactive event facts, or the reactive investigation
+	// context. Empty for plain reactive chat.
+	SeedFacts string
 }
 
 // Pipeline is the shared streaming orchestrator. Construct with NewPipeline
@@ -143,26 +159,32 @@ func (p *Pipeline) Run(
 	ctx context.Context,
 	deps Deps,
 	input Input,
-	planner StreamPlanner,
+	planner Planner,
 	events chan<- *agent.StreamEvent,
 ) error {
 	return p.runInternal(ctx, deps, input, planner, events, deps.Gateway)
 }
 
-// runInternal is the test seam: it accepts the gatewayClient interface
+// runInternal is the test seam: it accepts the PlatformAccess interface
 // directly so tests can inject a fake without constructing a real
 // *gateway.PlatformGatewayClient. Production callers go through Run.
 func (p *Pipeline) runInternal(
 	ctx context.Context,
 	deps Deps,
 	input Input,
-	planner StreamPlanner,
+	planner Planner,
 	events chan<- *agent.StreamEvent,
-	gw gatewayClient,
+	gw PlatformAccess,
 ) error {
 	cfg := deps.Config
 	if cfg.ToolTimeout == 0 {
 		cfg = DefaultConfig()
+	}
+	if cfg.MaxSteps <= 0 {
+		cfg.MaxSteps = DefaultConfig().MaxSteps
+	}
+	if cfg.NoProgressLimit <= 0 {
+		cfg.NoProgressLimit = DefaultConfig().NoProgressLimit
 	}
 	logger := deps.Logger
 	if logger == nil {
@@ -173,88 +195,69 @@ func (p *Pipeline) runInternal(
 	rootSpan := tracker.RootSpan()
 	emitter := newEmitter(events, uuid.New().String(), input.Actor)
 
-	// 1. Plan
-	// The planner gets PlannerQuery when set (OGA-398) — a planning-framed
-	// query without the assembly-only constraints in Query that otherwise
-	// suppress evidence gathering. Falls back to Query (plain chat path).
+	// ReAct loop: decide ONE action per turn against the full observation
+	// transcript, execute it, observe, repeat — until the planner finalizes or
+	// the step budget / no-progress guard stops it (OGA-419).
 	plannerQuery := input.Query
 	if strings.TrimSpace(input.PlannerQuery) != "" {
 		plannerQuery = input.PlannerQuery
 	}
-	plan, narrative, err := planner.Plan(ctx, plannerQuery, input.ToolNames)
-	if err != nil {
-		// Context cancellation is terminal — there is no point attempting a
-		// fallback against a dead context, and the operator should see the
-		// task fail rather than a degraded answer.
-		if ctx.Err() != nil {
-			emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
-				Code:    -32000,
-				Message: "planning failed: " + err.Error(),
-			})
-			return fmt.Errorf("planner.Plan: %w", err)
-		}
-		// Planning failed for a non-fatal reason — most commonly the LLM
-		// returned prose instead of the expected JSON tool plan (parse error),
-		// or a transient gateway hiccup. Degrade to a plain LLM answer so the
-		// operator still gets a useful response, mirroring the non-streaming
-		// PlanAndExecute path in agent/tool_planner.go. If the gateway is
-		// genuinely down, the assembly call inside runPlainAnswer fails and
-		// surfaces task/status{failed} — so a real transport failure is never
-		// masked as success.
-		logger.WarnContext(ctx, "streampipeline: planning failed, falling back to plain answer",
-			"error", err,
-		)
-		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter,
-			"Tool planning was unavailable; answering directly from the model.")
-	}
 
-	if narrative != nil && narrative.Text != "" {
-		emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, narrative.Text, false)
-	}
-
-	if plan == nil || len(plan.Steps) == 0 {
-		// No plan — fall through to plain LLM answer (no tool grounding).
-		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter,
-			"No tool calls needed; answering directly.")
-	}
-
-	// Resolve proactive event placeholders ({entity_id}, {entity_properties.X},
-	// {time_minus_24h}, ...) into the plan's step arguments before they are
-	// emitted or executed. No-op on the reactive path (ProactivePlaceholders is
-	// nil). Done after the empty-plan check so the LLM path skips it entirely,
-	// and before emitPlan so chips show resolved values. See OGA-350.
-	substitutePlan(ctx, plan, input.ProactivePlaceholders, logger)
-
-	if traceEnabled() {
-		for i := range plan.Steps {
-			logger.InfoContext(ctx, "trace: grounding step (resolved args)",
-				"actor", input.Actor.ID,
-				"tenant_id", input.TenantID,
-				"step_index", i,
-				"name", plan.Steps[i].Name,
-				"tool", plan.Steps[i].ToolName,
-				"condition", plan.Steps[i].Condition,
-				"required", plan.Steps[i].Required,
-				"arguments", plan.Steps[i].Arguments,
-			)
-		}
-	}
-
-	if len(plan.Steps) > cfg.MaxSteps {
-		logger.WarnContext(ctx, "streampipeline: plan exceeds MaxSteps, truncating",
-			"plan_steps", len(plan.Steps),
-			"max_steps", cfg.MaxSteps,
-		)
-		plan.Steps = plan.Steps[:cfg.MaxSteps]
-	}
-
-	emitter.emitPlan(rootSpan, plan)
-
-	// 2. Execute steps
-	results := make([]ToolStepResult, 0, len(plan.Steps))
+	results := make([]ToolStepResult, 0, cfg.MaxSteps)
 	allCitations := make([]agent.CitationSource, 0)
+	decided := make([]ToolPlanStep, 0, cfg.MaxSteps) // for the evolving task/plan
 
-	for i, step := range plan.Steps {
+	for turn := 0; turn < cfg.MaxSteps; turn++ {
+		st := &PlanState{
+			Query:             plannerQuery,
+			Persona:           input.Persona,
+			GroundingStrategy: input.GroundingStrategy,
+			SeedFacts:         input.SeedFacts,
+			History:           results,
+			StepBudget:        cfg.MaxSteps - turn,
+		}
+
+		decision, err := planner.Next(ctx, st)
+		if err != nil {
+			// Context cancellation during planning is terminal (OGA-368): no
+			// fallback against a dead context.
+			if ctx.Err() != nil {
+				emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
+					Code:    -32000,
+					Message: "planning failed: " + err.Error(),
+				})
+				return fmt.Errorf("planner.Next: %w", err)
+			}
+			// No observations yet → degrade to a plain LLM answer (mirrors the
+			// pre-OGA-419 fallback). If the gateway is genuinely down, the
+			// assembly call inside runPlainAnswer fails and surfaces
+			// task/status{failed}, so a real transport failure is never masked.
+			if len(results) == 0 {
+				logger.WarnContext(ctx, "streampipeline: first-turn planning failed, falling back to plain answer",
+					"error", err)
+				return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter,
+					"Tool planning was unavailable; answering directly from the model.")
+			}
+			// Mid-loop failure with evidence already gathered → stop gathering
+			// and assemble honestly from what we have (Property 4 — never
+			// fabricate; the assembly grounds only on real observations).
+			logger.WarnContext(ctx, "streampipeline: mid-loop planning failed; assembling with evidence so far",
+				"error", err, "observations", len(results))
+			break
+		}
+
+		// Emit the "Thought".
+		if decision.Narrative != "" {
+			emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, decision.Narrative, false)
+		}
+
+		// Planner finalized → go to assembly.
+		if decision.Done || decision.Step == nil {
+			break
+		}
+
+		// Mid-loop cancellation (operator abort after a successful decision) →
+		// canceled, distinct from a planning-time failure above.
 		if ctx.Err() != nil {
 			emitter.emitStatus(rootSpan, agent.TaskStateCanceled, &agent.StatusError{
 				Code:    -32000,
@@ -263,15 +266,31 @@ func (p *Pipeline) runInternal(
 			return ctx.Err()
 		}
 
+		step := *decision.Step
+		idx := len(results)
+
+		// No-progress guard (Property 3): identical (tool,args) repeat, or K
+		// consecutive empty/failed observations.
+		if noProgress(decided, results, step, cfg.NoProgressLimit) {
+			logger.WarnContext(ctx, "streampipeline: no-progress detected, stopping loop",
+				"tool", step.ToolName, "turn", turn)
+			break
+		}
+
+		// Evolving plan: append the decided step and re-emit the cumulative
+		// plan so the UI checklist grows turn by turn (OGAW merges by index).
+		decided = append(decided, step)
+		emitter.emitPlan(rootSpan, &ToolPlan{Steps: decided})
+
 		toolSpan := tracker.ChildSpan(rootSpan)
 
-		// Evaluate Condition.
+		// Condition is advisory under ReAct (LLM steps carry none); honored for
+		// precomputed seed/grounding steps that set it.
 		shouldRun, skipReason := evaluateCondition(step.Condition)
 		if !shouldRun {
-			// Emit a skipped tool_call (no tool_result, no citation).
-			emitter.emitToolCallSkipped(toolSpan, rootSpan, step, i, skipReason)
+			emitter.emitToolCallSkipped(toolSpan, rootSpan, step, idx, skipReason)
 			results = append(results, ToolStepResult{
-				StepIndex:  i,
+				StepIndex:  idx,
 				ToolName:   step.ToolName,
 				Skipped:    true,
 				SkipReason: skipReason,
@@ -279,17 +298,12 @@ func (p *Pipeline) runInternal(
 			continue
 		}
 
-		// Emit tool_call.
-		emitter.emitToolCall(toolSpan, rootSpan, step, i)
+		emitter.emitToolCall(toolSpan, rootSpan, step, idx)
 
-		// Execute.
-		result := executeStep(ctx, gw, step, i, results, cfg.ToolTimeout)
-		results = append(results, result)
-
-		// Emit tool_result.
+		result := executeStep(ctx, gw, step, idx, results, cfg.ToolTimeout)
 		emitter.emitToolResult(toolSpan, rootSpan, &result, cfg)
 
-		// Required step failure → fail-fast.
+		// Required-step failure → fail-fast (honored for grounding/seed steps).
 		if step.Required && !result.Success && !result.Skipped {
 			emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
 				Code:    -32000,
@@ -297,6 +311,8 @@ func (p *Pipeline) runInternal(
 			})
 			return fmt.Errorf("required step %q failed: %s", step.Name, result.Error)
 		}
+
+		results = append(results, result)
 
 		// Extract + emit citations.
 		citations := ExtractCitations(&result, step.ToolName, step.Arguments)
@@ -335,7 +351,7 @@ func (p *Pipeline) runInternal(
 // sees why no tools were used.
 func (p *Pipeline) runPlainAnswer(
 	ctx context.Context,
-	gw gatewayClient,
+	gw PlatformAccess,
 	input Input,
 	cfg Config,
 	tracker *agent.SpanTracker,
@@ -361,7 +377,7 @@ func (p *Pipeline) runPlainAnswer(
 // chat completion when streaming is unavailable.
 func (p *Pipeline) streamAssembly(
 	ctx context.Context,
-	gw gatewayClient,
+	gw PlatformAccess,
 	input Input,
 	cfg Config,
 	tracker *agent.SpanTracker,
@@ -489,7 +505,7 @@ func (p *Pipeline) runArtifact(
 	ctx context.Context,
 	deps Deps,
 	input Input,
-	planner StreamPlanner,
+	planner Planner,
 ) (string, []agent.CitationSource, error) {
 	events := make(chan *agent.StreamEvent, 64)
 
@@ -713,9 +729,9 @@ func (e *eventEmitter) emitStatus(spanID string, state string, statusErr *agent.
 }
 
 // Compile-time check: the gateway package's PlatformGatewayClient must
-// satisfy the streampipeline gatewayClient interface so callers can pass
+// satisfy the streampipeline PlatformAccess interface so callers can pass
 // it directly without an adapter.
-var _ gatewayClient = (*gateway.PlatformGatewayClient)(nil)
+var _ PlatformAccess = (*gateway.PlatformGatewayClient)(nil)
 
 // Suppress unused imports during incremental development — json + uuid are
 // re-used by the planner constructors.
