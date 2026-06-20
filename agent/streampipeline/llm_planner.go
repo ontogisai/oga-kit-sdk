@@ -6,85 +6,109 @@ import (
 	"log/slog"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
-	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
-// LLMToolPlanner implements StreamPlanner by asking the LLM to produce a JSON
-// tool-call plan dynamically. Used by the platform's Knowledge Agent and by
-// kit-supplied domain agents whose profile does NOT declare a grounding
-// strategy.
+// LLMToolPlanner implements Planner by asking the LLM for the SINGLE next action
+// each turn, given the full observation transcript (OGA-419). It is the core
+// ReAct planner used by the platform's Knowledge Agent, by domain agents'
+// reactive chat / Investigate paths, and (seeded with grounding hints) by the
+// proactive proposal path.
+//
+// It is stateless across turns: everything it needs — persona + tool palette,
+// grounding hints, seed facts, observation history — arrives in PlanState. A
+// single instance is therefore safe to reuse and the loop stays fully
+// transcript-driven.
 type LLMToolPlanner struct {
-	gw      gatewayClient
-	profile *agent.DomainAgentProfile
-	cfg     agent.PlannerConfig
-	logger  *slog.Logger
+	gw     PlatformAccess
+	cfg    agent.PlannerConfig
+	logger *slog.Logger
 }
 
-// NewLLMToolPlanner constructs an LLM-driven planner. The gateway client is
-// used for the LLM chat completion call; the profile contributes the system
-// prompt + the tool union.
-func NewLLMToolPlanner(gw *gateway.PlatformGatewayClient, profile *agent.DomainAgentProfile, cfg agent.PlannerConfig) *LLMToolPlanner {
-	return &LLMToolPlanner{
-		gw:      gw,
-		profile: profile,
-		cfg:     cfg,
-		logger:  slog.Default(),
-	}
+// NewLLMToolPlanner constructs the ReAct LLM planner. The persona + tool palette
+// are supplied per turn via PlanState.Persona, so the KA (no DomainAgentProfile)
+// and domain agents share one constructor.
+func NewLLMToolPlanner(gw PlatformAccess, cfg agent.PlannerConfig) *LLMToolPlanner {
+	return &LLMToolPlanner{gw: gw, cfg: cfg, logger: slog.Default()}
 }
 
-// NewLLMToolPlannerWithClient is the testable constructor that takes any
-// gatewayClient implementation (for mocking in tests).
-func NewLLMToolPlannerWithClient(gw gatewayClient, profile *agent.DomainAgentProfile, cfg agent.PlannerConfig) *LLMToolPlanner {
-	return &LLMToolPlanner{
-		gw:      gw,
-		profile: profile,
-		cfg:     cfg,
-		logger:  slog.Default(),
-	}
-}
-
-// Plan asks the LLM for a tool-call plan and converts it to the streampipeline
-// ToolPlan shape. Falls back to one retry on parse failure (the LLM
-// occasionally returns prose instead of JSON on the first attempt).
-func (p *LLMToolPlanner) Plan(ctx context.Context, query string, tools []string) (*ToolPlan, *PlanNarrative, error) {
-	// Use the union of profile tools when caller doesn't supply explicit tools.
-	if len(tools) == 0 {
-		tools = agent.UniqueTools(p.profile)
-	}
-	if len(tools) == 0 {
-		// No tools available — return empty plan; the pipeline falls back to
-		// plainAnswer (single LLM call, no grounding).
-		return &ToolPlan{}, &PlanNarrative{Text: "No tools available; answering directly."}, nil
+// Next asks the LLM for the next action against the observations so far and maps
+// the decision into the pipeline's Decision shape. A "final" decision ends the
+// loop; otherwise it returns the chosen tool + arguments as a ToolPlanStep
+// (DependsOn -1 — the model emits concrete arguments because it has already
+// observed the prior results).
+func (p *LLMToolPlanner) Next(ctx context.Context, st *PlanState) (*Decision, error) {
+	req := agent.NextStepRequest{
+		SystemPrompt: st.Persona.SystemPrompt,
+		Tools:        st.Persona.Tools,
+		Query:        st.Query,
+		SeedFacts:    st.SeedFacts,
+		Hints:        groundingHints(st.GroundingStrategy),
+		History:      toObservations(st.History),
 	}
 
-	// RequestPlan is self-correcting (OGA-387): on a parse failure it retries
-	// once with a corrective turn. No outer retry loop is needed here.
-	rawPlan, err := agent.RequestPlan(ctx, p.gw, p.profile, query, tools, p.cfg)
+	d, err := agent.RequestNextStep(ctx, p.gw, req, p.cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("LLM planning: %w", err)
+		return nil, fmt.Errorf("LLM next-step: %w", err)
 	}
 
-	return convertAgentPlan(rawPlan), &PlanNarrative{Text: "Planning which tools to use for your query..."}, nil
+	if d.Final {
+		return &Decision{Done: true, Narrative: d.Thought}, nil
+	}
+
+	return &Decision{
+		Narrative: d.Thought,
+		Step: &ToolPlanStep{
+			Name:      fmt.Sprintf("step_%d", len(st.History)),
+			ToolName:  d.ToolName,
+			Arguments: d.Arguments,
+			DependsOn: -1,
+		},
+	}, nil
 }
 
-// convertAgentPlan translates the existing agent.ToolPlan (returned by
-// agent.RequestPlan) into the streampipeline.ToolPlan shape. The translation
-// is mechanical — Required/Condition/MaxResults stay at zero defaults because
-// the LLM doesn't author those fields (they're a kit-author concern).
-func convertAgentPlan(p *agent.ToolPlan) *ToolPlan {
-	if p == nil {
-		return &ToolPlan{}
+// groundingHints converts kit-declared GroundingStep entries into the
+// planner-facing advisory hint shape. Arguments are intentionally NOT carried:
+// they may contain proactive {placeholder} tokens, and under ReAct the model
+// derives concrete arguments from SeedFacts + observations. The tool name,
+// rationale, and strongly-advised flag are the useful guidance (OGA-419).
+func groundingHints(steps []agent.GroundingStep) []agent.GroundingHint {
+	if len(steps) == 0 {
+		return nil
 	}
-	out := &ToolPlan{Steps: make([]ToolPlanStep, 0, len(p.Steps))}
-	for i, s := range p.Steps {
-		name := fmt.Sprintf("step_%d", i)
-		out.Steps = append(out.Steps, ToolPlanStep{
-			Name:      name,
-			ToolName:  s.ToolName,
-			Arguments: s.Arguments,
-			DependsOn: s.DependsOn,
-			Rationale: s.Rationale,
-			// Required, Condition, MaxResults stay at zero defaults.
+	out := make([]agent.GroundingHint, 0, len(steps))
+	for _, s := range steps {
+		out = append(out, agent.GroundingHint{
+			Tool:            s.Tool,
+			Rationale:       s.Name,
+			StronglyAdvised: s.Required,
+		})
+	}
+	return out
+}
+
+// toObservations maps the executed-step transcript into the planner's
+// observation shape, truncating each result so the prompt stays within budget.
+func toObservations(results []ToolStepResult) []agent.NextStepObservation {
+	if len(results) == 0 {
+		return nil
+	}
+	const maxObsBytes = 2048
+	out := make([]agent.NextStepObservation, 0, len(results))
+	for _, r := range results {
+		content := r.Content
+		if len(content) > maxObsBytes {
+			content = content[:maxObsBytes] + "…(truncated)"
+		}
+		errText := r.Error
+		if r.Skipped && errText == "" {
+			errText = r.SkipReason
+		}
+		out = append(out, agent.NextStepObservation{
+			ToolName: r.ToolName,
+			Success:  r.Success,
+			Content:  content,
+			Error:    errText,
+			Skipped:  r.Skipped,
 		})
 	}
 	return out
