@@ -36,7 +36,7 @@ func RunSync[T any](
 	p *Pipeline,
 	deps Deps,
 	input Input,
-	planner StreamPlanner,
+	planner Planner,
 	schema *jsonschema.Schema,
 ) (T, []agent.CitationSource, error) {
 	// Attempt 1.

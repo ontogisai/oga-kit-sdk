@@ -67,10 +67,7 @@ func TestReactiveStreamPlanner_AlwaysLLM(t *testing.T) {
 			rt := newTestRuntime(t, tt.profile)
 			planner := reactiveStreamPlanner(rt)
 			if _, ok := planner.(*LLMToolPlanner); !ok {
-				t.Fatalf("reactive planner = %T, want *LLMToolPlanner — the grounding strategy must stay proactive-only (OGA-348)", planner)
-			}
-			if _, ok := planner.(*GroundingStrategyPlanner); ok {
-				t.Fatalf("reactive planner must NOT be a GroundingStrategyPlanner (OGA-348)")
+				t.Fatalf("reactive planner = %T, want *LLMToolPlanner — the grounding strategy must stay advisory hints, not a deterministic planner (OGA-348/OGA-419)", planner)
 			}
 		})
 	}
