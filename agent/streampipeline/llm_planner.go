@@ -40,6 +40,7 @@ func (p *LLMToolPlanner) Next(ctx context.Context, st *PlanState) (*Decision, er
 	req := agent.NextStepRequest{
 		SystemPrompt: st.Persona.SystemPrompt,
 		Tools:        st.Persona.Tools,
+		ToolSchemas:  st.Persona.ToolSchemas,
 		Query:        st.Query,
 		SeedFacts:    st.SeedFacts,
 		Hints:        groundingHints(st.GroundingStrategy),

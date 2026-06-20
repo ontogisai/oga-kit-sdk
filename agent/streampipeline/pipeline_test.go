@@ -21,6 +21,13 @@ type fakeGateway struct {
 	streamErr       error
 	callToolCalls   []callToolCall
 	completionCalls int
+
+	// delegateRaw holds JSON-encoded sub-agent StreamEvents yielded by
+	// InvokeAgentStream (OGA-419 G3 delegation tests). delegateErr, when set,
+	// is returned instead. delegateCalls records the agent names invoked.
+	delegateRaw   []string
+	delegateErr   error
+	delegateCalls []string
 }
 
 type callToolCall struct {
@@ -75,8 +82,21 @@ func (f *fakeGateway) ChatCompletionStream(_ context.Context, _ *gateway.ChatCom
 	return ch, nil
 }
 
-func (f *fakeGateway) InvokeAgentStream(_ context.Context, _ string, _ any) (<-chan *json.RawMessage, error) {
-	return nil, errors.New("InvokeAgentStream not supported in this test")
+func (f *fakeGateway) InvokeAgentStream(_ context.Context, agentName string, _ any) (<-chan *json.RawMessage, error) {
+	f.delegateCalls = append(f.delegateCalls, agentName)
+	if f.delegateErr != nil {
+		return nil, f.delegateErr
+	}
+	if f.delegateRaw == nil {
+		return nil, errors.New("InvokeAgentStream not configured in this test")
+	}
+	ch := make(chan *json.RawMessage, len(f.delegateRaw))
+	for _, s := range f.delegateRaw {
+		raw := json.RawMessage(s)
+		ch <- &raw
+	}
+	close(ch)
+	return ch, nil
 }
 
 // scriptedPlanner is a Planner test double (OGA-419). It yields the configured

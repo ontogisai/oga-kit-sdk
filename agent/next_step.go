@@ -8,9 +8,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ontogisai/oga-kit-sdk/gateway"
@@ -40,12 +42,30 @@ type GroundingHint struct {
 	StronglyAdvised bool
 }
 
+// ToolSchema is a richer descriptor for a palette tool: its name, a short
+// description, and (optionally) its JSON-Schema input contract. When supplied
+// in a NextStepRequest, the decision prompt renders the tool's argument names +
+// types so the model emits correct arguments instead of guessing (OGA-419 G1).
+// The platform Knowledge Agent populates these from discovered MCP tools; a
+// delegation capability (ask_knowledge_agent) supplies Name + Description with
+// no InputSchema.
+type ToolSchema struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+}
+
 // NextStepRequest is the input to a single ReAct decision call.
 type NextStepRequest struct {
 	// SystemPrompt is the agent persona/instructions (PlannerPersona.SystemPrompt).
 	SystemPrompt string
 	// Tools is the available tool palette — bounds what the model may pick.
 	Tools []string
+	// ToolSchemas optionally carries richer per-tool detail (description +
+	// JSON-Schema inputs) rendered into the decision prompt. Tools listed here
+	// but absent from Tools are still added to the palette; tools in Tools
+	// without a matching schema render as bare names. Empty → names-only.
+	ToolSchemas []ToolSchema
 	// Query is the user/seed query.
 	Query string
 	// SeedFacts is resolved factual context (event facts / investigation context).
@@ -115,7 +135,7 @@ func RequestNextStep(
 	req NextStepRequest,
 	cfg PlannerConfig,
 ) (*NextStepDecision, error) {
-	system := req.SystemPrompt + renderToolPalette(req.Tools) + renderHints(req.Hints) + nextStepContract
+	system := req.SystemPrompt + renderToolPalette(req.Tools, req.ToolSchemas) + renderHints(req.Hints) + nextStepContract
 	user := renderNextStepUser(req)
 
 	messages := []gateway.ChatMessage{
@@ -173,12 +193,150 @@ func parseNextStep(raw string) (*NextStepDecision, error) {
 	return d, nil
 }
 
-// renderToolPalette lists the available tools for the system prompt.
-func renderToolPalette(tools []string) string {
-	if len(tools) == 0 {
+// renderToolPalette lists the available tools for the system prompt. When
+// ToolSchemas are supplied, each tool renders with its description and a compact
+// summary of its input arguments (names + types, required marked with *) so the
+// model emits correct arguments rather than guessing (OGA-419 G1). Tools present
+// only in schemas are appended to the palette; tools without a schema render as
+// bare names. The union order is: names first (declaration order), then
+// schema-only names.
+func renderToolPalette(tools []string, schemas []ToolSchema) string {
+	if len(tools) == 0 && len(schemas) == 0 {
 		return ""
 	}
-	return "\n\nAvailable tools: " + strings.Join(tools, ", ")
+
+	detail := make(map[string]ToolSchema, len(schemas))
+	for _, s := range schemas {
+		detail[s.Name] = s
+	}
+
+	ordered := make([]string, 0, len(tools)+len(schemas))
+	seen := make(map[string]struct{}, len(tools)+len(schemas))
+	for _, t := range tools {
+		if _, dup := seen[t]; dup || t == "" {
+			continue
+		}
+		seen[t] = struct{}{}
+		ordered = append(ordered, t)
+	}
+	for _, s := range schemas {
+		if _, dup := seen[s.Name]; dup || s.Name == "" {
+			continue
+		}
+		seen[s.Name] = struct{}{}
+		ordered = append(ordered, s.Name)
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\nAvailable tools:")
+	for _, name := range ordered {
+		b.WriteString("\n- ")
+		b.WriteString(name)
+		s, ok := detail[name]
+		if !ok {
+			continue
+		}
+		if s.Description != "" {
+			b.WriteString(": ")
+			b.WriteString(s.Description)
+		}
+		if args := summarizeSchema(s.InputSchema); args != "" {
+			b.WriteString(" (args: ")
+			b.WriteString(args)
+			b.WriteString(")")
+		}
+	}
+	return b.String()
+}
+
+// maxSchemaSummaryLen bounds the per-tool argument summary so a verbose schema
+// can't blow the decision-prompt token budget.
+const maxSchemaSummaryLen = 600
+
+// summarizeSchema renders a compact, token-bounded view of a JSON Schema's
+// input arguments: "name(type)*, other(string), ..." where * marks a required
+// field. It reads the standard {type, properties, required} shape. When the
+// schema can't be parsed into that shape it falls back to the compacted raw
+// JSON, truncated to maxSchemaSummaryLen. Returns "" for an empty schema.
+func summarizeSchema(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var doc struct {
+		Properties map[string]struct {
+			Type string `json:"type"`
+			Enum []any  `json:"enum"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Properties) == 0 {
+		return compactTruncate(raw, maxSchemaSummaryLen)
+	}
+
+	required := make(map[string]struct{}, len(doc.Required))
+	for _, r := range doc.Required {
+		required[r] = struct{}{}
+	}
+
+	// Stable order: required fields first (declaration order in `required`),
+	// then the remaining properties sorted for determinism.
+	names := make([]string, 0, len(doc.Properties))
+	for n := range doc.Properties {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	write := func(name string) {
+		p := doc.Properties[name]
+		if b.Len() > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(name)
+		typ := p.Type
+		if typ == "" && len(p.Enum) > 0 {
+			typ = "enum"
+		}
+		if typ != "" {
+			b.WriteString("(")
+			b.WriteString(typ)
+			b.WriteString(")")
+		}
+		if _, req := required[name]; req {
+			b.WriteString("*")
+		}
+	}
+	for _, r := range doc.Required {
+		if _, ok := doc.Properties[r]; ok {
+			write(r)
+		}
+	}
+	for _, n := range names {
+		if _, req := required[n]; req {
+			continue
+		}
+		write(n)
+	}
+
+	out := b.String()
+	if len(out) > maxSchemaSummaryLen {
+		out = out[:maxSchemaSummaryLen] + "…"
+	}
+	return out
+}
+
+// compactTruncate compacts raw JSON (removing insignificant whitespace) and
+// truncates it to maxLen runes.
+func compactTruncate(raw json.RawMessage, maxLen int) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return ""
+	}
+	s := buf.String()
+	if len(s) > maxLen {
+		return s[:maxLen] + "…"
+	}
+	return s
 }
 
 // renderHints renders advisory grounding hints into the system prompt.

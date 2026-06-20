@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -342,7 +343,13 @@ func (c *PlatformGatewayClient) InvokeAgent(ctx context.Context, agentName strin
 	return resp, nil
 }
 
-// InvokeAgentStream sends a message/stream request to another agent.
+// InvokeAgentStream sends a message/stream request to another agent and yields
+// the sub-agent's stream-event JSON payloads. The downstream A2A endpoint emits
+// Server-Sent Events (`event: <type>\ndata: <JSON StreamEvent>\n\n`), so this
+// parses the SSE framing and emits each event's `data:` JSON as a
+// *json.RawMessage. SSE comments, `event:` lines, blank separators, and the
+// `[DONE]` sentinel are skipped. Callers (the streampipeline delegation path)
+// decode each raw message into an agent.StreamEvent and re-parent it.
 func (c *PlatformGatewayClient) InvokeAgentStream(ctx context.Context, agentName string, msg any) (<-chan *json.RawMessage, error) {
 	body := map[string]any{
 		"jsonrpc": "2.0",
@@ -362,6 +369,7 @@ func (c *PlatformGatewayClient) InvokeAgentStream(ctx context.Context, agentName
 		return nil, err
 	}
 	c.setHeaders(httpReq)
+	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
@@ -377,18 +385,45 @@ func (c *PlatformGatewayClient) InvokeAgentStream(ctx context.Context, agentName
 	go func() {
 		defer func() { _ = resp.Body.Close() }()
 		defer close(ch)
-		dec := json.NewDecoder(resp.Body)
-		for {
-			var raw json.RawMessage
-			if err := dec.Decode(&raw); err != nil {
+
+		scanner := bufio.NewScanner(resp.Body)
+		// SSE data payloads can be large (a tool_result preview); raise the
+		// scanner's line cap well above the 64KB default.
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+		dataLines := make([]string, 0, 4)
+		flush := func() {
+			if len(dataLines) == 0 {
 				return
 			}
+			data := strings.TrimSpace(strings.Join(dataLines, "\n"))
+			dataLines = dataLines[:0]
+			if data == "" || data == "[DONE]" {
+				return
+			}
+			raw := json.RawMessage(data)
 			select {
 			case ch <- &raw:
 			case <-ctx.Done():
-				return
 			}
 		}
+
+		for scanner.Scan() {
+			if ctx.Err() != nil {
+				return
+			}
+			line := scanner.Text()
+			switch {
+			case line == "":
+				flush()
+			case strings.HasPrefix(line, "data:"):
+				dataLines = append(dataLines, strings.TrimPrefix(line, "data:"))
+			default:
+				// `event:` lines, `id:` lines, and `:` comments are ignored —
+				// the StreamEvent JSON in `data:` already carries its type.
+			}
+		}
+		flush() // emit a trailing event with no terminating blank line
 	}()
 
 	return ch, nil
