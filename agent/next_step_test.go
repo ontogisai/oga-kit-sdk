@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
 func TestRequestNextStep_ParsesAction(t *testing.T) {
@@ -108,5 +110,63 @@ func TestRequestNextStep_RendersToolsHintsAndTranscript(t *testing.T) {
 		if !strings.Contains(user, want) {
 			t.Errorf("user prompt missing %q\n%s", want, user)
 		}
+	}
+}
+
+// TestRequestNextStep_CapturesUsage verifies the decision call surfaces token
+// usage from the gateway response (OGA-420 Gap 2).
+func TestRequestNextStep_CapturesUsage(t *testing.T) {
+	gw := &fakeGateway{chatResponses: []chatResponse{
+		{
+			content: `{"thought":"look it up","action":{"tool":"kg_search","arguments":{"q":"x"}}}`,
+			usage:   &gateway.Usage{PromptTokens: 200, CompletionTokens: 40, TotalTokens: 240},
+		},
+	}}
+	d, err := RequestNextStep(context.Background(), gw, NextStepRequest{Query: "q"}, DefaultPlannerConfig())
+	if err != nil {
+		t.Fatalf("RequestNextStep: %v", err)
+	}
+	if !d.UsageAvailable {
+		t.Fatal("expected UsageAvailable=true")
+	}
+	if d.Usage.PromptTokens != 200 || d.Usage.CompletionTokens != 40 || d.Usage.TotalTokens != 240 {
+		t.Errorf("usage = %+v, want {200,40,240}", d.Usage)
+	}
+}
+
+// TestRequestNextStep_UsageSumsCorrectiveRetry verifies the decision usage sums
+// the initial (unparseable) completion and the corrective retry (OGA-420).
+func TestRequestNextStep_UsageSumsCorrectiveRetry(t *testing.T) {
+	gw := &fakeGateway{chatResponses: []chatResponse{
+		{content: `not json`, usage: &gateway.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}},
+		{content: `{"thought":"ok","final":true}`, usage: &gateway.Usage{PromptTokens: 150, CompletionTokens: 5, TotalTokens: 155}},
+	}}
+	d, err := RequestNextStep(context.Background(), gw, NextStepRequest{Query: "q"}, DefaultPlannerConfig())
+	if err != nil {
+		t.Fatalf("RequestNextStep: %v", err)
+	}
+	if !d.Final {
+		t.Error("expected Final after corrective retry")
+	}
+	if d.Usage.TotalTokens != 265 {
+		t.Errorf("summed usage total = %d, want 265 (110+155)", d.Usage.TotalTokens)
+	}
+}
+
+// TestRequestNextStep_NoUsageLabelledUnavailable verifies that when the proxy
+// reports no usage, the decision is labelled unavailable with zero counts.
+func TestRequestNextStep_NoUsageLabelledUnavailable(t *testing.T) {
+	gw := &fakeGateway{chatResponses: []chatResponse{
+		{content: `{"thought":"ok","final":true}`}, // no usage
+	}}
+	d, err := RequestNextStep(context.Background(), gw, NextStepRequest{Query: "q"}, DefaultPlannerConfig())
+	if err != nil {
+		t.Fatalf("RequestNextStep: %v", err)
+	}
+	if d.UsageAvailable {
+		t.Error("expected UsageAvailable=false when proxy reported none")
+	}
+	if d.Usage.TotalTokens != 0 {
+		t.Errorf("usage should be zero, got %+v", d.Usage)
 	}
 }

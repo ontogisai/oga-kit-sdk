@@ -22,6 +22,14 @@ type fakeGateway struct {
 	callToolCalls   []callToolCall
 	completionCalls int
 
+	// OGA-420 additive test hooks (default nil → no behavior change):
+	//   completionUsage — attached to every non-streaming ChatCompletion response.
+	//   streamUsage     — emitted as a final usage-bearing chunk by ChatCompletionStream.
+	//   chatReqs        — records every request so tests can assert model/temperature passthrough.
+	completionUsage *gateway.Usage
+	streamUsage     *gateway.Usage
+	chatReqs        []*gateway.ChatCompletionRequest
+
 	// delegateRaw holds JSON-encoded sub-agent StreamEvents yielded by
 	// InvokeAgentStream (OGA-419 G3 delegation tests). delegateErr, when set,
 	// is returned instead. delegateCalls records the agent names invoked.
@@ -48,6 +56,7 @@ func (f *fakeGateway) CallTool(_ context.Context, tool string, params any) (json
 
 func (f *fakeGateway) ChatCompletion(ctx context.Context, req *gateway.ChatCompletionRequest) (*gateway.ChatCompletionResponse, error) {
 	f.completionCalls++
+	f.chatReqs = append(f.chatReqs, req)
 	if f.completionFn != nil {
 		return f.completionFn(ctx, req)
 	}
@@ -60,23 +69,29 @@ func (f *fakeGateway) ChatCompletion(ctx context.Context, req *gateway.ChatCompl
 				Message: gateway.ChatMessage{Role: "assistant", Content: f.completion},
 			},
 		},
+		Usage: f.completionUsage,
 	}, nil
 }
 
-func (f *fakeGateway) ChatCompletionStream(_ context.Context, _ *gateway.ChatCompletionRequest) (<-chan *gateway.ChatChunk, error) {
+func (f *fakeGateway) ChatCompletionStream(_ context.Context, req *gateway.ChatCompletionRequest) (<-chan *gateway.ChatChunk, error) {
+	f.chatReqs = append(f.chatReqs, req)
 	if f.streamErr != nil {
 		return nil, f.streamErr
 	}
 	if len(f.streamChunks) == 0 {
 		return nil, errors.New("no stream chunks configured")
 	}
-	ch := make(chan *gateway.ChatChunk, len(f.streamChunks))
+	ch := make(chan *gateway.ChatChunk, len(f.streamChunks)+1)
 	for _, chunk := range f.streamChunks {
 		ch <- &gateway.ChatChunk{
 			Choices: []gateway.ChatChunkChoice{
 				{Delta: gateway.ChatDelta{Content: chunk}},
 			},
 		}
+	}
+	// Final usage-bearing chunk (OGA-420), emitted when configured + requested.
+	if f.streamUsage != nil && req != nil && req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+		ch <- &gateway.ChatChunk{Usage: f.streamUsage}
 	}
 	close(ch)
 	return ch, nil
@@ -180,6 +195,7 @@ func TestPipeline_PlanWithSteps(t *testing.T) {
 		agent.EventTypeArtifact,
 		agent.EventTypeArtifact, // 2 chunks
 		agent.EventTypeCitation, // consolidated
+		agent.EventTypeUsage,    // per-request aggregate (OGA-420)
 		agent.EventTypeStatus,
 	}
 	if !sequenceMatches(types, want) {

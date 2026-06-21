@@ -40,7 +40,7 @@ func RunSync[T any](
 	schema *jsonschema.Schema,
 ) (T, []agent.CitationSource, error) {
 	// Attempt 1.
-	raw, citations, err := p.runArtifact(ctx, deps, jsonInput(input, schema, ""), planner)
+	raw, citations, _, _, err := p.runArtifact(ctx, deps, jsonInput(input, schema, ""), planner)
 	if err != nil {
 		return zero[T](), citations, err
 	}
@@ -54,7 +54,7 @@ func RunSync[T any](
 
 	// Attempt 2: stricter retry, seeding the prior (bad) output + the error.
 	retryErrHint := "previous attempt produced output that failed schema validation"
-	raw2, citations2, err := p.runArtifact(ctx, deps, jsonInput(input, schema, retryErrHint+": "+raw), planner)
+	raw2, citations2, _, _, err := p.runArtifact(ctx, deps, jsonInput(input, schema, retryErrHint+": "+raw), planner)
 	if err != nil {
 		return zero[T](), citations2, err
 	}
@@ -84,6 +84,25 @@ func RunText(
 	input Input,
 	planner Planner,
 ) (string, []agent.CitationSource, error) {
+	if p == nil {
+		p = NewPipeline()
+	}
+	text, cites, _, _, err := p.runArtifact(ctx, deps, input, planner)
+	return text, cites, err
+}
+
+// RunTextWithUsage is RunText that also returns the per-request token-usage
+// aggregate (OGA-420) so a non-streaming caller (e.g. the platform Knowledge
+// Agent's synchronous message/send path) can record it on the
+// observability/metering path. usageAvailable is false when the proxy reported
+// no usage — the counts are then zero and must not be read as a real "0 tokens".
+func RunTextWithUsage(
+	ctx context.Context,
+	p *Pipeline,
+	deps Deps,
+	input Input,
+	planner Planner,
+) (text string, citations []agent.CitationSource, usage agent.TokenUsage, usageAvailable bool, err error) {
 	if p == nil {
 		p = NewPipeline()
 	}

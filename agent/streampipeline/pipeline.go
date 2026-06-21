@@ -100,6 +100,20 @@ type Input struct {
 	// their persona prompt with the locale + interaction-style overlay applied.
 	AssemblyPrompt string
 
+	// AssemblyModel optionally selects the model for the terminal assembly call
+	// independently of the per-turn decision model (OGA-420 Gap 1). Empty → the
+	// gateway default route (today's behavior). The decision model is configured
+	// separately via the planner's PlannerConfig.
+	AssemblyModel string
+
+	// AssemblyMaxTokens caps the assembly response. 0 → the pipeline default
+	// (2048), preserving pre-OGA-420 behavior when unset.
+	AssemblyMaxTokens int
+
+	// AssemblyTemperature overrides the assembly sampling temperature. Nil →
+	// gateway default. Pointer so 0.0 is distinguishable from unset.
+	AssemblyTemperature *float64
+
 	// ToolNames is the union of MCP tool names available to this agent. Passed
 	// to the StreamPlanner. May be empty if the planner doesn't need it.
 	ToolNames []string
@@ -233,6 +247,12 @@ func (p *Pipeline) runInternal(
 	allCitations := make([]agent.CitationSource, 0)
 	decided := make([]ToolPlanStep, 0, cfg.MaxSteps) // for the evolving task/plan
 
+	// Per-request token-usage aggregate (OGA-420): summed across every per-turn
+	// decision call and the terminal assembly call. Emitted as a final
+	// task/usage{aggregate} so consumers meter cost without summing client-side.
+	var aggUsage agent.TokenUsage
+	var aggUsageAvail bool
+
 	// Delegation palette: palette tool names that trigger streaming agent
 	// delegation instead of a tool call (OGA-419 G3). Empty on the proactive
 	// path (Property 5).
@@ -285,6 +305,16 @@ func (p *Pipeline) runInternal(
 		// Emit the "Thought".
 		if decision.Narrative != "" {
 			emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, decision.Narrative, false)
+		}
+
+		// Per-turn decision token usage (OGA-420), folded into the per-request
+		// aggregate. Emitted as its own event only when the proxy reported usage
+		// (no per-turn noise when usage is unavailable — the always-emitted
+		// aggregate still labels the overall availability).
+		if decision.UsageAvailable {
+			aggUsage = aggUsage.Add(decision.Usage)
+			aggUsageAvail = true
+			emitter.emitUsage(tracker.ChildSpan(rootSpan), rootSpan, agent.UsageRoleDecision, turn, "", decision.Usage, true)
 		}
 
 		// Planner finalized → go to assembly.
@@ -372,12 +402,17 @@ func (p *Pipeline) runInternal(
 	// 3. Assembly
 	emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, "Assembling response...", false)
 
-	if err := p.streamAssembly(ctx, gw, input, cfg, tracker, rootSpan, emitter, results); err != nil {
+	asmUsage, asmAvail, err := p.streamAssembly(ctx, gw, input, cfg, tracker, rootSpan, emitter, results)
+	if err != nil {
 		emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
 			Code:    -32000,
 			Message: "assembly failed: " + err.Error(),
 		})
 		return fmt.Errorf("assembly: %w", err)
+	}
+	if asmAvail {
+		aggUsage = aggUsage.Add(asmUsage)
+		aggUsageAvail = true
 	}
 
 	// 4. Consolidated citation
@@ -385,7 +420,10 @@ func (p *Pipeline) runInternal(
 		emitter.emitCitation(rootSpan, allCitations)
 	}
 
-	// 5. Final status
+	// 5. Per-request token-usage aggregate (OGA-420).
+	emitter.emitUsage(tracker.ChildSpan(rootSpan), rootSpan, agent.UsageRoleAggregate, -1, input.AssemblyModel, aggUsage, aggUsageAvail)
+
+	// 6. Final status
 	emitter.emitStatus(rootSpan, agent.TaskStateCompleted, nil)
 	return nil
 }
@@ -408,20 +446,30 @@ func (p *Pipeline) runPlainAnswer(
 ) error {
 	emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, reasoningText, false)
 
-	if err := p.streamAssembly(ctx, gw, input, cfg, tracker, rootSpan, emitter, nil); err != nil {
+	asmUsage, asmAvail, err := p.streamAssembly(ctx, gw, input, cfg, tracker, rootSpan, emitter, nil)
+	if err != nil {
 		emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
 			Code:    -32000,
 			Message: "assembly failed: " + err.Error(),
 		})
 		return err
 	}
+	// Per-request aggregate (OGA-420): plain-answer has no decision turns, so the
+	// aggregate is just the assembly usage.
+	emitter.emitUsage(tracker.ChildSpan(rootSpan), rootSpan, agent.UsageRoleAggregate, -1, input.AssemblyModel, asmUsage, asmAvail)
 	emitter.emitStatus(rootSpan, agent.TaskStateCompleted, nil)
 	return nil
 }
 
 // streamAssembly builds the assembly prompt from prior tool results and
 // streams the LLM response as task/artifact events. Falls back to a single
-// chat completion when streaming is unavailable.
+// chat completion when streaming is unavailable. It applies the per-request
+// assembly model selection (OGA-420 Gap 1) and captures the call's token usage
+// (OGA-420 Gap 2): on the streaming path via stream_options.include_usage (a
+// final usage-bearing chunk), on the sync fallback via the response Usage. It
+// emits a task/usage{assembly} event and returns the usage so the caller folds
+// it into the per-request aggregate. The bool is false when the proxy reported
+// no usage (counts then zero, must not be read as a real "0 tokens").
 func (p *Pipeline) streamAssembly(
 	ctx context.Context,
 	gw PlatformAccess,
@@ -431,7 +479,7 @@ func (p *Pipeline) streamAssembly(
 	rootSpan string,
 	emitter *eventEmitter,
 	results []ToolStepResult,
-) error {
+) (agent.TokenUsage, bool, error) {
 	systemPrompt := input.AssemblyPrompt
 	if systemPrompt == "" {
 		systemPrompt = "You are a helpful agent. Answer the user's question using the provided context."
@@ -454,12 +502,20 @@ func (p *Pipeline) streamAssembly(
 		userPrompt = "Original user question: " + input.Query + "\n\nTool results:\n" + resultCtx.String()
 	}
 
+	// Assembly model selection (OGA-420 Gap 1). Empty Model / zero MaxTokens
+	// collapse to the prior behavior (gateway default route, 2048 tokens).
+	maxTokens := input.AssemblyMaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 2048
+	}
 	req := &gateway.ChatCompletionRequest{
+		Model: input.AssemblyModel,
 		Messages: []gateway.ChatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		MaxTokens: 2048,
+		MaxTokens:   maxTokens,
+		Temperature: input.AssemblyTemperature,
 	}
 
 	// Trace: the effective reasoning prompt actually sent to the assembly LLM.
@@ -482,9 +538,13 @@ func (p *Pipeline) streamAssembly(
 
 	asmSpan := tracker.ChildSpan(rootSpan)
 
+	var usage agent.TokenUsage
+	var usageAvail bool
+
 	// Try streaming first. Fall back to non-streaming on error.
 	if gw != nil {
 		req.Stream = true
+		req.StreamOptions = &gateway.StreamOptions{IncludeUsage: true}
 		tokenCh, streamErr := gw.ChatCompletionStream(asmCtx, req)
 		if streamErr == nil && tokenCh != nil {
 			first := true
@@ -494,6 +554,10 @@ func (p *Pipeline) streamAssembly(
 			for chunk := range tokenCh {
 				if asmCtx.Err() != nil {
 					break
+				}
+				// Capture usage from the final usage-bearing chunk (OGA-420).
+				if tu, ok := agent.UsageFromGateway(chunk.Usage); ok {
+					usage, usageAvail = tu, true
 				}
 				for _, choice := range chunk.Choices {
 					if choice.Delta.Content == "" {
@@ -516,9 +580,13 @@ func (p *Pipeline) streamAssembly(
 						"artifact_bytes", artifactBytes,
 					)
 				}
-				return nil
+				if usageAvail {
+					emitter.emitUsage(asmSpan, rootSpan, agent.UsageRoleAssembly, -1, req.Model, usage, true)
+				}
+				return usage, usageAvail, nil
 			}
 			// Stream produced nothing — fall through to sync.
+			req.StreamOptions = nil
 		}
 	}
 
@@ -526,10 +594,13 @@ func (p *Pipeline) streamAssembly(
 	req.Stream = false
 	resp, err := gw.ChatCompletion(asmCtx, req)
 	if err != nil {
-		return err
+		return agent.TokenUsage{}, false, err
 	}
 	if len(resp.Choices) == 0 {
-		return errors.New("no choices in assembly response")
+		return agent.TokenUsage{}, false, errors.New("no choices in assembly response")
+	}
+	if tu, ok := agent.UsageFromGateway(resp.Usage); ok {
+		usage, usageAvail = tu, true
 	}
 	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if traceEnabled() {
@@ -542,23 +613,36 @@ func (p *Pipeline) streamAssembly(
 		)
 	}
 	emitter.emitArtifact(asmSpan, answer, false)
-	return nil
+	if usageAvail {
+		emitter.emitUsage(asmSpan, rootSpan, agent.UsageRoleAssembly, -1, req.Model, usage, true)
+	}
+	return usage, usageAvail, nil
 }
 
 // runArtifact drives the pipeline but drains all events to a buffer and
-// returns the assembled artifact text + consolidated citations. It backs the
-// typed RunSync[T] (see runsync.go) and any non-streaming message/send path.
+// returns the assembled artifact text + consolidated citations + the
+// per-request token-usage aggregate (OGA-420). It backs the typed RunSync[T]
+// (see runsync.go) and any non-streaming message/send path.
+//
+// While draining it emits structured per-event logs for the proactive /
+// stream→collect ReAct loop (OGA-420 Gap 3) when proactiveReActLogEnabled() is
+// set — the actual drained events (Thought, plan, tool_call, tool_result,
+// usage, terminal status), never a synthesized trace — so a proactive proposal
+// that is wrong, thin, or never fires can be reconstructed from logs. Off by
+// default to avoid steady-state log spam.
 func (p *Pipeline) runArtifact(
 	ctx context.Context,
 	deps Deps,
 	input Input,
 	planner Planner,
-) (string, []agent.CitationSource, error) {
+) (string, []agent.CitationSource, agent.TokenUsage, bool, error) {
 	events := make(chan *agent.StreamEvent, 64)
 
 	type result struct {
-		artifact  strings.Builder
-		citations []agent.CitationSource
+		artifact   strings.Builder
+		citations  []agent.CitationSource
+		usage      agent.TokenUsage
+		usageAvail bool
 	}
 	final := &result{}
 	done := make(chan error, 1)
@@ -568,6 +652,12 @@ func (p *Pipeline) runArtifact(
 		close(events)
 		done <- err
 	}()
+
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	reactLog := proactiveReActLogEnabled()
 
 	for evt := range events {
 		switch evt.Type {
@@ -582,15 +672,18 @@ func (p *Pipeline) runArtifact(
 				// Last citation event = consolidated; just keep the latest.
 				final.citations = payload.Sources
 			}
+		case agent.EventTypeUsage:
+			if payload, ok := evt.Payload.(*agent.UsagePayload); ok && payload.Role == agent.UsageRoleAggregate {
+				final.usage, final.usageAvail = payload.Usage, payload.Available
+			}
+		}
+		if reactLog {
+			logDrainedEvent(ctx, logger, input, evt, deps.Config)
 		}
 	}
 
 	err := <-done
 	if traceEnabled() {
-		logger := deps.Logger
-		if logger == nil {
-			logger = slog.Default()
-		}
 		logger.InfoContext(ctx, "trace: artifact assembled (stream-collected)",
 			"actor", input.Actor.ID,
 			"tenant_id", input.TenantID,
@@ -598,7 +691,85 @@ func (p *Pipeline) runArtifact(
 			"citations", len(final.citations),
 		)
 	}
-	return final.artifact.String(), final.citations, err
+	return final.artifact.String(), final.citations, final.usage, final.usageAvail, err
+}
+
+// logDrainedEvent emits one structured log line for a drained StreamEvent on
+// the proactive / stream→collect path (OGA-420 Gap 3). It logs the ACTUAL event
+// — never a synthesized trace — bounding large tool-result previews so a verbose
+// observation can't flood the log. Common fields (turn/span) make the loop
+// reconstructable from logs.
+func logDrainedEvent(ctx context.Context, logger *slog.Logger, input Input, evt *agent.StreamEvent, cfg Config) {
+	if evt == nil {
+		return
+	}
+	base := []any{
+		"actor", input.Actor.ID,
+		"tenant_id", input.TenantID,
+		"seq", evt.Sequence,
+		"span_id", evt.SpanID,
+		"parent_span_id", evt.ParentSpanID,
+		"event", string(evt.Type),
+	}
+	previewCap := cfg.MaxResultPreviewBytes
+	if previewCap <= 0 {
+		previewCap = DefaultConfig().MaxResultPreviewBytes
+	}
+
+	switch evt.Type {
+	case agent.EventTypeReasoning:
+		if p, ok := evt.Payload.(*agent.ReasoningPayload); ok {
+			logger.InfoContext(ctx, "react: thought", append(base, "text", truncateForTrace(p.Text, previewCap))...)
+		}
+	case agent.EventTypePlan:
+		if p, ok := evt.Payload.(*agent.PlanPayload); ok {
+			tools := make([]string, 0, len(p.Steps))
+			for _, s := range p.Steps {
+				tools = append(tools, s.Tool)
+			}
+			logger.InfoContext(ctx, "react: plan", append(base, "steps", len(p.Steps), "tools", strings.Join(tools, ","))...)
+		}
+	case agent.EventTypeToolCall:
+		if p, ok := evt.Payload.(*agent.ToolCallPayload); ok {
+			args := ""
+			if b, err := json.Marshal(p.Arguments); err == nil {
+				args = truncateForTrace(string(b), previewCap)
+			}
+			logger.InfoContext(ctx, "react: action", append(base,
+				"tool", p.ToolName, "step_index", p.StepIndex, "skipped", p.Skipped, "args", args)...)
+		}
+	case agent.EventTypeToolResult:
+		if p, ok := evt.Payload.(*agent.ToolResultPayload); ok {
+			outcome := "ok"
+			switch {
+			case !p.Success:
+				outcome = "failed"
+			case p.ResultSizeBytes == 0:
+				outcome = "empty"
+			}
+			logger.InfoContext(ctx, "react: observation", append(base,
+				"tool", p.ToolName, "step_index", p.StepIndex, "outcome", outcome,
+				"result_bytes", p.ResultSizeBytes, "latency_ms", p.LatencyMs,
+				"error_code", p.ErrorCode, "preview", truncateForTrace(p.ResultPreview, previewCap))...)
+		}
+	case agent.EventTypeUsage:
+		if p, ok := evt.Payload.(*agent.UsagePayload); ok {
+			logger.InfoContext(ctx, "react: usage", append(base,
+				"role", p.Role, "turn", p.TurnIndex, "model", p.Model, "available", p.Available,
+				"prompt_tokens", p.Usage.PromptTokens, "completion_tokens", p.Usage.CompletionTokens,
+				"total_tokens", p.Usage.TotalTokens)...)
+		}
+	case agent.EventTypeStatus:
+		if p, ok := evt.Payload.(*agent.StatusPayload); ok {
+			if p.Error != nil {
+				logger.InfoContext(ctx, "react: status", append(base, "state", p.State, "error", p.Error.Message)...)
+			} else {
+				logger.InfoContext(ctx, "react: status", append(base, "state", p.State)...)
+			}
+		}
+	case agent.EventTypeAgentCall, agent.EventTypeAgentResult, agent.EventTypeCitation:
+		logger.InfoContext(ctx, "react: event", base...)
+	}
 }
 
 // runDelegation streams a sub-agent under the current turn (OGA-419 G3). It
@@ -962,6 +1133,24 @@ func (e *eventEmitter) emitCitation(spanID string, sources []agent.CitationSourc
 		SpanID:  spanID,
 		Type:    agent.EventTypeCitation,
 		Payload: &agent.CitationPayload{Sources: sources},
+	})
+}
+
+// emitUsage emits a task/usage event carrying token usage for one ReAct
+// decision turn, the terminal assembly call, or the per-request aggregate
+// (OGA-420). available=false labels the counts as not reported by the proxy.
+func (e *eventEmitter) emitUsage(spanID, parentSpan, role string, turnIndex int, model string, usage agent.TokenUsage, available bool) {
+	e.emit(&agent.StreamEvent{
+		SpanID:       spanID,
+		ParentSpanID: parentSpan,
+		Type:         agent.EventTypeUsage,
+		Payload: &agent.UsagePayload{
+			Role:      role,
+			TurnIndex: turnIndex,
+			Model:     model,
+			Usage:     usage,
+			Available: available,
+		},
 	})
 }
 

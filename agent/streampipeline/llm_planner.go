@@ -53,7 +53,7 @@ func (p *LLMToolPlanner) Next(ctx context.Context, st *PlanState) (*Decision, er
 	}
 
 	if d.Final {
-		return &Decision{Done: true, Narrative: d.Thought}, nil
+		return &Decision{Done: true, Narrative: d.Thought, Usage: d.Usage, UsageAvailable: d.UsageAvailable}, nil
 	}
 
 	return &Decision{
@@ -64,6 +64,8 @@ func (p *LLMToolPlanner) Next(ctx context.Context, st *PlanState) (*Decision, er
 			Arguments: d.Arguments,
 			DependsOn: -1,
 		},
+		Usage:          d.Usage,
+		UsageAvailable: d.UsageAvailable,
 	}, nil
 }
 

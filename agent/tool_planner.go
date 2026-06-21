@@ -76,6 +76,11 @@ type PlannerConfig struct {
 
 	// MaxTokens caps LLM response tokens.
 	MaxTokens int
+
+	// Temperature overrides the sampling temperature for planning/decision
+	// calls (OGA-420). Pointer so 0.0 is distinguishable from unset (gateway
+	// default). Lets the cheap decision role be tuned independently of assembly.
+	Temperature *float64
 }
 
 // DefaultPlannerConfig returns conservative defaults.
@@ -313,23 +318,36 @@ func requestPlanContent(
 	cfg PlannerConfig,
 	messages []gateway.ChatMessage,
 ) (string, error) {
+	content, _, err := requestPlanContentUsage(ctx, gw, cfg, messages)
+	return content, err
+}
+
+// requestPlanContentUsage is requestPlanContent that also returns the LLM token
+// usage for the call (OGA-420). Usage is nil when the proxy did not report it.
+func requestPlanContentUsage(
+	ctx context.Context,
+	gw GatewayClient,
+	cfg PlannerConfig,
+	messages []gateway.ChatMessage,
+) (string, *gateway.Usage, error) {
 	req := &gateway.ChatCompletionRequest{
-		Model:     cfg.Model,
-		MaxTokens: cfg.MaxTokens,
-		Messages:  messages,
+		Model:       cfg.Model,
+		MaxTokens:   cfg.MaxTokens,
+		Temperature: cfg.Temperature,
+		Messages:    messages,
 	}
 	resp, err := gw.ChatCompletion(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("planning LLM call: %w", err)
+		return "", nil, fmt.Errorf("planning LLM call: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return "", errors.New("planning LLM call: no choices")
+		return "", resp.Usage, errors.New("planning LLM call: no choices")
 	}
 	content := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if content == "" {
-		return "", errors.New("planning LLM call: empty content")
+		return "", resp.Usage, errors.New("planning LLM call: empty content")
 	}
-	return content, nil
+	return content, resp.Usage, nil
 }
 
 // ParsePlan parses the LLM's JSON response into a ToolPlan, tolerating

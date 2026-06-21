@@ -51,6 +51,12 @@ const (
 
 	// EventTypeArtifact carries the final response content (token-streamed).
 	EventTypeArtifact EventType = "task/artifact"
+
+	// EventTypeUsage carries LLM token usage for one invocation in the ReAct
+	// loop (a per-turn decision call or the terminal assembly call) or the
+	// per-request aggregate (OGA-420). Distinct event so usage never bloats the
+	// content payloads and consumers can meter cost without parsing prose.
+	EventTypeUsage EventType = "task/usage"
 )
 
 // Task lifecycle states emitted in StatusPayload.State.
@@ -270,6 +276,55 @@ type ArtifactPayload struct {
 type ArtifactPart struct {
 	// Text is the content text.
 	Text string `json:"text,omitempty"`
+}
+
+// TokenUsage reports LLM token consumption for a single invocation or an
+// aggregate (OGA-420). Mirrors the gateway Usage shape but lives in the agent
+// package so the wire schema has one home alongside the StreamEvent envelope.
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// Add returns the element-wise sum of two usages (for the per-request aggregate).
+func (u TokenUsage) Add(o TokenUsage) TokenUsage {
+	return TokenUsage{
+		PromptTokens:     u.PromptTokens + o.PromptTokens,
+		CompletionTokens: u.CompletionTokens + o.CompletionTokens,
+		TotalTokens:      u.TotalTokens + o.TotalTokens,
+	}
+}
+
+// Usage event roles.
+const (
+	// UsageRoleDecision is one per-turn ReAct decision call.
+	UsageRoleDecision = "decision"
+	// UsageRoleAssembly is the terminal assembly call.
+	UsageRoleAssembly = "assembly"
+	// UsageRoleAggregate is the per-request sum of all decision + assembly calls.
+	UsageRoleAggregate = "aggregate"
+)
+
+// UsagePayload carries token usage for one LLM invocation (or the aggregate).
+type UsagePayload struct {
+	// Role is one of: decision, assembly, aggregate.
+	Role string `json:"role"`
+
+	// TurnIndex is the 0-based ReAct turn for a decision call; -1 for assembly
+	// and aggregate.
+	TurnIndex int `json:"turn_index"`
+
+	// Model is the model that served the call, when known (empty = gateway default).
+	Model string `json:"model,omitempty"`
+
+	// Usage is the token counts. Zero values when Available is false.
+	Usage TokenUsage `json:"usage"`
+
+	// Available is false when the proxy returned no usage for this call — the
+	// counts are then zero and MUST NOT be read as "0 tokens" (OGA-420: no
+	// fabricated usage). True when the counts are real.
+	Available bool `json:"available"`
 }
 
 // --- SpanTracker ---
