@@ -74,6 +74,21 @@ func strFromCtx(ctx context.Context, key contextKey) string {
 	return ""
 }
 
+// ContextWithTenant returns a context carrying the tenant id, exactly as the
+// runtime injects it from the X-Tenant-ID header before invoking a handler.
+// Exposed so kit handler unit tests (and in-process callers that invoke a
+// handler directly) can supply a tenant the handler reads via
+// TenantFromContext — without depending on the unexported context key.
+func ContextWithTenant(ctx context.Context, tenantID string) context.Context {
+	return context.WithValue(ctx, ctxKeyTenantID, tenantID)
+}
+
+// ContextWithPrincipal returns a context carrying the principal id, the
+// symmetric setter for PrincipalFromContext (see ContextWithTenant).
+func ContextWithPrincipal(ctx context.Context, principalID string) context.Context {
+	return context.WithValue(ctx, ctxKeyPrincipalID, principalID)
+}
+
 // ServeMCP is the HTTP handler for the MCP JSON-RPC transport. It decodes the
 // JSON-RPC envelope, injects the gateway-forwarded identity headers into the
 // handler context, dispatches tools/list, tools/call, and ping, and writes the
