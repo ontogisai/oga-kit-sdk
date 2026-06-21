@@ -26,14 +26,14 @@ func (f *fakeNextPlanner) Next(_ context.Context, st *PlanState) (*Decision, err
 	return f.decision, nil
 }
 
-func TestInvestigationLLMPlanner_SeedFirstThenDelegate(t *testing.T) {
+func TestInvestigationLLMPlanner_BatchedSeedThenDelegate(t *testing.T) {
 	inner := &fakeNextPlanner{decision: &Decision{
 		Narrative: "inner",
 		Step:      &ToolPlanStep{Name: "sop", ToolName: "kg_doc_content", DependsOn: -1},
 	}}
-	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner)
+	p := NewInvestigationLLMPlanner([]string{"chiller-1", "ahu-2"}, inner)
 
-	// Turn 0 (empty history) → deterministic seed kg_get_entity, with narrative.
+	// Turn 0 (empty history) → ONE batched kg_get_entity for ALL seeds, with narrative.
 	d0, err := p.Next(context.Background(), &PlanState{Query: "Is this justified?"})
 	if err != nil {
 		t.Fatalf("Next turn 0: %v", err)
@@ -41,11 +41,18 @@ func TestInvestigationLLMPlanner_SeedFirstThenDelegate(t *testing.T) {
 	if d0.Done || d0.Step == nil {
 		t.Fatalf("turn 0 should yield a seed step, got %+v", d0)
 	}
-	if d0.Step.ToolName != "kg_get_entity" || d0.Step.Arguments["entity_id"] != "chiller-1" || d0.Step.DependsOn != -1 {
-		t.Errorf("seed step = %+v, want kg_get_entity{chiller-1} DependsOn -1", d0.Step)
+	if d0.Step.ToolName != "kg_get_entity" || d0.Step.DependsOn != -1 {
+		t.Errorf("seed step = %+v, want kg_get_entity DependsOn -1", d0.Step)
+	}
+	ids, ok := d0.Step.Arguments["entity_ids"].([]string)
+	if !ok || len(ids) != 2 || ids[0] != "chiller-1" || ids[1] != "ahu-2" {
+		t.Errorf("batched seed entity_ids = %v, want [chiller-1 ahu-2]", d0.Step.Arguments["entity_ids"])
+	}
+	if _, single := d0.Step.Arguments["entity_id"]; single {
+		t.Error("batched seed must use entity_ids, not entity_id")
 	}
 	if d0.Narrative == "" {
-		t.Error("expected a non-empty narrative on the first seed turn")
+		t.Error("expected a non-empty narrative on the seed turn")
 	}
 	if inner.calls != 0 {
 		t.Errorf("inner planner must NOT be called while seeding, calls=%d", inner.calls)
@@ -54,7 +61,7 @@ func TestInvestigationLLMPlanner_SeedFirstThenDelegate(t *testing.T) {
 	// Turn 1 (one observation present) → delegate to the inner LLM planner.
 	d1, err := p.Next(context.Background(), &PlanState{
 		Query:   "Is this justified?",
-		History: []ToolStepResult{{ToolName: "kg_get_entity", Success: true, Content: `{"id":"chiller-1"}`}},
+		History: []ToolStepResult{{ToolName: "kg_get_entity", Success: true, Content: `[{"id":"chiller-1"},{"id":"ahu-2"}]`}},
 	})
 	if err != nil {
 		t.Fatalf("Next turn 1: %v", err)
@@ -65,16 +72,42 @@ func TestInvestigationLLMPlanner_SeedFirstThenDelegate(t *testing.T) {
 	if d1.Step == nil || d1.Step.ToolName != "kg_doc_content" {
 		t.Errorf("turn 1 should delegate to inner (kg_doc_content), got %+v", d1)
 	}
-	// The inner planner received the augmented query (plan complementary evidence).
 	if inner.gotState == nil || !strings.Contains(inner.gotState.Query, "ADDITIONAL evidence") {
 		t.Errorf("inner query missing augmentation:\n%v", inner.gotState)
+	}
+}
+
+// TestInvestigationLLMPlanner_SkipSeedWhenGrounded covers OGA-419 Option 1: when
+// the thread already grounded the seeds recently, the planner skips the fetch
+// and delegates to the inner planner on turn 0 with a "grounded earlier" note.
+func TestInvestigationLLMPlanner_SkipSeedWhenGrounded(t *testing.T) {
+	inner := &fakeNextPlanner{decision: &Decision{
+		Step: &ToolPlanStep{Name: "trend", ToolName: "kg_ts_read", DependsOn: -1},
+	}}
+	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, inner, WithSeedsAlreadyGrounded())
+
+	// Turn 0 (empty history) → NO seed fetch; delegate straight to inner.
+	d0, err := p.Next(context.Background(), &PlanState{Query: "Why this chiller?"})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner planner should be called on turn 0 when seeds grounded, calls=%d", inner.calls)
+	}
+	if d0.Step == nil || d0.Step.ToolName != "kg_ts_read" {
+		t.Errorf("expected delegation to inner (kg_ts_read), got %+v", d0)
+	}
+	if inner.gotState == nil ||
+		!strings.Contains(inner.gotState.Query, "already retrieved earlier in this") ||
+		!strings.Contains(inner.gotState.Query, "CURRENT live values") {
+		t.Errorf("inner query missing grounded-skip note:\n%v", inner.gotState)
 	}
 }
 
 func TestInvestigationLLMPlanner_NilInnerFinalizesAfterSeeds(t *testing.T) {
 	p := NewInvestigationLLMPlanner([]string{"chiller-1"}, nil)
 
-	// Seed turn.
+	// Batched seed turn.
 	d0, err := p.Next(context.Background(), &PlanState{Query: "q"})
 	if err != nil || d0.Step == nil || d0.Step.ToolName != "kg_get_entity" {
 		t.Fatalf("turn 0 should seed, got %+v err=%v", d0, err)
@@ -82,7 +115,7 @@ func TestInvestigationLLMPlanner_NilInnerFinalizesAfterSeeds(t *testing.T) {
 	// After seeds, nil inner → Done.
 	d1, err := p.Next(context.Background(), &PlanState{
 		Query:   "q",
-		History: []ToolStepResult{{ToolName: "kg_get_entity", Success: true, Content: "{}"}},
+		History: []ToolStepResult{{ToolName: "kg_get_entity", Success: true, Content: "[]"}},
 	})
 	if err != nil {
 		t.Fatalf("Next: %v", err)
@@ -92,31 +125,27 @@ func TestInvestigationLLMPlanner_NilInnerFinalizesAfterSeeds(t *testing.T) {
 	}
 }
 
-func TestInvestigationLLMPlanner_DedupAndCap(t *testing.T) {
+func TestInvestigationLLMPlanner_BatchDedupAndCap(t *testing.T) {
 	ids := []string{"a", "a", "", "b", "c", "d", "e", "f", "g"} // 7 distinct non-empty, cap 5
 	p := NewInvestigationLLMPlanner(ids, nil)
 
-	// Drive seed turns and collect the seeded entity ids.
-	var seeded []string
-	for i := 0; i < maxInvestigationEntities+1; i++ {
-		history := make([]ToolStepResult, i)
-		d, err := p.Next(context.Background(), &PlanState{History: history})
-		if err != nil {
-			t.Fatalf("Next %d: %v", i, err)
-		}
-		if d.Done {
-			break
-		}
-		if d.Step.ToolName != "kg_get_entity" {
-			t.Fatalf("turn %d not a seed: %+v", i, d.Step)
-		}
-		seeded = append(seeded, d.Step.Arguments["entity_id"].(string))
+	// One batched seed turn carrying the deduped, capped, blank-stripped ids.
+	d, err := p.Next(context.Background(), &PlanState{})
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if d.Step == nil || d.Step.ToolName != "kg_get_entity" {
+		t.Fatalf("turn 0 not a seed: %+v", d.Step)
+	}
+	seeded, ok := d.Step.Arguments["entity_ids"].([]string)
+	if !ok {
+		t.Fatalf("seed step missing entity_ids: %+v", d.Step.Arguments)
 	}
 	if len(seeded) != maxInvestigationEntities {
-		t.Fatalf("seed turns = %d, want %d (cap)", len(seeded), maxInvestigationEntities)
+		t.Fatalf("seeded ids = %d, want %d (cap)", len(seeded), maxInvestigationEntities)
 	}
-	if seeded[0] != "a" || seeded[1] != "b" {
-		t.Errorf("seeds = %v, want dedup + blanks dropped starting [a b ...]", seeded)
+	if seeded[0] != "a" || seeded[1] != "b" || seeded[2] != "c" {
+		t.Errorf("seeds = %v, want dedup + blanks dropped starting [a b c ...]", seeded)
 	}
 }
 
@@ -250,5 +279,33 @@ func TestBuildInvestigationPlannerQuery_NoAssemblyConstraints(t *testing.T) {
 	// No anchoring fields → passthrough.
 	if got := buildInvestigationPlannerQuery("plain", &investigationContext{}); got != "plain" {
 		t.Errorf("empty context should pass through: got %q", got)
+	}
+}
+
+// TestSeedsAlreadyGrounded covers the handler's metadata flag reader (OGA-419
+// Option 1). It must fail safe to "not grounded" on absence/ambiguity so the
+// seed re-fetches rather than wrongly skipping.
+func TestSeedsAlreadyGrounded(t *testing.T) {
+	cases := []struct {
+		name string
+		m    *agent.Message
+		want bool
+	}{
+		{"nil message", nil, false},
+		{"nil metadata", &agent.Message{}, false},
+		{"absent key", &agent.Message{Metadata: map[string]any{"x": "y"}}, false},
+		{"bool true", &agent.Message{Metadata: map[string]any{metadataKeySeedsGrounded: true}}, true},
+		{"bool false", &agent.Message{Metadata: map[string]any{metadataKeySeedsGrounded: false}}, false},
+		{"string true", &agent.Message{Metadata: map[string]any{metadataKeySeedsGrounded: "true"}}, true},
+		{"string false", &agent.Message{Metadata: map[string]any{metadataKeySeedsGrounded: "false"}}, false},
+		{"string other", &agent.Message{Metadata: map[string]any{metadataKeySeedsGrounded: "1"}}, false},
+		{"wrong type", &agent.Message{Metadata: map[string]any{metadataKeySeedsGrounded: 1}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := seedsAlreadyGrounded(tc.m); got != tc.want {
+				t.Errorf("seedsAlreadyGrounded = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

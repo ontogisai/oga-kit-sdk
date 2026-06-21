@@ -147,10 +147,18 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 		}
 		var planner Planner
 		if len(investigationIDs) > 0 {
-			// Option 2 (OGA-378 rework): guarantee grounding on the proposal's
-			// concrete seed entities, then let the agent's full-toolbox LLM
-			// planner add question-relevant evidence (SOP, history, trends).
-			planner = NewInvestigationLLMPlanner(investigationIDs, reactiveStreamPlanner(rt))
+			// Guarantee grounding on the proposal's concrete seed entities, then
+			// let the agent's full-toolbox LLM planner add question-relevant
+			// evidence (SOP, history, trends). The seed fetch is batched into one
+			// kg_get_entity call (OGA-419). When the thread already grounded these
+			// seeds recently (Frontier sets investigation_seeds_grounded from
+			// per-agent history recency + freshness TTL), skip the seed fetch and
+			// reason over the injected history instead.
+			var invOpts []InvestigationOption
+			if seedsAlreadyGrounded(msg.Params.Message) {
+				invOpts = append(invOpts, WithSeedsAlreadyGrounded())
+			}
+			planner = NewInvestigationLLMPlanner(investigationIDs, reactiveStreamPlanner(rt), invOpts...)
 		} else {
 			planner = reactiveStreamPlanner(rt)
 		}
@@ -279,6 +287,32 @@ func reactiveGroundingHints(profile *agent.DomainAgentProfile) []agent.Grounding
 // Mirrors the platform's stateless-investigation contract
 // (internal/agent/investigation_stateless.go) by value.
 const metadataKeyInvestigationContext = "investigation_context"
+
+// metadataKeySeedsGrounded is the boolean flag Frontier sets on a forwarded
+// investigation message when this conversation thread already grounded the
+// proposal's seed entities recently (within the freshness window, decided from
+// per-agent history recency). When set, the reactive investigation planner
+// skips the deterministic seed fetch and reasons over the injected per-agent
+// history instead (OGA-419). Accepts bool true or the string "true".
+const metadataKeySeedsGrounded = "investigation_seeds_grounded"
+
+// seedsAlreadyGrounded reports whether the inbound message carries the
+// investigation_seeds_grounded flag (set by Frontier). Absent/false → the seed
+// fetch runs as normal; the flag is a pure optimization signal, so any parse
+// ambiguity fails safe to "not grounded" (re-seed).
+func seedsAlreadyGrounded(m *agent.Message) bool {
+	if m == nil || m.Metadata == nil {
+		return false
+	}
+	switch v := m.Metadata[metadataKeySeedsGrounded].(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true"
+	default:
+		return false
+	}
+}
 
 // investigationContext is the local struct used to unmarshal the ENRICHED
 // investigation_context JSON forwarded by Frontier's Enricher (OGA-381 §6.3).
