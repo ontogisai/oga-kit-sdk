@@ -87,6 +87,13 @@ type NextStepDecision struct {
 	ToolName string
 	// Arguments is the parameter map for the chosen tool.
 	Arguments map[string]any
+	// Usage is the token usage for this decision call, summing the initial and
+	// (when triggered) the corrective-retry completion (OGA-420). Zero counts.
+	Usage TokenUsage
+	// UsageAvailable is true when the proxy reported usage for at least one of
+	// the decision completions. False → Usage is zero and must not be read as a
+	// real "0 tokens".
+	UsageAvailable bool
 }
 
 // nextStepWire is the JSON shape the model is asked to produce.
@@ -143,11 +150,24 @@ func RequestNextStep(
 		{Role: "user", Content: user},
 	}
 
-	content, err := requestPlanContent(ctx, gw, cfg, messages)
+	// Usage accumulator for this decision turn — sums the initial completion and
+	// the corrective-retry completion when one is needed (OGA-420).
+	var usage TokenUsage
+	var usageAvail bool
+	accUsage := func(u *gateway.Usage) {
+		if tu, ok := UsageFromGateway(u); ok {
+			usage = usage.Add(tu)
+			usageAvail = true
+		}
+	}
+
+	content, u1, err := requestPlanContentUsage(ctx, gw, cfg, messages)
+	accUsage(u1)
 	if err != nil {
 		return nil, err
 	}
 	if d, perr := parseNextStep(content); perr == nil {
+		d.Usage, d.UsageAvailable = usage, usageAvail
 		return d, nil
 	}
 
@@ -158,7 +178,8 @@ func RequestNextStep(
 		gateway.ChatMessage{Role: "assistant", Content: content},
 		gateway.ChatMessage{Role: "user", Content: nextStepCorrection},
 	)
-	content2, err2 := requestPlanContent(ctx, gw, cfg, corrective)
+	content2, u2, err2 := requestPlanContentUsage(ctx, gw, cfg, corrective)
+	accUsage(u2)
 	if err2 != nil {
 		return nil, fmt.Errorf("next-step corrective retry: %w", err2)
 	}
@@ -166,6 +187,7 @@ func RequestNextStep(
 	if perr2 != nil {
 		return nil, fmt.Errorf("parse next-step JSON (after corrective retry): %w", perr2)
 	}
+	d.Usage, d.UsageAvailable = usage, usageAvail
 	return d, nil
 }
 

@@ -119,6 +119,13 @@ type Decision struct {
 
 	// Step is the action to execute this turn. Nil iff Done.
 	Step *ToolPlanStep
+
+	// Usage is the LLM token usage the planner spent producing this decision
+	// (OGA-420). Zero for non-LLM planners (e.g. precomputed seed steps).
+	Usage agent.TokenUsage
+
+	// UsageAvailable is true when Usage carries real counts from the proxy.
+	UsageAvailable bool
 }
 
 // PlanNarrative is the human-readable text emitted as a task/reasoning event.

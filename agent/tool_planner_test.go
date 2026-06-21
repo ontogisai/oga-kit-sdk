@@ -23,6 +23,7 @@ type fakeGateway struct {
 type chatResponse struct {
 	content string
 	err     error
+	usage   *gateway.Usage
 }
 
 type toolResponse struct {
@@ -49,6 +50,7 @@ func (f *fakeGateway) ChatCompletion(_ context.Context, req *gateway.ChatComplet
 		Choices: []gateway.ChatChoice{
 			{Message: gateway.ChatMessage{Role: "assistant", Content: r.content}},
 		},
+		Usage: r.usage,
 	}, nil
 }
 

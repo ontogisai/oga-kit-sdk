@@ -30,6 +30,21 @@ func traceEnabled() bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
+// proactiveReActLogEnabled reports whether per-event ReAct-loop logging on the
+// stream→collect path (RunSync / RunText) is on (OGA-420 Gap 3). OFF by default,
+// opt-in via OGA_PROACTIVE_REACT_LOG ("1"/"true"). When on, runArtifact logs the
+// actual drained events (Thought, plan, tool_call, tool_result, usage, terminal
+// status) at Info level so a proactive proposal's reasoning is reconstructable
+// from logs without a UI consumer. Independent of OGA_AGENT_TRACE so the
+// proactive loop can be traced without enabling full prompt tracing.
+//
+// Wiring mirrors OGA_AGENT_TRACE: set it on the deploying process's env and the
+// platform forwards it to the sidecar container (internal/sidecar Manager.buildEnv).
+func proactiveReActLogEnabled() bool {
+	v := os.Getenv("OGA_PROACTIVE_REACT_LOG")
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // truncateForTrace bounds a string logged under trace so a runaway prompt or
 // artifact cannot flood the log. The full value is emitted up to the cap; the
 // suffix records how many bytes were elided.

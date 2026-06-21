@@ -151,6 +151,23 @@ type ChatCompletionRequest struct {
 	MaxTokens int           `json:"max_tokens,omitempty"`
 	Stream    bool          `json:"stream,omitempty"`
 	RequestID string        `json:"-"`
+
+	// Temperature overrides the sampling temperature. Pointer so 0.0 (fully
+	// deterministic) is distinguishable from "unset" (use the gateway default).
+	Temperature *float64 `json:"temperature,omitempty"`
+
+	// StreamOptions tunes streaming behavior. Set IncludeUsage to ask the proxy
+	// to emit a final usage-bearing chunk (OGA-420) so streaming responses
+	// surface token counts instead of dropping them. Ignored when Stream is false.
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+}
+
+// StreamOptions tunes a streaming chat completion.
+type StreamOptions struct {
+	// IncludeUsage requests a final chunk carrying token usage (OpenAI-compatible
+	// stream_options.include_usage). The proxy emits it after the content chunks
+	// with empty Choices and a populated Usage.
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 // ChatMessage is a single message in a chat completion request.
@@ -191,6 +208,9 @@ func (c *PlatformGatewayClient) ChatCompletion(ctx context.Context, req *ChatCom
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
 	}
+	if req.Temperature != nil {
+		body["temperature"] = *req.Temperature
+	}
 
 	respData, err := c.post(ctx, "/llm/v1/chat/completions", body)
 	if err != nil {
@@ -216,6 +236,12 @@ func (c *PlatformGatewayClient) ChatCompletionStream(ctx context.Context, req *C
 	}
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
+	}
+	if req.Temperature != nil {
+		body["temperature"] = *req.Temperature
+	}
+	if req.StreamOptions != nil {
+		body["stream_options"] = req.StreamOptions
 	}
 
 	jsonBody, err := json.Marshal(body)
@@ -264,6 +290,10 @@ func (c *PlatformGatewayClient) ChatCompletionStream(ctx context.Context, req *C
 type ChatChunk struct {
 	ID      string            `json:"id"`
 	Choices []ChatChunkChoice `json:"choices"`
+
+	// Usage is populated only on the final chunk when the request set
+	// StreamOptions.IncludeUsage (OGA-420). Nil on content chunks.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // ChatChunkChoice is a choice within a streaming chunk.
