@@ -121,7 +121,24 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 	}
 	planner := NewLLMToolPlanner(deps.Gateway, agent.DefaultPlannerConfig())
 
-	decision, _, err := RunSync[agent.ActionDecision](ctx, NewPipeline(), deps, input, planner, schema)
+	decision, _, usage, usageAvail, err := RunSyncWithUsage[agent.ActionDecision](ctx, NewPipeline(), deps, input, planner, schema)
+	// Log the proactive reasoning's token cost regardless of outcome (OGA-420
+	// Gap 2/4): the proactive stream→collect path has no UI consumer, so this
+	// always-on aggregate line is the only place its cost is observable. Emitted
+	// even on error (tokens were still spent) and labelled when the proxy
+	// reported no usage. The per-turn breakdown is available under
+	// OGA_PROACTIVE_REACT_LOG.
+	if usageAvail {
+		slog.InfoContext(ctx, "proactive reasoning token usage",
+			"agent_id", profile.AgentID,
+			"tenant_id", event.TenantID,
+			"event_type", event.EventType,
+			"entity_id", event.EntityID,
+			"tokens_in", usage.PromptTokens,
+			"tokens_out", usage.CompletionTokens,
+			"tokens_total", usage.TotalTokens,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("proactive reasoning: %w", err)
 	}

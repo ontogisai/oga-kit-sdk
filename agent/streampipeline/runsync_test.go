@@ -1,8 +1,11 @@
 package streampipeline
 
 import (
+	"context"
 	"testing"
 
+	"github.com/ontogisai/oga-kit-sdk/agent"
+	"github.com/ontogisai/oga-kit-sdk/gateway"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -72,4 +75,62 @@ func TestValidateAndUnmarshal(t *testing.T) {
 			t.Fatal("expected error when no JSON object present")
 		}
 	})
+}
+
+// TestRunSyncWithUsage_AggregatesUsage verifies the proactive-path entry point
+// returns the per-request token aggregate (OGA-420 Gap 4). A no-step plan goes
+// straight to assembly; the fake reports usage on the assembly stream, so the
+// aggregate equals that usage and is available.
+func TestRunSyncWithUsage_AggregatesUsage(t *testing.T) {
+	schema := compile(t, map[string]any{
+		"type":     "object",
+		"required": []any{"action_type", "reason"},
+		"properties": map[string]any{
+			"action_type": map[string]any{"type": "string"},
+			"reason":      map[string]any{"type": "string"},
+		},
+	})
+	gw := &fakeGateway{
+		streamChunks: []string{`{"action_type":"create","reason":"x"}`},
+		streamUsage:  &gateway.Usage{PromptTokens: 80, CompletionTokens: 20, TotalTokens: 100},
+	}
+	planner := &scriptedPlanner{} // Done on turn 0 → straight to assembly
+	deps := Deps{Gateway: gw, Config: DefaultConfig()}
+
+	out, _, usage, avail, err := RunSyncWithUsage[decision](
+		context.Background(), NewPipeline(), deps,
+		Input{Query: "q", Actor: agent.EventActor{ID: "a"}}, planner, schema)
+	if err != nil {
+		t.Fatalf("RunSyncWithUsage: %v", err)
+	}
+	if out.ActionType != "create" {
+		t.Errorf("decoded = %+v, want action_type=create", out)
+	}
+	if !avail || usage.TotalTokens != 100 {
+		t.Errorf("usage = %+v (avail=%v), want total 100 available", usage, avail)
+	}
+}
+
+// TestRunSync_StillWorks verifies the back-compat wrapper delegates correctly.
+func TestRunSync_StillWorks(t *testing.T) {
+	schema := compile(t, map[string]any{
+		"type":     "object",
+		"required": []any{"action_type", "reason"},
+		"properties": map[string]any{
+			"action_type": map[string]any{"type": "string"},
+			"reason":      map[string]any{"type": "string"},
+		},
+	})
+	gw := &fakeGateway{streamChunks: []string{`{"action_type":"create","reason":"x"}`}}
+	deps := Deps{Gateway: gw, Config: DefaultConfig()}
+
+	out, _, err := RunSync[decision](
+		context.Background(), NewPipeline(), deps,
+		Input{Query: "q", Actor: agent.EventActor{ID: "a"}}, &scriptedPlanner{}, schema)
+	if err != nil {
+		t.Fatalf("RunSync: %v", err)
+	}
+	if out.ActionType != "create" {
+		t.Errorf("decoded = %+v, want action_type=create", out)
+	}
 }
