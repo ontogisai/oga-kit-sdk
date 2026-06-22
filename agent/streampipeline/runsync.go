@@ -69,8 +69,17 @@ func RunSyncWithUsage[T any](
 		}
 	}
 
-	// Attempt 1.
-	raw, citations, u1, a1, err := p.runArtifact(ctx, deps, jsonInput(input, schema, ""), planner)
+	// Gather evidence ONCE. The ReAct loop + tools run exactly one time; a
+	// schema-validation retry below re-assembles against this SAME transcript
+	// rather than re-running tools (OGA-423 Gap 2A).
+	results, citations, du, da, err := p.gatherSync(ctx, deps, input, planner)
+	acc(du, da)
+	if err != nil {
+		return zero[T](), citations, agg, aggAvail, err
+	}
+
+	// Attempt 1: assemble + validate.
+	raw, u1, a1, err := p.assembleSync(ctx, deps, jsonInput(input, schema, ""), results)
 	acc(u1, a1)
 	if err != nil {
 		return zero[T](), citations, agg, aggAvail, err
@@ -78,22 +87,22 @@ func RunSyncWithUsage[T any](
 	if parsed, perr := validateAndUnmarshal[T](raw, schema); perr == nil {
 		return parsed, citations, agg, aggAvail, nil
 	} else if deps.Logger != nil {
-		deps.Logger.WarnContext(ctx, "structured output validation failed; retrying stricter",
+		deps.Logger.WarnContext(ctx, "structured output validation failed; retrying assembly only (tools not re-run)",
 			"error", perr, "tenant_id", input.TenantID)
-		_ = perr
 	}
 
-	// Attempt 2: stricter retry, seeding the prior (bad) output + the error.
+	// Attempt 2: re-ASSEMBLE only against the same transcript with a stricter
+	// prompt seeding the prior (bad) output. Tools are NOT re-run.
 	retryErrHint := "previous attempt produced output that failed schema validation"
-	raw2, citations2, u2, a2, err := p.runArtifact(ctx, deps, jsonInput(input, schema, retryErrHint+": "+raw), planner)
+	raw2, u2, a2, err := p.assembleSync(ctx, deps, jsonInput(input, schema, retryErrHint+": "+raw), results)
 	acc(u2, a2)
 	if err != nil {
-		return zero[T](), citations2, agg, aggAvail, err
+		return zero[T](), citations, agg, aggAvail, err
 	}
 	if parsed, perr := validateAndUnmarshal[T](raw2, schema); perr == nil {
-		return parsed, citations2, agg, aggAvail, nil
+		return parsed, citations, agg, aggAvail, nil
 	} else {
-		return zero[T](), citations2, agg, aggAvail, fmt.Errorf("%w: %v", ErrSchemaValidation, perr)
+		return zero[T](), citations, agg, aggAvail, fmt.Errorf("%w: %v", ErrSchemaValidation, perr)
 	}
 }
 
@@ -178,18 +187,63 @@ func validateAndUnmarshal[T any](raw string, schema *jsonschema.Schema) (T, erro
 	if err := json.Unmarshal([]byte(jsonText), &generic); err != nil {
 		return zero[T](), fmt.Errorf("unmarshal generic: %w", err)
 	}
+
+	// Defense-in-depth normalization (OGA-423 Gap 2B): coerce a top-level
+	// "reasoning" emitted as an array of strings (a common LLM tic when the
+	// prompt suggests bullet points) into a single newline-joined string so it
+	// satisfies a string-typed schema without forcing a stricter retry. No-op
+	// when reasoning is absent or not an all-string array.
+	coerced := false
+	if m, ok := generic.(map[string]any); ok {
+		coerced = coerceReasoningArray(m)
+	}
+
 	if schema != nil {
 		if err := schema.Validate(generic); err != nil {
 			return zero[T](), fmt.Errorf("schema validate: %w", err)
 		}
 	}
 
-	// Unmarshal into the typed target.
+	// Unmarshal into the typed target. Use the original bytes on the common
+	// (non-coerced) path to preserve exact numeric encoding; only re-marshal the
+	// coerced generic when a normalization actually changed the value.
+	src := []byte(jsonText)
+	if coerced {
+		if b, err := json.Marshal(generic); err == nil {
+			src = b
+		}
+	}
 	var out T
-	if err := json.Unmarshal([]byte(jsonText), &out); err != nil {
+	if err := json.Unmarshal(src, &out); err != nil {
 		return zero[T](), fmt.Errorf("unmarshal typed: %w", err)
 	}
 	return out, nil
+}
+
+// coerceReasoningArray normalizes a top-level "reasoning" field emitted as an
+// array of strings into a single newline-joined string, returning true when it
+// changed the map. It is a no-op when "reasoning" is absent, not an array, or
+// not composed entirely of strings (so a schema that legitimately wants an
+// array is left untouched). See OGA-423 Gap 2B.
+func coerceReasoningArray(m map[string]any) bool {
+	v, ok := m["reasoning"]
+	if !ok {
+		return false
+	}
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return false
+	}
+	parts := make([]string, 0, len(arr))
+	for _, e := range arr {
+		s, ok := e.(string)
+		if !ok {
+			return false // not an all-string array — leave untouched
+		}
+		parts = append(parts, s)
+	}
+	m["reasoning"] = strings.Join(parts, "\n")
+	return true
 }
 
 // extractJSONObject strips markdown code fences and returns the substring from

@@ -30,6 +30,13 @@ type fakeGateway struct {
 	streamUsage     *gateway.Usage
 	chatReqs        []*gateway.ChatCompletionRequest
 
+	// streamChunksSeq, when non-empty, supplies a DISTINCT chunk-set per
+	// ChatCompletionStream call (clamped to the last set once exhausted). Lets a
+	// test return bad JSON on the first assembly and good JSON on the retry
+	// (OGA-423 Gap 2A). When nil, streamChunks is used for every call.
+	streamChunksSeq [][]string
+	streamCallIdx   int
+
 	// delegateRaw holds JSON-encoded sub-agent StreamEvents yielded by
 	// InvokeAgentStream (OGA-419 G3 delegation tests). delegateErr, when set,
 	// is returned instead. delegateCalls records the agent names invoked.
@@ -78,11 +85,20 @@ func (f *fakeGateway) ChatCompletionStream(_ context.Context, req *gateway.ChatC
 	if f.streamErr != nil {
 		return nil, f.streamErr
 	}
-	if len(f.streamChunks) == 0 {
+	chunks := f.streamChunks
+	if len(f.streamChunksSeq) > 0 {
+		i := f.streamCallIdx
+		if i >= len(f.streamChunksSeq) {
+			i = len(f.streamChunksSeq) - 1
+		}
+		chunks = f.streamChunksSeq[i]
+		f.streamCallIdx++
+	}
+	if len(chunks) == 0 {
 		return nil, errors.New("no stream chunks configured")
 	}
-	ch := make(chan *gateway.ChatChunk, len(f.streamChunks)+1)
-	for _, chunk := range f.streamChunks {
+	ch := make(chan *gateway.ChatChunk, len(chunks)+1)
+	for _, chunk := range chunks {
 		ch <- &gateway.ChatChunk{
 			Choices: []gateway.ChatChunkChoice{
 				{Delta: gateway.ChatDelta{Content: chunk}},

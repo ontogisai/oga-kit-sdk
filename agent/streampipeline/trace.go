@@ -15,7 +15,11 @@ import (
 //     are observable (e.g. the exact kg_ts_read source_id that was queried,
 //     which is the usual reason a time-series read comes back empty);
 //   - the effective reasoning prompt (system + user) sent to the assembly LLM;
-//   - the stream-collect outcome (chunk count + assembled artifact size).
+//   - the stream-collect outcome (chunk count + assembled artifact size);
+//   - the per-turn ReAct loop (Thought, plan, tool_call, tool_result, usage,
+//     terminal status) on the stream→collect path — OGA_AGENT_TRACE implies the
+//     proactive ReAct log too (OGA-423 Gap 1), so a single flag surfaces the
+//     turn-by-turn reasoning + decisions, not just the final assembly prompt.
 //
 // These lines can contain full prompts and tenant data, so they are gated
 // behind the flag rather than emitted in normal operation. Enable for demos and
@@ -35,8 +39,9 @@ func traceEnabled() bool {
 // opt-in via OGA_PROACTIVE_REACT_LOG ("1"/"true"). When on, runArtifact logs the
 // actual drained events (Thought, plan, tool_call, tool_result, usage, terminal
 // status) at Info level so a proactive proposal's reasoning is reconstructable
-// from logs without a UI consumer. Independent of OGA_AGENT_TRACE so the
-// proactive loop can be traced without enabling full prompt tracing.
+// from logs without a UI consumer. OGA_AGENT_TRACE also enables this (OGA-423
+// Gap 1); this flag stays as the narrower opt-in for the ReAct log WITHOUT the
+// full prompt tracing OGA_AGENT_TRACE adds.
 //
 // Wiring mirrors OGA_AGENT_TRACE: set it on the deploying process's env and the
 // platform forwards it to the sidecar container (internal/sidecar Manager.buildEnv).

@@ -235,9 +235,83 @@ func (p *Pipeline) runInternal(
 	rootSpan := tracker.RootSpan()
 	emitter := newEmitter(events, uuid.New().String(), input.Actor)
 
-	// ReAct loop: decide ONE action per turn against the full observation
-	// transcript, execute it, observe, repeat — until the planner finalizes or
-	// the step budget / no-progress guard stops it (OGA-419).
+	// ReAct loop (OGA-419): gather evidence one action per turn. Extracted into
+	// reactLoop so the synchronous RunSync path (gatherSync) reuses the exact
+	// same engine, and a schema-validation retry re-assembles WITHOUT re-running
+	// tools (OGA-423 Gap 2A).
+	g := p.reactLoop(ctx, deps, input, planner, cfg, logger, tracker, rootSpan, emitter, gw)
+	if g.terminal != nil {
+		return g.terminal // reactLoop already emitted the terminal status event
+	}
+	if g.plainAnswer {
+		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter, g.plainReason)
+	}
+
+	// Assembly.
+	emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, "Assembling response...", false)
+	asmUsage, asmAvail, err := p.streamAssembly(ctx, gw, input, cfg, tracker, rootSpan, emitter, g.results)
+	if err != nil {
+		emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
+			Code:    -32000,
+			Message: "assembly failed: " + err.Error(),
+		})
+		return fmt.Errorf("assembly: %w", err)
+	}
+	aggUsage, aggUsageAvail := g.decisionUsage, g.usageAvail
+	if asmAvail {
+		aggUsage = aggUsage.Add(asmUsage)
+		aggUsageAvail = true
+	}
+
+	// Consolidated citation.
+	if len(g.citations) > 0 {
+		emitter.emitCitation(rootSpan, g.citations)
+	}
+
+	// Per-request token-usage aggregate (OGA-420).
+	emitter.emitUsage(tracker.ChildSpan(rootSpan), rootSpan, agent.UsageRoleAggregate, -1, input.AssemblyModel, aggUsage, aggUsageAvail)
+
+	// Final status.
+	emitter.emitStatus(rootSpan, agent.TaskStateCompleted, nil)
+	return nil
+}
+
+// gatherResult is the output of the ReAct evidence loop (reactLoop), shared by
+// the streaming entry point (runInternal) and the synchronous entry point
+// (gatherSync). It carries the gathered transcript + consolidated citations +
+// per-turn decision usage, plus two control signals: plainAnswer (first-turn
+// planning failed with no evidence → caller answers directly from the model) and
+// terminal (the loop already emitted a failed/canceled status and the caller
+// must return this error without assembling).
+type gatherResult struct {
+	results       []ToolStepResult
+	citations     []agent.CitationSource
+	decisionUsage agent.TokenUsage
+	usageAvail    bool
+	plainAnswer   bool
+	plainReason   string
+	terminal      error
+}
+
+// reactLoop runs the ReAct evidence loop: decide ONE action per turn against the
+// full observation transcript, execute it, observe, repeat — until the planner
+// finalizes or the step budget / no-progress guard stops it (OGA-419). It emits
+// every per-turn event (reasoning, plan, tool_call, tool_result, citation,
+// usage) to the supplied emitter and returns the gathered transcript. It does
+// NOT perform the final assembly — the caller owns that, which lets RunSync
+// re-assemble on a schema-validation failure without re-running tools (OGA-423).
+func (p *Pipeline) reactLoop(
+	ctx context.Context,
+	deps Deps,
+	input Input,
+	planner Planner,
+	cfg Config,
+	logger *slog.Logger,
+	tracker *agent.SpanTracker,
+	rootSpan string,
+	emitter *eventEmitter,
+	gw PlatformAccess,
+) gatherResult {
 	plannerQuery := input.Query
 	if strings.TrimSpace(input.PlannerQuery) != "" {
 		plannerQuery = input.PlannerQuery
@@ -247,9 +321,8 @@ func (p *Pipeline) runInternal(
 	allCitations := make([]agent.CitationSource, 0)
 	decided := make([]ToolPlanStep, 0, cfg.MaxSteps) // for the evolving task/plan
 
-	// Per-request token-usage aggregate (OGA-420): summed across every per-turn
-	// decision call and the terminal assembly call. Emitted as a final
-	// task/usage{aggregate} so consumers meter cost without summing client-side.
+	// Per-request decision token-usage aggregate (OGA-420): summed across every
+	// per-turn decision call. The caller folds in the assembly usage.
 	var aggUsage agent.TokenUsage
 	var aggUsageAvail bool
 
@@ -282,17 +355,20 @@ func (p *Pipeline) runInternal(
 					Code:    -32000,
 					Message: "planning failed: " + err.Error(),
 				})
-				return fmt.Errorf("planner.Next: %w", err)
+				return gatherResult{terminal: fmt.Errorf("planner.Next: %w", err)}
 			}
 			// No observations yet → degrade to a plain LLM answer (mirrors the
-			// pre-OGA-419 fallback). If the gateway is genuinely down, the
-			// assembly call inside runPlainAnswer fails and surfaces
-			// task/status{failed}, so a real transport failure is never masked.
+			// pre-OGA-419 fallback). The caller answers directly from the model;
+			// if the gateway is genuinely down its assembly call fails and
+			// surfaces task/status{failed}, so a real transport failure is never
+			// masked.
 			if len(results) == 0 {
 				logger.WarnContext(ctx, "streampipeline: first-turn planning failed, falling back to plain answer",
 					"error", err)
-				return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter,
-					"Tool planning was unavailable; answering directly from the model.")
+				return gatherResult{
+					plainAnswer: true,
+					plainReason: "Tool planning was unavailable; answering directly from the model.",
+				}
 			}
 			// Mid-loop failure with evidence already gathered → stop gathering
 			// and assemble honestly from what we have (Property 4 — never
@@ -308,9 +384,7 @@ func (p *Pipeline) runInternal(
 		}
 
 		// Per-turn decision token usage (OGA-420), folded into the per-request
-		// aggregate. Emitted as its own event only when the proxy reported usage
-		// (no per-turn noise when usage is unavailable — the always-emitted
-		// aggregate still labels the overall availability).
+		// aggregate. Emitted as its own event only when the proxy reported usage.
 		if decision.UsageAvailable {
 			aggUsage = aggUsage.Add(decision.Usage)
 			aggUsageAvail = true
@@ -329,7 +403,7 @@ func (p *Pipeline) runInternal(
 				Code:    -32000,
 				Message: "cancelled: " + ctx.Err().Error(),
 			})
-			return ctx.Err()
+			return gatherResult{terminal: ctx.Err()}
 		}
 
 		step := *decision.Step
@@ -386,7 +460,7 @@ func (p *Pipeline) runInternal(
 				Code:    -32000,
 				Message: fmt.Sprintf("required step %q failed: %s", step.Name, result.Error),
 			})
-			return fmt.Errorf("required step %q failed: %s", step.Name, result.Error)
+			return gatherResult{terminal: fmt.Errorf("required step %q failed: %s", step.Name, result.Error)}
 		}
 
 		results = append(results, result)
@@ -399,33 +473,12 @@ func (p *Pipeline) runInternal(
 		}
 	}
 
-	// 3. Assembly
-	emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, "Assembling response...", false)
-
-	asmUsage, asmAvail, err := p.streamAssembly(ctx, gw, input, cfg, tracker, rootSpan, emitter, results)
-	if err != nil {
-		emitter.emitStatus(rootSpan, agent.TaskStateFailed, &agent.StatusError{
-			Code:    -32000,
-			Message: "assembly failed: " + err.Error(),
-		})
-		return fmt.Errorf("assembly: %w", err)
+	return gatherResult{
+		results:       results,
+		citations:     allCitations,
+		decisionUsage: aggUsage,
+		usageAvail:    aggUsageAvail,
 	}
-	if asmAvail {
-		aggUsage = aggUsage.Add(asmUsage)
-		aggUsageAvail = true
-	}
-
-	// 4. Consolidated citation
-	if len(allCitations) > 0 {
-		emitter.emitCitation(rootSpan, allCitations)
-	}
-
-	// 5. Per-request token-usage aggregate (OGA-420).
-	emitter.emitUsage(tracker.ChildSpan(rootSpan), rootSpan, agent.UsageRoleAggregate, -1, input.AssemblyModel, aggUsage, aggUsageAvail)
-
-	// 6. Final status
-	emitter.emitStatus(rootSpan, agent.TaskStateCompleted, nil)
-	return nil
 }
 
 // runPlainAnswer is invoked when the planner returns 0 steps (e.g., trivial
@@ -657,7 +710,11 @@ func (p *Pipeline) runArtifact(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	reactLog := proactiveReActLogEnabled()
+	// Per-turn ReAct logging fires under either the dedicated proactive flag or
+	// the general agent-trace flag (OGA-423 Gap 1) — so OGA_AGENT_TRACE alone
+	// surfaces the turn-by-turn reasoning + decisions, not just the assembly
+	// prompt.
+	reactLog := proactiveReActLogEnabled() || traceEnabled()
 
 	for evt := range events {
 		switch evt.Type {
@@ -692,6 +749,114 @@ func (p *Pipeline) runArtifact(
 		)
 	}
 	return final.artifact.String(), final.citations, final.usage, final.usageAvail, err
+}
+
+// gatherSync runs the ReAct evidence loop buffered (no final assembly), draining
+// the event stream for optional per-turn react logging, and returns the gathered
+// transcript + consolidated citations + per-turn decision usage. It backs
+// RunSync's gather-once / assemble-twice contract so a schema-validation retry
+// re-assembles WITHOUT re-running tools (OGA-423 Gap 2A).
+func (p *Pipeline) gatherSync(
+	ctx context.Context,
+	deps Deps,
+	input Input,
+	planner Planner,
+) ([]ToolStepResult, []agent.CitationSource, agent.TokenUsage, bool, error) {
+	cfg := deps.Config
+	if cfg.ToolTimeout == 0 {
+		cfg = DefaultConfig()
+	}
+	if cfg.MaxSteps <= 0 {
+		cfg.MaxSteps = DefaultConfig().MaxSteps
+	}
+	if cfg.NoProgressLimit <= 0 {
+		cfg.NoProgressLimit = DefaultConfig().NoProgressLimit
+	}
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	tracker := agent.NewSpanTracker("")
+	rootSpan := tracker.RootSpan()
+	events := make(chan *agent.StreamEvent, 64)
+	emitter := newEmitter(events, uuid.New().String(), input.Actor)
+
+	var g gatherResult
+	done := make(chan struct{})
+	go func() {
+		g = p.reactLoop(ctx, deps, input, planner, cfg, logger, tracker, rootSpan, emitter, deps.Gateway)
+		close(events)
+		close(done)
+	}()
+
+	reactLog := proactiveReActLogEnabled() || traceEnabled()
+	for evt := range events {
+		if reactLog {
+			logDrainedEvent(ctx, logger, input, evt, cfg)
+		}
+	}
+	<-done
+
+	if g.terminal != nil {
+		return nil, nil, agent.TokenUsage{}, false, g.terminal
+	}
+	return g.results, g.citations, g.decisionUsage, g.usageAvail, nil
+}
+
+// assembleSync runs ONLY the final assembly LLM call against a PRE-GATHERED
+// transcript and returns the assembled artifact text + its token usage. It does
+// NOT run the ReAct loop or execute any tool — RunSync uses it to retry a failed
+// schema validation without re-executing tools (OGA-423 Gap 2A).
+func (p *Pipeline) assembleSync(
+	ctx context.Context,
+	deps Deps,
+	input Input,
+	results []ToolStepResult,
+) (string, agent.TokenUsage, bool, error) {
+	cfg := deps.Config
+	if cfg.ToolTimeout == 0 {
+		cfg = DefaultConfig()
+	}
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	tracker := agent.NewSpanTracker("")
+	rootSpan := tracker.RootSpan()
+	events := make(chan *agent.StreamEvent, 64)
+	emitter := newEmitter(events, uuid.New().String(), input.Actor)
+
+	reactLog := proactiveReActLogEnabled() || traceEnabled()
+
+	type asmOut struct {
+		usage agent.TokenUsage
+		avail bool
+		err   error
+	}
+	res := make(chan asmOut, 1)
+	go func() {
+		u, a, err := p.streamAssembly(ctx, deps.Gateway, input, cfg, tracker, rootSpan, emitter, results)
+		close(events)
+		res <- asmOut{usage: u, avail: a, err: err}
+	}()
+
+	var sb strings.Builder
+	for evt := range events {
+		if evt.Type == agent.EventTypeArtifact {
+			if pl, ok := evt.Payload.(*agent.ArtifactPayload); ok {
+				for _, part := range pl.Parts {
+					sb.WriteString(part.Text)
+				}
+			}
+		}
+		if reactLog {
+			logDrainedEvent(ctx, logger, input, evt, cfg)
+		}
+	}
+	o := <-res
+	return sb.String(), o.usage, o.avail, o.err
 }
 
 // logDrainedEvent emits one structured log line for a drained StreamEvent on
