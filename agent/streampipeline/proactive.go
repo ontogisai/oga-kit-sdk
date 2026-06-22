@@ -353,6 +353,7 @@ func proactiveAssemblyPrompt(p *agent.DomainAgentProfile, candidates []agent.Act
 	b.WriteString("Set action_type to your chosen action's name. ")
 	b.WriteString("When the action declares a payload schema above, set payload to an object that satisfies it — ")
 	b.WriteString("include EVERY required field and use ONLY allowed enum values for constrained fields. ")
-	b.WriteString("Set reasoning to your justification (including why no_action, if chosen).")
+	b.WriteString("Set reasoning to a SINGLE short justification string — NOT a list/array — including why no_action if chosen; ")
+	b.WriteString("put any supporting bullet points in reasoning_facts (an array of strings).")
 	return b.String()
 }
