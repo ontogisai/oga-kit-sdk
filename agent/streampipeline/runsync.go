@@ -39,13 +39,44 @@ func RunSync[T any](
 	planner Planner,
 	schema *jsonschema.Schema,
 ) (T, []agent.CitationSource, error) {
+	out, citations, _, _, err := RunSyncWithUsage[T](ctx, p, deps, input, planner, schema)
+	return out, citations, err
+}
+
+// RunSyncWithUsage is RunSync that also returns the per-request token-usage
+// aggregate (OGA-420) summed across the initial attempt and the stricter
+// validation retry (both cost tokens). usageAvailable is false when the proxy
+// reported no usage on any attempt — the counts are then zero and must not be
+// read as a real "0 tokens". The proactive path uses this to log/meter the cost
+// of a proposal's reasoning.
+func RunSyncWithUsage[T any](
+	ctx context.Context,
+	p *Pipeline,
+	deps Deps,
+	input Input,
+	planner Planner,
+	schema *jsonschema.Schema,
+) (T, []agent.CitationSource, agent.TokenUsage, bool, error) {
+	if p == nil {
+		p = NewPipeline()
+	}
+	var agg agent.TokenUsage
+	var aggAvail bool
+	acc := func(u agent.TokenUsage, ok bool) {
+		if ok {
+			agg = agg.Add(u)
+			aggAvail = true
+		}
+	}
+
 	// Attempt 1.
-	raw, citations, _, _, err := p.runArtifact(ctx, deps, jsonInput(input, schema, ""), planner)
+	raw, citations, u1, a1, err := p.runArtifact(ctx, deps, jsonInput(input, schema, ""), planner)
+	acc(u1, a1)
 	if err != nil {
-		return zero[T](), citations, err
+		return zero[T](), citations, agg, aggAvail, err
 	}
 	if parsed, perr := validateAndUnmarshal[T](raw, schema); perr == nil {
-		return parsed, citations, nil
+		return parsed, citations, agg, aggAvail, nil
 	} else if deps.Logger != nil {
 		deps.Logger.WarnContext(ctx, "structured output validation failed; retrying stricter",
 			"error", perr, "tenant_id", input.TenantID)
@@ -54,14 +85,15 @@ func RunSync[T any](
 
 	// Attempt 2: stricter retry, seeding the prior (bad) output + the error.
 	retryErrHint := "previous attempt produced output that failed schema validation"
-	raw2, citations2, _, _, err := p.runArtifact(ctx, deps, jsonInput(input, schema, retryErrHint+": "+raw), planner)
+	raw2, citations2, u2, a2, err := p.runArtifact(ctx, deps, jsonInput(input, schema, retryErrHint+": "+raw), planner)
+	acc(u2, a2)
 	if err != nil {
-		return zero[T](), citations2, err
+		return zero[T](), citations2, agg, aggAvail, err
 	}
 	if parsed, perr := validateAndUnmarshal[T](raw2, schema); perr == nil {
-		return parsed, citations2, nil
+		return parsed, citations2, agg, aggAvail, nil
 	} else {
-		return zero[T](), citations2, fmt.Errorf("%w: %v", ErrSchemaValidation, perr)
+		return zero[T](), citations2, agg, aggAvail, fmt.Errorf("%w: %v", ErrSchemaValidation, perr)
 	}
 }
 
