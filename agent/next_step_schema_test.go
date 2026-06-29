@@ -22,9 +22,10 @@ func TestSummarizeSchema(t *testing.T) {
 
 	got := summarizeSchema(schema)
 
-	// Required fields are marked with *.
-	if !strings.Contains(got, "mode(string)*") {
-		t.Errorf("expected required mode marked, got %q", got)
+	// Required fields are marked with *. An enum field renders its allowed
+	// values so the model picks a valid one (OGA-431).
+	if !strings.Contains(got, "mode(string=anomaly|threshold|forecast)*") {
+		t.Errorf("expected required mode with enum values marked, got %q", got)
 	}
 	if !strings.Contains(got, "from(string)*") {
 		t.Errorf("expected required from marked, got %q", got)
@@ -45,6 +46,43 @@ func TestSummarizeSchema(t *testing.T) {
 func TestSummarizeSchema_Empty(t *testing.T) {
 	if got := summarizeSchema(nil); got != "" {
 		t.Errorf("expected empty for nil schema, got %q", got)
+	}
+}
+
+// TestSummarizeSchema_EnumValuesRendered verifies a constrained field surfaces
+// its allowed values, so the planner picks a valid one instead of inventing a
+// plausible value (e.g. mode "single" for an enum of range|multi) — OGA-431.
+func TestSummarizeSchema_EnumValuesRendered(t *testing.T) {
+	schema := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"mode": {"type": "string", "enum": ["range","multi"]},
+			"metric": {"type": "string"}
+		},
+		"required": ["mode"]
+	}`)
+	got := summarizeSchema(schema)
+	if !strings.Contains(got, "mode(string=range|multi)*") {
+		t.Errorf("expected mode enum values rendered, got %q", got)
+	}
+	if strings.Contains(got, "single") {
+		t.Errorf("unexpected value in summary: %q", got)
+	}
+}
+
+// TestSummarizeEnum_Bounds verifies the enum renderer caps long enums.
+func TestSummarizeEnum_Bounds(t *testing.T) {
+	many := make([]any, 0, 20)
+	for i := 0; i < 20; i++ {
+		many = append(many, i)
+	}
+	got := summarizeEnum(many)
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncation marker for a large enum, got %q", got)
+	}
+	// Mixed scalar types stringify without error.
+	if got := summarizeEnum([]any{"a", 1, true}); got != "a|1|true" {
+		t.Errorf("mixed enum = %q, want a|1|true", got)
 	}
 }
 
