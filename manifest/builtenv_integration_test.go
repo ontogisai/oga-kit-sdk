@@ -46,10 +46,11 @@ func TestParse_BuiltEnvironmentKit_HasPolicies(t *testing.T) {
 			t.Logf("non-TypeError parse failure tolerated: %v", err)
 		} else {
 			knownGaps := map[string]bool{
-				"license":          true,
-				"keywords":         true,
-				"target_verticals": true,
-				"loaders":          true,
+				"license":             true,
+				"keywords":            true,
+				"target_verticals":    true,
+				"loaders":             true,
+				"ingestion_templates": true, // transitional: kit migrates to source_connectors in OGA-437
 			}
 			for _, line := range typeErr.Errors {
 				if strings.Contains(line, "field policies not found") {

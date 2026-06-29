@@ -76,8 +76,13 @@ type KitSpec struct {
 	// SampleData lists paths to sample data files.
 	SampleData []string `yaml:"sample_data,omitempty"`
 
-	// IngestionTemplates lists paths to ingestion template definitions.
-	IngestionTemplates []string `yaml:"ingestion_templates,omitempty"`
+	// SourceConnectors declares continuous-ingress Source Connectors the
+	// platform deploys as sidecars at install time (continuous-ingress-connectors
+	// spec). Replaces the former ingestion_templates field. Each connector
+	// serves one or more (external_system, source_type) bindings; the platform
+	// owns persistence, resolution, and validation of the records the connector
+	// emits via the transfer contract.
+	SourceConnectors []SourceConnectorSpec `yaml:"source_connectors,omitempty"`
 
 	// GroundingDocuments lists grounding document definitions.
 	GroundingDocuments []GroundingDocument `yaml:"grounding_documents,omitempty"`
@@ -198,6 +203,76 @@ type WorkflowConfig struct {
 	Name   string         `yaml:"name"`
 	Type   string         `yaml:"type"`
 	Config map[string]any `yaml:"config,omitempty"`
+}
+
+// SourceConnectorSpec declares one continuous-ingress Source Connector the
+// platform deploys as a sidecar at install time. The platform stamps tenancy
+// from the connector's authenticated workload identity; the connector only
+// adapts the external system(s) and emits records via the transfer contract.
+type SourceConnectorSpec struct {
+	// Name is the connector instance name (unique within the kit; forms the
+	// sidecar registry name {tenant}.{name}).
+	Name string `yaml:"name"`
+
+	// Image is the container image reference (with digest) for the connector
+	// sidecar.
+	Image string `yaml:"image"`
+
+	// Bindings are the (external_system, source_type) feeds this connector
+	// serves. At least one is required.
+	Bindings []SourceBindingSpec `yaml:"bindings"`
+
+	// CredentialRefs lists SecretStore secret names the platform injects for
+	// the connector to authenticate to its external systems (one or more).
+	CredentialRefs []string `yaml:"credential_refs,omitempty"`
+}
+
+// SourceBindingSpec is one (external_system, source_type) feed of a connector.
+type SourceBindingSpec struct {
+	// ID is the connector-unique binding identifier (stable; used in the
+	// internal webhook path and the platform IngressToken mapping).
+	ID string `yaml:"id"`
+
+	// ExternalSystem is the system of record (e.g. "contract_wo_mgmt").
+	ExternalSystem string `yaml:"external_system"`
+
+	// SourceType selects the record class (e.g. "wo_status_feed").
+	SourceType string `yaml:"source_type"`
+
+	// Modes declares ingress modes for this binding: "poll" and/or "webhook".
+	// Empty defaults to poll.
+	Modes []string `yaml:"modes,omitempty"`
+
+	// TimeseriesMapping is the per-binding template for timeseries bindings:
+	// tag→metric/unit conventions and how entity_id is derived. Concrete
+	// source_id→entity_id bindings are per-tenant config, not kit-baked.
+	TimeseriesMapping *TimeseriesMappingSpec `yaml:"timeseries_mapping,omitempty"`
+
+	// RetentionPolicy names a timeseries retention/downsampling policy for the
+	// binding's points (optional).
+	RetentionPolicy string `yaml:"retention_policy,omitempty"`
+}
+
+// TimeseriesMappingSpec is the kit-authored template for mapping a timeseries
+// source's tags onto the universal TimeSeriesPoint shape.
+type TimeseriesMappingSpec struct {
+	// EntityIDFrom names how to derive the bound entity_id (e.g. "source_id"
+	// or a tag name). Concrete bindings are resolved/overridden per tenant.
+	EntityIDFrom string `yaml:"entity_id_from,omitempty"`
+
+	// MetricTag / UnitTag name the source tags carrying the metric and unit.
+	MetricTag string `yaml:"metric_tag,omitempty"`
+	UnitTag   string `yaml:"unit_tag,omitempty"`
+}
+
+// Recognized source-connector binding ingress modes.
+const (
+	SourceModePoll    = "poll"
+	SourceModeWebhook = "webhook"
+)
+
+func isValidSourceMode(m string) bool {
+	return m == SourceModePoll || m == SourceModeWebhook
 }
 
 // KitPolicySpec declares one PBAC policy that the platform installer should
@@ -363,6 +438,9 @@ func Validate(m *KitManifest) error {
 	if err := validateKitPolicies(m.Spec.Policies); err != nil {
 		return err
 	}
+	if err := validateSourceConnectors(m.Spec.SourceConnectors); err != nil {
+		return err
+	}
 	if err := validateMonitors(m.Spec.Monitors); err != nil {
 		return err
 	}
@@ -519,6 +597,67 @@ type MonitorSpec struct {
 	Cadence              string   `yaml:"cadence,omitempty"`
 	ReescalateOnSeverity bool     `yaml:"reescalate_on_severity,omitempty"`
 	ReescalateCooldown   string   `yaml:"reescalate_cooldown,omitempty"`
+}
+
+// validateSourceConnectors checks each kit-declared Source Connector
+// (spec.source_connectors[]): name + image present, at least one binding, each
+// binding has id + external_system + source_type with valid modes, and binding
+// IDs are unique within the connector. Connector names must be unique within
+// the kit. Mirrors the field-level rules the platform installer applies so kit
+// authors get the same errors locally as at install time.
+func validateSourceConnectors(conns []SourceConnectorSpec) error {
+	if len(conns) == 0 {
+		return nil
+	}
+	seenConn := make(map[string]int, len(conns))
+	for i := range conns {
+		c := &conns[i]
+		if c.Name == "" {
+			return fmt.Errorf("spec.source_connectors[%d]: name is required", i)
+		}
+		if prev, ok := seenConn[c.Name]; ok {
+			return fmt.Errorf(
+				"spec.source_connectors[%d]: name = %q duplicates spec.source_connectors[%d]",
+				i, c.Name, prev,
+			)
+		}
+		seenConn[c.Name] = i
+		if c.Image == "" {
+			return fmt.Errorf("spec.source_connectors[%d]: image is required", i)
+		}
+		if len(c.Bindings) == 0 {
+			return fmt.Errorf("spec.source_connectors[%d]: at least one binding is required", i)
+		}
+		seenBind := make(map[string]int, len(c.Bindings))
+		for j := range c.Bindings {
+			b := &c.Bindings[j]
+			if b.ID == "" {
+				return fmt.Errorf("spec.source_connectors[%d].bindings[%d]: id is required", i, j)
+			}
+			if prev, ok := seenBind[b.ID]; ok {
+				return fmt.Errorf(
+					"spec.source_connectors[%d].bindings[%d]: id = %q duplicates bindings[%d]",
+					i, j, b.ID, prev,
+				)
+			}
+			seenBind[b.ID] = j
+			if b.ExternalSystem == "" {
+				return fmt.Errorf("spec.source_connectors[%d].bindings[%d]: external_system is required", i, j)
+			}
+			if b.SourceType == "" {
+				return fmt.Errorf("spec.source_connectors[%d].bindings[%d]: source_type is required", i, j)
+			}
+			for _, mode := range b.Modes {
+				if !isValidSourceMode(mode) {
+					return fmt.Errorf(
+						"spec.source_connectors[%d].bindings[%d]: mode = %q is invalid; must be %q or %q",
+						i, j, mode, SourceModePoll, SourceModeWebhook,
+					)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // validateMonitors checks each kit-declared anomaly monitor. Mirrors the
