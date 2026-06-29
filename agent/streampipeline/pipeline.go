@@ -336,6 +336,15 @@ func (p *Pipeline) reactLoop(
 		}
 	}
 
+	// Discovered tool schemas, indexed by name, for the pre-dispatch
+	// required/enum check in executeStep (OGA-438).
+	toolSchemas := make(map[string]agent.ToolSchema, len(input.Persona.ToolSchemas))
+	for _, s := range input.Persona.ToolSchemas {
+		if s.Name != "" {
+			toolSchemas[s.Name] = s
+		}
+	}
+
 	for turn := 0; turn < cfg.MaxSteps; turn++ {
 		st := &PlanState{
 			Query:             plannerQuery,
@@ -451,7 +460,7 @@ func (p *Pipeline) reactLoop(
 
 		emitter.emitToolCall(toolSpan, rootSpan, step, idx)
 
-		result := executeStep(ctx, gw, step, idx, results, cfg.ToolTimeout)
+		result := executeStep(ctx, gw, step, idx, results, cfg.ToolTimeout, toolSchemas)
 		emitter.emitToolResult(toolSpan, rootSpan, &result, cfg)
 
 		// Required-step failure → fail-fast (honored for grounding/seed steps).

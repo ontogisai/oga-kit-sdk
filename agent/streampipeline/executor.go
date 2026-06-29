@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ func executeStep(
 	stepIndex int,
 	priorResults []ToolStepResult,
 	timeout time.Duration,
+	schemas map[string]agent.ToolSchema,
 ) ToolStepResult {
 	res := ToolStepResult{StepIndex: stepIndex, ToolName: step.ToolName}
 
@@ -75,6 +77,23 @@ func executeStep(
 
 	stepCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Schema-aware pre-dispatch check (OGA-438): when the discovered tool
+	// schema is available, verify the resolved args carry the schema's
+	// top-level required fields and use valid enum values BEFORE spending a
+	// gateway→MCP round-trip on a call the server would reject (OGA-CORE-VAL-1001
+	// / OGA-MCPG-VAL-1002). On a violation we return a directive failure that
+	// the ReAct loop feeds back to the planner, which self-corrects next turn.
+	// Runs AFTER dependent-arg resolution so a field filled from a prior step is
+	// not falsely flagged. Conditional requirements (e.g. source_id XOR
+	// source_filter) live in the handler, NOT the JSON Schema `required` array,
+	// so they are intentionally not enforced here — no false positives.
+	if msg := validateToolArgs(schemas[step.ToolName].InputSchema, args); msg != "" {
+		res.Success = false
+		res.Error = fmt.Sprintf("invalid arguments for %s: %s", step.ToolName, msg)
+		res.ErrorCode = "OGA-SDK-VAL-0001"
+		return res
+	}
 
 	start := time.Now()
 	raw, err := gw.CallTool(stepCtx, step.ToolName, args)
@@ -204,4 +223,109 @@ func evaluateCondition(condition string) (run bool, reason string) {
 		return false, "condition evaluated false"
 	}
 	return false, fmt.Sprintf("CEL evaluation not yet implemented; treating as skip (expression: %q)", condition)
+}
+
+// validateToolArgs performs a lightweight, false-positive-safe pre-dispatch
+// check of a tool call's resolved arguments against its JSON Schema (OGA-438).
+// It enforces exactly two things, mirroring what the MCP tool server validates
+// first:
+//
+//   - top-level required fields are present and non-empty, and
+//   - any present field constrained by an enum uses an allowed value.
+//
+// It deliberately does NOT attempt full JSON Schema validation: conditional /
+// oneOf requirements are not in the schema's `required` array (they live in the
+// handler), so enforcing only `required` + enum cannot block a legitimately
+// valid call. Returns "" when the args pass or the schema is absent/unparseable
+// (fail-open — never block on a schema we can't read).
+func validateToolArgs(rawSchema json.RawMessage, args map[string]any) string {
+	if len(rawSchema) == 0 {
+		return ""
+	}
+	var doc struct {
+		Properties map[string]struct {
+			Type string `json:"type"`
+			Enum []any  `json:"enum"`
+		} `json:"properties"`
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(rawSchema, &doc); err != nil {
+		return ""
+	}
+
+	var missing []string
+	for _, field := range doc.Required {
+		if isMissingArg(args[field]) {
+			missing = append(missing, field)
+		}
+	}
+
+	var badEnum []string
+	for name, prop := range doc.Properties {
+		if len(prop.Enum) == 0 {
+			continue
+		}
+		v, ok := args[name]
+		if !ok {
+			continue
+		}
+		s, isStr := v.(string)
+		if !isStr || s == "" {
+			continue // non-string or empty — required-check handles empties
+		}
+		if !enumContains(prop.Enum, s) {
+			badEnum = append(badEnum, fmt.Sprintf("%s must be one of [%s] (got %q)",
+				name, joinEnumValues(prop.Enum), s))
+		}
+	}
+
+	if len(missing) == 0 && len(badEnum) == 0 {
+		return ""
+	}
+	var parts []string
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		parts = append(parts, "missing required field(s): "+strings.Join(missing, ", "))
+	}
+	parts = append(parts, badEnum...)
+	return strings.Join(parts, "; ")
+}
+
+// isMissingArg reports whether an argument value counts as absent for a
+// required-field check: the key was missing (nil), or it is an empty string.
+// A false/0 value is NOT missing — only nil and "" mirror the server's
+// "empty or missing" semantics, so a required bool/number is never wrongly
+// flagged.
+func isMissingArg(v any) bool {
+	if v == nil {
+		return true
+	}
+	s, ok := v.(string)
+	return ok && s == ""
+}
+
+// enumContains reports whether s equals any enum value (stringified with %v so
+// numeric/bool enums compare too).
+func enumContains(enum []any, s string) bool {
+	for _, e := range enum {
+		if fmt.Sprintf("%v", e) == s {
+			return true
+		}
+	}
+	return false
+}
+
+// joinEnumValues renders enum values as "a, b, c", bounded so a large enum
+// can't blow the error message.
+func joinEnumValues(enum []any) string {
+	const maxValues = 12
+	parts := make([]string, 0, len(enum))
+	for i, e := range enum {
+		if i >= maxValues {
+			parts = append(parts, "…")
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%v", e))
+	}
+	return strings.Join(parts, ", ")
 }
