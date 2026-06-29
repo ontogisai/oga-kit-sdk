@@ -322,6 +322,13 @@ func summarizeSchema(raw json.RawMessage) string {
 		if typ != "" {
 			b.WriteString("(")
 			b.WriteString(typ)
+			// Render the allowed values for a constrained field so the model
+			// picks a valid one instead of inventing a plausible-looking value
+			// (e.g. mode "single" when the enum is range|multi) — OGA-431.
+			if len(p.Enum) > 0 {
+				b.WriteString("=")
+				b.WriteString(summarizeEnum(p.Enum))
+			}
 			b.WriteString(")")
 		}
 		if _, req := required[name]; req {
@@ -343,6 +350,33 @@ func summarizeSchema(raw json.RawMessage) string {
 	out := b.String()
 	if len(out) > maxSchemaSummaryLen {
 		out = out[:maxSchemaSummaryLen] + "…"
+	}
+	return out
+}
+
+// summarizeEnum renders a JSON Schema enum's allowed values as "a|b|c",
+// bounded so a large enum can't blow the per-tool summary budget. Values are
+// stringified with %v (covering string/number/bool). Caps at 12 values and
+// 120 runes, appending "…" when truncated.
+func summarizeEnum(values []any) string {
+	const maxValues = 12
+	const maxLen = 120
+	parts := make([]string, 0, len(values))
+	truncated := false
+	for i, v := range values {
+		if i >= maxValues {
+			truncated = true
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%v", v))
+	}
+	out := strings.Join(parts, "|")
+	if len(out) > maxLen {
+		out = out[:maxLen]
+		truncated = true
+	}
+	if truncated {
+		out += "…"
 	}
 	return out
 }
