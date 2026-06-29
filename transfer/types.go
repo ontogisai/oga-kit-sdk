@@ -131,6 +131,37 @@ type Vertex struct {
 	// computes H3 indices at the configured resolutions.
 	Latitude  *float64 `json:"latitude,omitempty"`
 	Longitude *float64 `json:"longitude,omitempty"`
+
+	// CorrelationKey, when set, asks the platform to resolve this vertex to
+	// an EXISTING entity by its external reference (external_system +
+	// external_record_id) instead of by ID — the close-the-loop / status-sync
+	// path for continuous Source Connectors. When set with an empty ID the
+	// platform performs external-ref resolution: a match merges onto the
+	// existing entity (and updates its ExternalSystemRecord); no match is
+	// quarantined for tenant review (never a phantom entity), unless the
+	// source opts into create-on-miss.
+	//
+	// Leave nil for ordinary create/update, where the platform UPSERTs by
+	// (id, tenant_id) as before. Additive and back-compatible: loaders and
+	// existing kits that never set it are unaffected.
+	CorrelationKey *CorrelationKey `json:"correlation_key,omitempty"`
+}
+
+// CorrelationKey is the external reference an inbound record carries so the
+// platform can locate the existing KG entity it corresponds to. It is the
+// search key persisted on hybrid domain entities and on ExternalSystemRecord
+// by the outbound action executor, so an inbound status update can find the
+// same vertex without knowing its platform ID.
+type CorrelationKey struct {
+	// ExternalSystem names the system of record the external_record_id
+	// belongs to (e.g. "contract_wo_mgmt", "sap"). Matches
+	// ExternalSystemRecord.external_system.
+	ExternalSystem string `json:"external_system"`
+
+	// ExternalRecordID is the identifier the external system assigned to the
+	// record (e.g. a work-order number). Matches
+	// ExternalSystemRecord.external_record_id.
+	ExternalRecordID string `json:"external_record_id"`
 }
 
 // Edge is the relationship instance shape carried over the wire.
