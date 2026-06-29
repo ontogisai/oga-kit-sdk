@@ -75,6 +75,41 @@ func (c *PlatformGatewayClient) CallTool(ctx context.Context, tool string, param
 	return resp, nil
 }
 
+// ToolSchema describes a single MCP tool discovered via the Platform Access
+// Gateway's tool-discovery endpoint (OGA-431). InputSchema is the tool's JSON
+// Schema carried verbatim so the ReAct planner can render an argument summary
+// (names + types, required marked) and the LLM emits correct arguments instead
+// of guessing parameter names. Kept in the gateway package (not agent) so the
+// gateway client has no import dependency on agent — streampipeline maps this
+// to agent.ToolSchema.
+type ToolSchema struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
+}
+
+// toolsListResponse is the body returned by GET-style POST /mcp/tools/list.
+type toolsListResponse struct {
+	Tools []ToolSchema `json:"tools"`
+}
+
+// ListTools discovers the MCP tools the authenticated agent is allowed to call,
+// returning each tool's name, description, and input schema (OGA-431). The
+// gateway filters the result to the agent's tool allowlist, so the returned set
+// is exactly what the agent may attempt. Used by the SDK ReAct planner to
+// render correct tool-argument summaries.
+func (c *PlatformGatewayClient) ListTools(ctx context.Context) ([]ToolSchema, error) {
+	resp, err := c.post(ctx, "/mcp/tools/list", map[string]any{})
+	if err != nil {
+		return nil, fmt.Errorf("list tools: %w", err)
+	}
+	var out toolsListResponse
+	if err := json.Unmarshal(resp, &out); err != nil {
+		return nil, fmt.Errorf("parse tools/list response: %w", err)
+	}
+	return out.Tools, nil
+}
+
 // ToolError represents a structured error returned by an MCP tool.
 // It provides programmatic access to the error code, category, and details
 // so callers can handle specific error types (e.g., distinguish "entity type

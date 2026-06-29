@@ -181,13 +181,13 @@ func TestReactivePersona_DelegationPalette(t *testing.T) {
 	}
 
 	// No delegations → palette is the profile tools only.
-	plain := reactivePersona(profile, nil)
+	plain := reactivePersona(context.Background(), newToolSchemaCache(), nil, profile, nil)
 	if containsStr(plain.Tools, "ask_knowledge_agent") {
 		t.Error("plain reactive persona must not contain a delegation tool")
 	}
 
 	// With delegation → palette includes it + a schema entry carrying its description.
-	withDel := reactivePersona(profile, []AgentDelegation{
+	withDel := reactivePersona(context.Background(), newToolSchemaCache(), nil, profile, []AgentDelegation{
 		{ToolName: "ask_knowledge_agent", AgentName: "knowledge-agent", Description: "Ask the KA"},
 	})
 	if !containsStr(withDel.Tools, "ask_knowledge_agent") {
