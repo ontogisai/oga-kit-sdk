@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
@@ -51,7 +53,11 @@ func (f *fakeConnector) Health(context.Context) map[string]Health { return f.hea
 
 func newTestServer(impl SourceConnector, factory WriterFactory) *server {
 	s := &server{
-		cfg:  &Config{WriterFactory: factory},
+		cfg: &Config{
+			WriterFactory: factory,
+			PollInterval:  time.Millisecond,
+			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
 		impl: impl,
 		sink: errSink{},
 	}

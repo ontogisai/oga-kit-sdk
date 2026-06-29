@@ -112,9 +112,9 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 	if len(bindings) == 0 {
 		return errors.New("connector.ListenAndServe: connector declares no bindings")
 	}
-	byID := make(map[string]Binding, len(bindings))
-	for _, b := range bindings {
-		byID[b.ID] = b
+	byID, berr := validateBindings(bindings)
+	if berr != nil {
+		return berr
 	}
 	s.bindings = byID
 
@@ -183,6 +183,68 @@ type server struct {
 	bindings map[string]Binding
 }
 
+// validateBindings rejects empty or duplicate binding IDs and invalid modes
+// before any poll loop or route is wired. Empty/duplicate IDs would otherwise
+// collide in the route map and (for dups) start two poll loops for the same
+// logical binding — double-ingest with independent cursors.
+func validateBindings(bindings []Binding) (map[string]Binding, error) {
+	byID := make(map[string]Binding, len(bindings))
+	for i := range bindings {
+		b := bindings[i]
+		if b.ID == "" {
+			return nil, fmt.Errorf("connector: binding[%d] has an empty ID", i)
+		}
+		if _, dup := byID[b.ID]; dup {
+			return nil, fmt.Errorf("connector: duplicate binding ID %q", b.ID)
+		}
+		if !b.Mode.valid() {
+			return nil, fmt.Errorf("connector: binding %q has invalid mode %q", b.ID, b.Mode)
+		}
+		byID[b.ID] = b
+	}
+	return byID, nil
+}
+
+// countingWriter wraps a transfer.Writer to track whether any record was
+// emitted, so the server can skip committing an empty batch (a no-change poll
+// or a no-op webhook must NOT produce an empty artifact every tick).
+type countingWriter struct {
+	transfer.Writer
+	n int
+}
+
+func (c *countingWriter) WriteVertex(ctx context.Context, v transfer.Vertex) error {
+	if err := c.Writer.WriteVertex(ctx, v); err != nil {
+		return err
+	}
+	c.n++
+	return nil
+}
+
+func (c *countingWriter) WriteEdge(ctx context.Context, e transfer.Edge) error {
+	if err := c.Writer.WriteEdge(ctx, e); err != nil {
+		return err
+	}
+	c.n++
+	return nil
+}
+
+func (c *countingWriter) WriteEntityType(ctx context.Context, t transfer.EntityTypeDef) error {
+	if err := c.Writer.WriteEntityType(ctx, t); err != nil {
+		return err
+	}
+	c.n++
+	return nil
+}
+
+func (c *countingWriter) WriteHierarchy(ctx context.Context, h transfer.HierarchyEntry) error {
+	if err := c.Writer.WriteHierarchy(ctx, h); err != nil {
+		return err
+	}
+	c.n++
+	return nil
+}
+
 func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/{binding}", s.handleWebhook)
@@ -197,24 +259,7 @@ func (s *server) pollBinding(ctx context.Context, b Binding) {
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
-		// Drain immediately-available pages before waiting for the next tick.
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-			res, err := s.runSync(ctx, b, cursor)
-			if err != nil {
-				s.cfg.Logger.Warn("source connector sync failed",
-					"binding", b.ID, "source_type", b.SourceType, "error", err)
-				break // retry on next tick from the same cursor
-			}
-			if res != nil && res.NextCursor != "" {
-				cursor = res.NextCursor
-			}
-			if res == nil || !res.HasMore {
-				break
-			}
-		}
+		cursor = s.drain(ctx, b, cursor)
 		select {
 		case <-ctx.Done():
 			return
@@ -223,17 +268,54 @@ func (s *server) pollBinding(ctx context.Context, b Binding) {
 	}
 }
 
+// drain runs Sync repeatedly to consume all immediately-available pages for a
+// binding, returning the advanced cursor. It stops at: ctx cancellation, a
+// Sync error (retry next tick from the unchanged cursor), HasMore=false, or —
+// the runaway guard — HasMore=true without the cursor advancing (which would
+// otherwise spin a hot loop replaying the same page).
+func (s *server) drain(ctx context.Context, b Binding, cursor string) string {
+	for {
+		if ctx.Err() != nil {
+			return cursor
+		}
+		res, err := s.runSync(ctx, b, cursor)
+		if err != nil {
+			s.cfg.Logger.Warn("source connector sync failed",
+				"binding", b.ID, "source_type", b.SourceType, "error", err)
+			return cursor // retry on next tick from the same cursor
+		}
+		advanced := res != nil && res.NextCursor != "" && res.NextCursor != cursor
+		if res != nil && res.NextCursor != "" {
+			cursor = res.NextCursor
+		}
+		if res == nil || !res.HasMore {
+			return cursor
+		}
+		if !advanced {
+			s.cfg.Logger.Warn("source connector reported HasMore without advancing cursor; stopping drain",
+				"binding", b.ID, "source_type", b.SourceType)
+			return cursor
+		}
+	}
+}
+
 // runSync builds a writer, runs one Sync, and commits the batch on success.
 // On error the writer is dropped (no commit), so a partial batch is never
-// persisted and the next poll retries from the unchanged cursor.
+// persisted and the next poll retries from the unchanged cursor. When Sync
+// emits no entity records the writer is dropped too — a no-change poll must
+// never commit an empty artifact.
 func (s *server) runSync(ctx context.Context, b Binding, cursor string) (*SyncResult, error) {
 	w, err := s.cfg.WriterFactory(ctx, b)
 	if err != nil {
 		return nil, fmt.Errorf("writer factory: %w", err)
 	}
-	res, syncErr := s.impl.Sync(ctx, b, cursor, &Emitter{Entities: w, Timeseries: s.sink})
+	cw := &countingWriter{Writer: w}
+	res, syncErr := s.impl.Sync(ctx, b, cursor, &Emitter{Entities: cw, Timeseries: s.sink})
 	if syncErr != nil {
 		return nil, syncErr // drop the uncommitted writer
+	}
+	if cw.n == 0 {
+		return res, nil // nothing emitted — no empty commit
 	}
 	if _, cerr := w.Close(ctx); cerr != nil {
 		return nil, fmt.Errorf("commit batch: %w", cerr)
@@ -247,8 +329,13 @@ func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown or non-webhook binding", http.StatusNotFound)
 		return
 	}
-	payload, err := io.ReadAll(io.LimitReader(r.Body, 8<<20)) // 8 MiB cap
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20)) // 8 MiB cap
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -257,9 +344,14 @@ func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "writer factory: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if herr := s.impl.HandleWebhook(r.Context(), b, payload, &Emitter{Entities: writer, Timeseries: s.sink}); herr != nil {
+	cw := &countingWriter{Writer: writer}
+	if herr := s.impl.HandleWebhook(r.Context(), b, payload, &Emitter{Entities: cw, Timeseries: s.sink}); herr != nil {
 		http.Error(w, "handle webhook: "+herr.Error(), http.StatusInternalServerError)
 		return // drop uncommitted writer
+	}
+	if cw.n == 0 {
+		w.WriteHeader(http.StatusOK) // nothing emitted — no empty commit
+		return
 	}
 	if _, cerr := writer.Close(r.Context()); cerr != nil {
 		http.Error(w, "commit: "+cerr.Error(), http.StatusInternalServerError)

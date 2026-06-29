@@ -55,6 +55,18 @@ func (m IngressMode) webhookEnabled() bool {
 	return m == ModeWebhook || m == ModeBoth
 }
 
+// valid reports whether the mode is one of the recognized values (empty
+// defaults to poll). Guards against a binding constructed with a typo'd mode
+// that would otherwise be silently neither polled nor webhook-served.
+func (m IngressMode) valid() bool {
+	switch m {
+	case "", ModePoll, ModeWebhook, ModeBoth:
+		return true
+	default:
+		return false
+	}
+}
+
 // SyncResult is what Sync returns for one poll batch.
 type SyncResult struct {
 	// NextCursor is the opaque cursor the server hands back to the next Sync

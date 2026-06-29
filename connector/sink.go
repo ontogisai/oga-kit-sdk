@@ -37,8 +37,9 @@ type Point struct {
 	Quality int `json:"quality,omitempty"`
 
 	// Timestamp is when the measurement was taken. Zero defaults to receipt
-	// time at the intake.
-	Timestamp time.Time `json:"timestamp,omitempty"`
+	// time at the intake. (No omitempty: time.Time is a struct, so the tag
+	// would be a no-op; the intake interprets the zero value.)
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // TimeseriesSink is the Tier-C emit surface: a connector pushes standardized
