@@ -128,7 +128,11 @@ func augmentInvestigationQuery(query string, ids []string) string {
 			"the proposal — e.g. recent sensor readings/trends (kg_ts_read, "+
 			"kg_ts_analyze), related equipment (kg_traverse, kg_query_entities), the "+
 			"governing SOP (kg_doc_content), prior work orders, or similar past "+
-			"incidents (kg_vector). Do not re-fetch the seed entities.]",
+			"incidents (kg_vector). Do not re-fetch the seed entities. To find "+
+			"records RELATED to the seed entity (work orders, maintenance history, "+
+			"connected equipment), prefer kg_traverse FROM the seed entity rather "+
+			"than guessing an entity_type for kg_query_entities — entity types are "+
+			"tenant-specific and a guessed type name will fail.]",
 		describeEntities(ids))
 }
 
@@ -148,7 +152,11 @@ func augmentInvestigationQueryGrounded(query string, ids []string) string {
 			"to answer the operator — recent sensor readings/trends (kg_ts_read, "+
 			"kg_ts_analyze), related equipment (kg_traverse, kg_query_entities), the "+
 			"governing SOP (kg_doc_content), prior work orders, or similar past "+
-			"incidents (kg_vector).]",
+			"incidents (kg_vector). To find records RELATED to the seed entity (work "+
+			"orders, maintenance history, connected equipment), prefer kg_traverse "+
+			"FROM the seed entity rather than guessing an entity_type for "+
+			"kg_query_entities — entity types are tenant-specific and a guessed type "+
+			"name will fail.]",
 		describeEntities(ids))
 }
 

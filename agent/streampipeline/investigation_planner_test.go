@@ -309,3 +309,25 @@ func TestSeedsAlreadyGrounded(t *testing.T) {
 		})
 	}
 }
+
+// TestAugmentInvestigation_GraphRelativeNavigationNudge verifies both augment
+// directives steer the planner to traverse from the seed entity rather than
+// guess a tenant-specific entity_type (OGA-438 part a).
+func TestAugmentInvestigation_GraphRelativeNavigationNudge(t *testing.T) {
+	ids := []string{"chiller-1"}
+	for _, out := range []string{
+		augmentInvestigationQuery("Assess the proposal.", ids),
+		augmentInvestigationQueryGrounded("Assess the proposal.", ids),
+	} {
+		if !strings.Contains(out, "kg_traverse FROM the seed entity") {
+			t.Errorf("directive missing graph-relative nudge: %q", out)
+		}
+		if !strings.Contains(out, "entity types are tenant-specific") {
+			t.Errorf("directive missing tenant-specific type warning: %q", out)
+		}
+	}
+	// No nudge when there are no seed ids (directive is a no-op).
+	if got := augmentInvestigationQuery("q", nil); got != "q" {
+		t.Errorf("expected unchanged query with no ids, got %q", got)
+	}
+}
