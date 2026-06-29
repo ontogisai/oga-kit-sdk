@@ -33,6 +33,10 @@ import (
 // Non-proactive messages delegate to rt.HandleReactive so wiring this handler
 // does not disable the reactive path.
 func NewProactiveMessageHandler() agent.MessageHandlerFunc {
+	// schemaCache memoizes discovered MCP tool input schemas for the lifetime
+	// of this handler so the proactive planner renders correct tool-argument
+	// summaries instead of guessing parameter names (OGA-431).
+	schemaCache := newToolSchemaCache()
 	return func(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A2AMessage) (*agent.A2AResponse, error) {
 		if msg.Params == nil || msg.Params.Message == nil {
 			return nil, fmt.Errorf("message params required")
@@ -40,11 +44,11 @@ func NewProactiveMessageHandler() agent.MessageHandlerFunc {
 		if intent, _ := msg.Params.Message.Metadata["intent"].(string); intent != agent.IntentProactiveEvent {
 			return rt.HandleReactive(ctx, msg)
 		}
-		return handleProactive(ctx, rt, msg)
+		return handleProactive(ctx, rt, msg, schemaCache)
 	}
 }
 
-func handleProactive(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A2AMessage) (*agent.A2AResponse, error) {
+func handleProactive(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A2AMessage, schemaCache *toolSchemaCache) (*agent.A2AResponse, error) {
 	event, err := agent.ParseProactiveEvent(msg)
 	if err != nil {
 		return nil, fmt.Errorf("parse proactive event: %w", err)
@@ -72,7 +76,7 @@ func handleProactive(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A
 	go func() {
 		rctx, cancel := context.WithTimeout(bgctx, proactiveBudget(profile))
 		defer cancel()
-		if rerr := runProactiveReasoning(rctx, rt, event, candidates); rerr != nil {
+		if rerr := runProactiveReasoning(rctx, rt, event, candidates, schemaCache); rerr != nil {
 			slog.ErrorContext(rctx, "proactive reasoning failed",
 				"agent_id", profile.AgentID,
 				"event_type", event.EventType,
@@ -90,7 +94,7 @@ func handleProactive(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A
 // decision and submits the chosen action. It is invoked on a detached context
 // from handleProactive's background goroutine, so it owns all logging of its
 // outcome — no caller observes its return value.
-func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event *agent.ProactiveEvent, candidates []agent.ActionDef) error {
+func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event *agent.ProactiveEvent, candidates []agent.ActionDef, schemaCache *toolSchemaCache) error {
 	profile := rt.Profile()
 	schema, err := buildActionDecisionSchema(candidates)
 	if err != nil {
@@ -104,6 +108,11 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 		persona = profile.ProactiveReasoning.SystemPrompt
 		grounding = profile.ProactiveReasoning.GroundingStrategy
 	}
+	// Discover the profile tool palette's input schemas (cached) so the planner
+	// renders correct tool-argument summaries instead of guessing parameter
+	// names (OGA-431). Degrades to names-only when discovery is unavailable.
+	tools := agent.UniqueTools(profile)
+	toolSchemas := schemaCache.schemasFor(ctx, deps.Gateway, tools)
 	input := Input{
 		Query:          proactiveQuery(event),
 		TenantID:       event.TenantID,
@@ -115,7 +124,7 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 		// strategy is passed as ADVISORY hints (same struct as the profile),
 		// and the resolved event facts seed the planner so it derives concrete
 		// tool arguments without {placeholder} substitution.
-		Persona:           PlannerPersona{SystemPrompt: persona, Tools: agent.UniqueTools(profile)},
+		Persona:           PlannerPersona{SystemPrompt: persona, Tools: tools, ToolSchemas: toolSchemas},
 		GroundingStrategy: grounding,
 		SeedFacts:         proactiveSeedFacts(event),
 	}

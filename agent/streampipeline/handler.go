@@ -112,6 +112,10 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 		opt(hc)
 	}
 	pipeline := NewPipeline()
+	// schemaCache memoizes discovered MCP tool input schemas for the lifetime
+	// of this handler so the ReAct planner renders correct tool-argument
+	// summaries instead of guessing parameter names (OGA-431).
+	schemaCache := newToolSchemaCache()
 
 	return func(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A2AMessage, stream agent.StreamWriter) error {
 		userText := agent.ExtractText(msg.Params.Message.Parts)
@@ -201,7 +205,7 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 			// proposal. ask_knowledge_agent delegation is added by profile config
 			// (spec.reactive_delegation.knowledge_agent) — default opt-out — and is
 			// a reactive-only capability (the proactive handler never reads it).
-			Persona:           reactivePersona(profile, delegations),
+			Persona:           reactivePersona(ctx, schemaCache, deps.Gateway, profile, delegations),
 			GroundingStrategy: reactiveGroundingHints(profile),
 			Delegations:       delegations,
 		}
@@ -258,17 +262,26 @@ func reactiveStreamPlanner(rt *agent.DefaultRuntime) Planner {
 // system prompt (when the profile declares one) plus the profile tool union,
 // extended with any agent-delegation capabilities (rendered into the palette so
 // the planner can choose them — OGA-419 G3).
-func reactivePersona(profile *agent.DomainAgentProfile, delegations []AgentDelegation) PlannerPersona {
+//
+// The profile's MCP tools are discovered via the gateway (cached) so each tool
+// renders with its input-schema argument summary in the decision prompt,
+// instead of a bare name the LLM has to guess arguments for (OGA-431). When
+// discovery is unavailable the persona degrades to names-only — the pre-OGA-431
+// behavior. Delegation descriptors (name + description, no input schema) are
+// merged in after the discovered MCP schemas.
+func reactivePersona(ctx context.Context, cache *toolSchemaCache, gw PlatformAccess, profile *agent.DomainAgentProfile, delegations []AgentDelegation) PlannerPersona {
 	sys := ""
 	if profile != nil && profile.ProactiveReasoning != nil {
 		sys = profile.ProactiveReasoning.SystemPrompt
 	}
 	tools := agent.UniqueTools(profile)
-	var schemas []agent.ToolSchema
+	schemas := cache.schemasFor(ctx, gw, tools)
+	var delegationSchemas []agent.ToolSchema
 	for _, d := range delegations {
 		tools = append(tools, d.ToolName)
-		schemas = append(schemas, agent.ToolSchema{Name: d.ToolName, Description: d.Description})
+		delegationSchemas = append(delegationSchemas, agent.ToolSchema{Name: d.ToolName, Description: d.Description})
 	}
+	schemas = mergeToolSchemas(schemas, delegationSchemas)
 	return PlannerPersona{SystemPrompt: sys, Tools: tools, ToolSchemas: schemas}
 }
 
