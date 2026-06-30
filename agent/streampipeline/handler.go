@@ -208,6 +208,10 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 			Persona:           reactivePersona(ctx, schemaCache, deps.Gateway, profile, delegations),
 			GroundingStrategy: reactiveGroundingHints(profile),
 			Delegations:       delegations,
+			// Resume token (OGA-446): Frontier re-injects pending_action_context
+			// after an input-required turn so confirm-before-write recognises the
+			// now-confirmed mutating call.
+			PendingConfirmation: pendingActionContextFromMessage(msg.Params.Message),
 		}
 
 		// Bridge: streampipeline emits to a channel; we forward to the
@@ -282,7 +286,7 @@ func reactivePersona(ctx context.Context, cache *toolSchemaCache, gw PlatformAcc
 		delegationSchemas = append(delegationSchemas, agent.ToolSchema{Name: d.ToolName, Description: d.Description})
 	}
 	schemas = mergeToolSchemas(schemas, delegationSchemas)
-	return PlannerPersona{SystemPrompt: sys, Tools: tools, ToolSchemas: schemas}
+	return PlannerPersona{SystemPrompt: sys, Tools: tools, ToolSchemas: schemas, AllowClarification: true}
 }
 
 // reactiveGroundingHints returns the profile grounding strategy so the reactive
@@ -300,6 +304,35 @@ func reactiveGroundingHints(profile *agent.DomainAgentProfile) []agent.Grounding
 // Mirrors the platform's stateless-investigation contract
 // (internal/agent/investigation_stateless.go) by value.
 const metadataKeyInvestigationContext = "investigation_context"
+
+// metadataKeyPendingActionContext carries the pending_action_context (OGA-446)
+// that Frontier re-injects on the turn AFTER an input-required pause, so the
+// resuming agent's confirm-before-write recognises the now-confirmed action.
+const metadataKeyPendingActionContext = "pending_action_context"
+
+// pendingActionContextFromMessage parses the pending_action_context JSON from an
+// inbound A2A message's metadata (OGA-446). Frontier persists the
+// ClarificationPayload emitted on an input-required turn and re-injects it here.
+// Returns nil when absent or unparseable — fail-safe: a missing/garbled token
+// degrades to a fresh reactive turn (the agent re-asks), never a stale write.
+func pendingActionContextFromMessage(m *agent.Message) *agent.ClarificationPayload {
+	if m == nil || m.Metadata == nil {
+		return nil
+	}
+	raw, ok := m.Metadata[metadataKeyPendingActionContext]
+	if !ok {
+		return nil
+	}
+	s, isStr := raw.(string)
+	if !isStr || s == "" {
+		return nil
+	}
+	var pc agent.ClarificationPayload
+	if err := json.Unmarshal([]byte(s), &pc); err != nil {
+		return nil
+	}
+	return &pc
+}
 
 // metadataKeySeedsGrounded is the boolean flag Frontier sets on a forwarded
 // investigation message when this conversation thread already grounded the

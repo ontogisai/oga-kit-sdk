@@ -65,7 +65,41 @@ const (
 	TaskStateCompleted = "completed"
 	TaskStateFailed    = "failed"
 	TaskStateCanceled  = "canceled"
+	// TaskStateInputRequired is the canonical A2A state for "the agent paused and
+	// needs the user to answer before it can continue" (OGA-446). Reactive-only:
+	// the proactive path never emits it (it has no user to ask). The turn carries
+	// a ClarificationPayload on the StatusPayload and executes no mutating tool.
+	TaskStateInputRequired = "input-required"
 )
+
+// Clarification kinds carried on ClarificationPayload.Kind.
+const (
+	ClarifyKindDisambiguation = "disambiguation" // multiple candidate targets matched
+	ClarifyKindMissingField   = "missing_field"  // a required argument is unknown
+	ClarifyKindConfirmation   = "confirmation"   // confirm a mutating action before writing
+)
+
+// ClarifyOption is one discrete choice offered to the user in a clarification
+// turn. Richer channels render these as quick-reply buttons; basic channels fall
+// back to the question text.
+type ClarifyOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// ClarificationPayload is both the terminal task/status{input-required} payload
+// and the wire form of the pending_action_context continuation token (OGA-446).
+// The agent emits it to ask the user a question (disambiguation, a missing
+// required field, or a pre-write confirmation); the platform persists it and
+// re-injects it on the follow-up turn so the same agent resumes deterministically.
+type ClarificationPayload struct {
+	Question         string          `json:"question"`
+	Kind             string          `json:"kind,omitempty"`
+	MissingFields    []string        `json:"missing_fields,omitempty"`
+	Options          []ClarifyOption `json:"options,omitempty"`
+	PendingTool      string          `json:"pending_tool,omitempty"`
+	PartialArguments map[string]any  `json:"partial_arguments,omitempty"`
+}
 
 // StreamEvent is the universal envelope for all SSE events emitted during
 // agent streaming. Every event carries hierarchical span information enabling
@@ -118,11 +152,16 @@ type EventActor struct {
 
 // StatusPayload carries task lifecycle state transitions.
 type StatusPayload struct {
-	// State is one of: working, completed, failed, canceled.
+	// State is one of: working, completed, failed, canceled, input-required.
 	State string `json:"state"`
 
 	// Error is present only when State is "failed".
 	Error *StatusError `json:"error,omitempty"`
+
+	// Clarification is present only when State is "input-required" (OGA-446): the
+	// agent paused to ask the user a question. It is the pending_action_context
+	// the platform persists and re-injects on the resume turn.
+	Clarification *ClarificationPayload `json:"clarification,omitempty"`
 }
 
 // StatusError describes a failure within a streaming task.
