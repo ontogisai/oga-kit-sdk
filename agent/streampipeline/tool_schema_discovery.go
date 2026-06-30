@@ -114,6 +114,7 @@ func (c *toolSchemaCache) load(ctx context.Context, lister toolSchemaLister) map
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: t.InputSchema,
+			Mutates:     t.Mutates, // OGA-446 confirm-before-write signal
 		}
 	}
 	c.byName = byName

@@ -259,3 +259,39 @@ func TestMethodNotFound(t *testing.T) {
 		t.Errorf("error code = %v, want -32601", errObj["code"])
 	}
 }
+
+// TestApplyHeaderFallbacks verifies the OGA-446 gateway-strip fallback: the
+// X-Pending-Action-Context header is folded into message metadata when the body
+// omitted it, and never overwrites a value the body already carried.
+func TestApplyHeaderFallbacks(t *testing.T) {
+	newMsg := func() *A2AMessage {
+		return &A2AMessage{Params: &MessageParams{Message: &Message{Role: "user"}}}
+	}
+
+	// Header present, body absent → folded in.
+	r1, _ := http.NewRequest(http.MethodPost, "/", nil)
+	r1.Header.Set(HeaderPendingActionContext, `{"question":"which?"}`)
+	m1 := newMsg()
+	applyHeaderFallbacks(r1, m1)
+	if got := m1.Params.Message.Metadata[MetadataKeyPendingActionContext]; got != `{"question":"which?"}` {
+		t.Errorf("header not folded into metadata: %v", got)
+	}
+
+	// Body present → header must NOT overwrite.
+	r2, _ := http.NewRequest(http.MethodPost, "/", nil)
+	r2.Header.Set(HeaderPendingActionContext, "FROM-HEADER")
+	m2 := newMsg()
+	m2.Params.Message.Metadata = map[string]any{MetadataKeyPendingActionContext: "FROM-BODY"}
+	applyHeaderFallbacks(r2, m2)
+	if got := m2.Params.Message.Metadata[MetadataKeyPendingActionContext]; got != "FROM-BODY" {
+		t.Errorf("body metadata must win, got %v", got)
+	}
+
+	// No header → no metadata created.
+	r3, _ := http.NewRequest(http.MethodPost, "/", nil)
+	m3 := newMsg()
+	applyHeaderFallbacks(r3, m3)
+	if m3.Params.Message.Metadata != nil {
+		t.Errorf("no header should leave metadata nil, got %v", m3.Params.Message.Metadata)
+	}
+}

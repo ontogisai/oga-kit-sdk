@@ -3,6 +3,7 @@ package streampipeline
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
@@ -154,6 +155,53 @@ func TestPipeline_ProactivePath_NoConfirmInterception(t *testing.T) {
 	sp := findStatus(events)
 	if sp == nil || sp.State == agent.TaskStateInputRequired {
 		t.Errorf("proactive path must never emit input-required, got %+v", sp)
+	}
+}
+
+// Regression (OGA-446 review): a DISAMBIGUATION token whose pending_tool is the
+// same write tool must NOT authorize the write on the resume turn — only an
+// explicit confirmation does. Otherwise confirm-before-write is bypassed in the
+// common case (the disambiguation pause names the same tool it will write with).
+func TestPipeline_ConfirmBeforeWrite_DisambiguationDoesNotAuthorize(t *testing.T) {
+	gw := &fakeGateway{
+		tools:        map[string]json.RawMessage{"kg_create_entity": json.RawMessage(`{"created":true}`)},
+		streamChunks: []string{"ok"},
+	}
+	planner := &singleStepPlanner{step: ToolPlanStep{Name: "create", ToolName: "kg_create_entity", DependsOn: -1}}
+
+	events := runPipelineForTest(t, gw, planner, Input{
+		Query:   "the Carrier one",
+		Actor:   agent.EventActor{Type: "test", ID: "fm", DisplayName: "FM"},
+		Persona: PlannerPersona{AllowClarification: true},
+		PendingConfirmation: &agent.ClarificationPayload{
+			Kind:        agent.ClarifyKindDisambiguation, // NOT a confirmation
+			PendingTool: "kg_create_entity",
+		},
+	})
+
+	if len(gw.callToolCalls) != 0 {
+		t.Errorf("a disambiguation token must NOT authorize the write, got %v", gw.callToolCalls)
+	}
+	sp := findStatus(events)
+	if sp == nil || sp.State != agent.TaskStateInputRequired || sp.Clarification == nil ||
+		sp.Clarification.Kind != agent.ClarifyKindConfirmation {
+		t.Fatalf("expected a forced confirmation turn, got %+v", sp)
+	}
+}
+
+func TestResumeSeedFacts(t *testing.T) {
+	if got := resumeSeedFacts(nil); got != "" {
+		t.Errorf("nil token → empty seed, got %q", got)
+	}
+	got := resumeSeedFacts(&agent.ClarificationPayload{
+		Question:         "Which chiller?",
+		PendingTool:      "fm_create_work_order",
+		PartialArguments: map[string]any{"work_type": "inspection"},
+	})
+	for _, want := range []string{"Which chiller?", "fm_create_work_order", "work_type", "inspection"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("seed missing %q:\n%s", want, got)
+		}
 	}
 }
 

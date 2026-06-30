@@ -14,8 +14,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// ListenAndServe starts an HTTP server that serves the A2A protocol for any
-// AgentRuntime implementation. It handles graceful shutdown on SIGTERM/SIGINT.
+// ListenAndServe starts an HTTP server that serves the A2A protocol for any// AgentRuntime implementation. It handles graceful shutdown on SIGTERM/SIGINT.
 func ListenAndServe(ctx context.Context, port string, runtime AgentRuntime) {
 	mux := http.NewServeMux()
 
@@ -98,6 +97,12 @@ func messageHandlerFunc(runtime AgentRuntime) http.HandlerFunc {
 			writeJSONRPCError(w, nil, -32700, "parse error: "+err.Error())
 			return
 		}
+
+		// Header fallbacks (OGA-446): an A2A gateway MAY strip params.metadata
+		// on proxy (OGA-276). When the resume token is absent from the body but
+		// present as a header, fold it into the message metadata so the reactive
+		// resume survives a stripping proxy. No-op when the body already carries it.
+		applyHeaderFallbacks(r, &msg)
 
 		switch msg.Method {
 		case "message/send":
@@ -201,4 +206,34 @@ func writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, mess
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK) // JSON-RPC errors are still 200
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// A2A metadata keys + their gateway-strip header fallbacks (OGA-446). The
+// metadata key is the contract the reactive handler reads
+// (streampipeline references MetadataKeyPendingActionContext); the header is set
+// by a caller (the platform Frontier) alongside params.metadata so a proxy that
+// strips the body metadata (OGA-276) does not silently break reactive resume.
+const (
+	MetadataKeyPendingActionContext = "pending_action_context"
+	HeaderPendingActionContext      = "X-Pending-Action-Context"
+)
+
+// applyHeaderFallbacks folds header-carried context into the inbound message
+// metadata when the body did not carry it. Body metadata always wins (a present
+// key is never overwritten). Currently handles the OGA-446 resume token.
+func applyHeaderFallbacks(r *http.Request, msg *A2AMessage) {
+	if r == nil || msg == nil || msg.Params == nil || msg.Params.Message == nil {
+		return
+	}
+	v := r.Header.Get(HeaderPendingActionContext)
+	if v == "" {
+		return
+	}
+	m := msg.Params.Message
+	if m.Metadata == nil {
+		m.Metadata = map[string]any{}
+	}
+	if _, present := m.Metadata[MetadataKeyPendingActionContext]; !present {
+		m.Metadata[MetadataKeyPendingActionContext] = v
+	}
 }

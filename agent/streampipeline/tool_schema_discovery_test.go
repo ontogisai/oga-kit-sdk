@@ -125,3 +125,32 @@ func TestMergeToolSchemas_DiscoveredWins(t *testing.T) {
 		}
 	}
 }
+
+// TestSchemasFor_CarriesMutatesFlag verifies the OGA-446 mutation flag flows
+// from the gateway tools/list discovery into the planner's ToolSchema, so kit
+// agents get the platform's authoritative confirm-before-write signal instead
+// of relying on the name heuristic.
+func TestSchemasFor_CarriesMutatesFlag(t *testing.T) {
+	tt := true
+	writer := gateway.ToolSchema{Name: "fm_create_work_order", Description: "d", Mutates: &tt}
+	reader := gateway.ToolSchema{Name: "kg_search", Description: "d"} // Mutates nil → heuristic
+	gw := &fakeListerGateway{tools: []gateway.ToolSchema{writer, reader}}
+	cache := newToolSchemaCache()
+
+	got := cache.schemasFor(context.Background(), gw, []string{"fm_create_work_order", "kg_search"})
+	byName := map[string]agent.ToolSchema{}
+	for _, s := range got {
+		byName[s.Name] = s
+	}
+	if m := byName["fm_create_work_order"].Mutates; m == nil || !*m {
+		t.Errorf("fm_create_work_order Mutates = %v, want explicit true", m)
+	}
+	if byName["kg_search"].Mutates != nil {
+		t.Errorf("kg_search Mutates = %v, want nil (absent → heuristic)", byName["kg_search"].Mutates)
+	}
+	// End-to-end: toolMutates honours the explicit flag.
+	schemas := map[string]agent.ToolSchema{"fm_create_work_order": byName["fm_create_work_order"]}
+	if !toolMutates(schemas, "fm_create_work_order") {
+		t.Error("toolMutates should report true for an explicitly-flagged writer")
+	}
+}
