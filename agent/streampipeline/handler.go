@@ -315,7 +315,9 @@ const metadataKeyInvestigationContext = "investigation_context"
 // metadataKeyPendingActionContext carries the pending_action_context (OGA-446)
 // that Frontier re-injects on the turn AFTER an input-required pause, so the
 // resuming agent's confirm-before-write recognises the now-confirmed action.
-const metadataKeyPendingActionContext = "pending_action_context"
+// Aliased to the agent-package constant so the body key and the serve.go header
+// fallback (HeaderPendingActionContext) stay in lockstep.
+const metadataKeyPendingActionContext = agent.MetadataKeyPendingActionContext
 
 // pendingActionContextFromMessage parses the pending_action_context JSON from an
 // inbound A2A message's metadata (OGA-446). Frontier persists the

@@ -86,6 +86,11 @@ type ToolSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	InputSchema json.RawMessage `json:"inputSchema"`
+	// Mutates marks a state-changing tool (OGA-446). Carried from the platform
+	// tools/list so the ReAct planner's confirm-before-write gate sees the
+	// authoritative flag instead of relying on a tool-name heuristic. Pointer so
+	// "absent" (nil → heuristic) is distinct from an explicit false (read).
+	Mutates *bool `json:"mutates,omitempty"`
 }
 
 // toolsListResponse is the body returned by GET-style POST /mcp/tools/list.
