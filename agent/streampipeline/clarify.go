@@ -5,6 +5,7 @@
 package streampipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -35,12 +36,16 @@ func toolMutates(schemas map[string]agent.ToolSchema, toolName string) bool {
 }
 
 // confirmationSatisfied reports whether an injected PendingConfirmation
-// authorises executing toolName now — i.e. this is the resume turn for that
-// exact pending action (matched by pending tool name). v1 matches on tool name
-// only; argument refinement on the resume turn is allowed (the user may have
-// amended details while confirming).
+// authorises executing toolName now. It requires BOTH that the token is an
+// explicit CONFIRMATION (kind=confirmation) AND that its pending tool matches —
+// so a disambiguation / missing_field pause (whose pending_tool is often the
+// SAME write tool) does NOT silently authorise the write on the next turn. Only
+// a turn answering an actual "shall I do X?" confirmation lets the write
+// through; every other resume still hits the confirm-before-write interception.
+// v1 matches on tool name only (not argument equality): the user may have
+// amended details while confirming.
 func confirmationSatisfied(pc *agent.ClarificationPayload, toolName string) bool {
-	return pc != nil && pc.PendingTool != "" && pc.PendingTool == toolName
+	return pc != nil && pc.Kind == agent.ClarifyKindConfirmation && pc.PendingTool != "" && pc.PendingTool == toolName
 }
 
 // buildConfirmation synthesises the confirm-before-write question for a mutating
@@ -72,4 +77,30 @@ func summarizeArgs(args map[string]any) string {
 		parts = append(parts, fmt.Sprintf("%s=%v", k, args[k]))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// resumeSeedFacts renders the pending_action_context into a planner seed block
+// (OGA-446) so the resuming turn reasons over the paused question + the
+// arguments gathered so far structurally — not only via injected chat history.
+// Returns "" when there is no pending action (a fresh turn).
+func resumeSeedFacts(pac *agent.ClarificationPayload) string {
+	if pac == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("You previously paused this task to ask the user; their reply is the question/task above.\n")
+	if pac.Question != "" {
+		fmt.Fprintf(&b, "Your question was: %s\n", pac.Question)
+	}
+	if pac.PendingTool != "" {
+		fmt.Fprintf(&b, "Pending action (the tool you intended to call once answered): %s\n", pac.PendingTool)
+	}
+	if len(pac.PartialArguments) > 0 {
+		if js, err := json.Marshal(pac.PartialArguments); err == nil {
+			fmt.Fprintf(&b, "Arguments gathered so far: %s\n", js)
+		}
+	}
+	b.WriteString("Apply their reply to resolve the missing detail / disambiguation. " +
+		"Confirm before writing if you have not already; once they confirm, proceed.")
+	return b.String()
 }

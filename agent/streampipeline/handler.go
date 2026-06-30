@@ -189,6 +189,10 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 			assemblyPrompt = appendInvestigationBriefingDirective(assemblyPrompt)
 		}
 
+		// OGA-446 resume token (nil on a fresh turn). Parsed once: seeds the
+		// planner (SeedFacts) AND gates confirm-before-write (PendingConfirmation).
+		pendingActionCtx := pendingActionContextFromMessage(msg.Params.Message)
+
 		input := Input{
 			Query:                  userText,
 			PlannerQuery:           plannerQuery,
@@ -208,10 +212,13 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 			Persona:           reactivePersona(ctx, schemaCache, deps.Gateway, profile, delegations),
 			GroundingStrategy: reactiveGroundingHints(profile),
 			Delegations:       delegations,
-			// Resume token (OGA-446): Frontier re-injects pending_action_context
-			// after an input-required turn so confirm-before-write recognises the
-			// now-confirmed mutating call.
-			PendingConfirmation: pendingActionContextFromMessage(msg.Params.Message),
+			// Resume (OGA-446): Frontier re-injects pending_action_context after an
+			// input-required turn. SeedFacts gives the planner the paused
+			// question + partial arguments structurally (not just via history), and
+			// PendingConfirmation lets confirm-before-write recognise a now-confirmed
+			// mutating call. Both nil/empty on a fresh turn.
+			SeedFacts:           resumeSeedFacts(pendingActionCtx),
+			PendingConfirmation: pendingActionCtx,
 		}
 
 		// Bridge: streampipeline emits to a channel; we forward to the
