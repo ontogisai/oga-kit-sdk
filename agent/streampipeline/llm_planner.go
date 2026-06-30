@@ -38,13 +38,14 @@ func NewLLMToolPlanner(gw PlatformAccess, cfg agent.PlannerConfig) *LLMToolPlann
 // observed the prior results).
 func (p *LLMToolPlanner) Next(ctx context.Context, st *PlanState) (*Decision, error) {
 	req := agent.NextStepRequest{
-		SystemPrompt: st.Persona.SystemPrompt,
-		Tools:        st.Persona.Tools,
-		ToolSchemas:  st.Persona.ToolSchemas,
-		Query:        st.Query,
-		SeedFacts:    st.SeedFacts,
-		Hints:        groundingHints(st.GroundingStrategy),
-		History:      toObservations(st.History),
+		SystemPrompt:       st.Persona.SystemPrompt,
+		Tools:              st.Persona.Tools,
+		ToolSchemas:        st.Persona.ToolSchemas,
+		Query:              st.Query,
+		SeedFacts:          st.SeedFacts,
+		Hints:              groundingHints(st.GroundingStrategy),
+		History:            toObservations(st.History),
+		AllowClarification: st.Persona.AllowClarification,
 	}
 
 	d, err := agent.RequestNextStep(ctx, p.gw, req, p.cfg)
@@ -54,6 +55,15 @@ func (p *LLMToolPlanner) Next(ctx context.Context, st *PlanState) (*Decision, er
 
 	if d.Final {
 		return &Decision{Done: true, Narrative: d.Thought, Usage: d.Usage, UsageAvailable: d.UsageAvailable}, nil
+	}
+
+	if d.Clarification != nil {
+		return &Decision{
+			Narrative:      d.Thought,
+			Clarification:  d.Clarification,
+			Usage:          d.Usage,
+			UsageAvailable: d.UsageAvailable,
+		}, nil
 	}
 
 	return &Decision{

@@ -153,6 +153,13 @@ type Input struct {
 	// this empty so a second non-deterministic reasoner can never sit inside the
 	// proposal evidence chain (Property 5).
 	Delegations []AgentDelegation
+
+	// PendingConfirmation is the pending_action_context re-injected on a reactive
+	// RESUME turn (OGA-446). When set, the user is answering a prior clarify turn;
+	// it lets confirm-before-write recognise that a matching mutating tool call is
+	// now confirmed. Empty on a fresh turn. Reactive-only (the proactive path
+	// never sets it, and its persona disables clarification entirely).
+	PendingConfirmation *agent.ClarificationPayload
 }
 
 // AgentDelegation maps a planner palette tool name to a downstream agent the
@@ -246,6 +253,24 @@ func (p *Pipeline) runInternal(
 	if g.plainAnswer {
 		return p.runPlainAnswer(ctx, gw, input, cfg, tracker, rootSpan, emitter, g.plainReason)
 	}
+	if g.inputRequired != nil {
+		// Reactive clarification (OGA-446): the agent paused to ask the user.
+		// Emit the question as an artifact (so every channel renders it as agent
+		// text), the per-request usage aggregate, and a terminal
+		// task/status{input-required} carrying the pending_action_context. No
+		// tool was executed (Property 2).
+		emitter.emitArtifact(rootSpan, g.inputRequired.Question, false)
+		emitter.emitUsage(tracker.ChildSpan(rootSpan), rootSpan, agent.UsageRoleAggregate, -1, input.AssemblyModel, g.decisionUsage, g.usageAvail)
+		emitter.emit(&agent.StreamEvent{
+			SpanID: rootSpan,
+			Type:   agent.EventTypeStatus,
+			Payload: &agent.StatusPayload{
+				State:         agent.TaskStateInputRequired,
+				Clarification: g.inputRequired,
+			},
+		})
+		return nil
+	}
 
 	// Assembly.
 	emitter.emitReasoning(tracker.ChildSpan(rootSpan), rootSpan, 1, "Assembling response...", false)
@@ -291,6 +316,11 @@ type gatherResult struct {
 	plainAnswer   bool
 	plainReason   string
 	terminal      error
+	// inputRequired is set when the reactive planner chose to pause and ask the
+	// user (OGA-446). The caller emits the question + a terminal
+	// task/status{input-required} and returns without assembling. nil on every
+	// other path (always nil on the proactive path — Property 1).
+	inputRequired *agent.ClarificationPayload
 }
 
 // reactLoop runs the ReAct evidence loop: decide ONE action per turn against the
@@ -400,6 +430,19 @@ func (p *Pipeline) reactLoop(
 			emitter.emitUsage(tracker.ChildSpan(rootSpan), rootSpan, agent.UsageRoleDecision, turn, "", decision.Usage, true)
 		}
 
+		// Reactive clarification (OGA-446): the planner chose to pause and ask the
+		// user. End the loop with an input-required terminal — no tool executed
+		// (Property 2). Never set on the proactive path (persona disables it →
+		// Property 1).
+		if decision.Clarification != nil {
+			return gatherResult{
+				inputRequired: decision.Clarification,
+				citations:     allCitations,
+				decisionUsage: aggUsage,
+				usageAvail:    aggUsageAvail,
+			}
+		}
+
 		// Planner finalized → go to assembly.
 		if decision.Done || decision.Step == nil {
 			break
@@ -442,6 +485,23 @@ func (p *Pipeline) reactLoop(
 			results = append(results, result)
 			allCitations = append(allCitations, cites...)
 			continue
+		}
+
+		// Confirm-before-write (OGA-446, Property 3): on the reactive path, a
+		// mutating tool may execute ONLY on a turn whose injected
+		// PendingConfirmation matches it — i.e. the turn AFTER a confirmation
+		// question was answered. A first attempt to call a mutating tool is
+		// intercepted here (not in the prompt) and converted into a confirmation
+		// input-required turn. Gated on the reactive persona so the proactive
+		// loop is unaffected (it can never emit input-required — Property 1).
+		if input.Persona.AllowClarification && toolMutates(toolSchemas, step.ToolName) &&
+			!confirmationSatisfied(input.PendingConfirmation, step.ToolName) {
+			return gatherResult{
+				inputRequired: buildConfirmation(step),
+				citations:     allCitations,
+				decisionUsage: aggUsage,
+				usageAvail:    aggUsageAvail,
+			}
 		}
 
 		// Condition is advisory under ReAct (LLM steps carry none); honored for

@@ -105,6 +105,11 @@ type PlannerPersona struct {
 	// Agent populates these from discovered MCP tools; tools without a matching
 	// schema render as bare names.
 	ToolSchemas []agent.ToolSchema
+
+	// AllowClarification enables the reactive-only `clarify` outcome (OGA-446).
+	// Reactive handlers set it true; the proactive handler leaves it false so its
+	// decision contract stays byte-identical (Property 1).
+	AllowClarification bool
 }
 
 // Decision is the planner's output for a single turn.
@@ -119,6 +124,11 @@ type Decision struct {
 
 	// Step is the action to execute this turn. Nil iff Done.
 	Step *ToolPlanStep
+
+	// Clarification is set when the planner chose the reactive `clarify` outcome
+	// (OGA-446): pause and ask the user. When set, Done is false and Step is nil;
+	// the pipeline emits an input-required turn and executes no tool.
+	Clarification *agent.ClarificationPayload
 
 	// Usage is the LLM token usage the planner spent producing this decision
 	// (OGA-420). Zero for non-LLM planners (e.g. precomputed seed steps).

@@ -53,6 +53,10 @@ type ToolSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	// Mutates marks whether the tool changes state (writes). When set, the
+	// reactive pipeline enforces confirm-before-write for it (OGA-446). nil =
+	// unknown; callers fall back to a name heuristic (see streampipeline).
+	Mutates *bool `json:"mutates,omitempty"`
 }
 
 // NextStepRequest is the input to a single ReAct decision call.
@@ -74,6 +78,11 @@ type NextStepRequest struct {
 	Hints []GroundingHint
 	// History is the observation transcript so far, in order.
 	History []NextStepObservation
+	// AllowClarification gates the reactive-only `clarify` outcome (OGA-446).
+	// When true, the clarify contract is appended to the decision prompt so the
+	// model may pause to ask the user. The proactive path leaves it false, so its
+	// decision contract is byte-identical to pre-OGA-446 (Property 1).
+	AllowClarification bool
 }
 
 // NextStepDecision is the parsed single-action decision.
@@ -94,6 +103,10 @@ type NextStepDecision struct {
 	// the decision completions. False → Usage is zero and must not be read as a
 	// real "0 tokens".
 	UsageAvailable bool
+	// Clarification is set when the model chose the reactive `clarify` outcome
+	// (OGA-446): pause and ask the user. When set, ToolName is empty and Final is
+	// false — the pipeline emits an input-required turn and executes no tool.
+	Clarification *ClarificationPayload
 }
 
 // nextStepWire is the JSON shape the model is asked to produce.
@@ -104,6 +117,16 @@ type nextStepWire struct {
 		Tool      string         `json:"tool"`
 		Arguments map[string]any `json:"arguments"`
 	} `json:"action"`
+	// Clarify is the reactive-only third outcome (OGA-446): pause and ask the
+	// user. Only honored when the request enabled AllowClarification.
+	Clarify *struct {
+		Question         string          `json:"question"`
+		Kind             string          `json:"kind"`
+		Missing          []string        `json:"missing"`
+		Options          []ClarifyOption `json:"options"`
+		PendingTool      string          `json:"pending_tool"`
+		PartialArguments map[string]any  `json:"partial_arguments"`
+	} `json:"clarify"`
 }
 
 // nextStepContract is appended to the system prompt to pin the output format.
@@ -125,6 +148,26 @@ Respond with a SINGLE JSON object only (no prose, no markdown fences), one of:
   {"thought": "<why this action>", "action": {"tool": "<tool_name>", "arguments": {<args>}}}
   {"thought": "<why you have enough>", "final": true}`
 
+// nextStepClarifyContract is appended to the decision prompt ONLY when the
+// request enables AllowClarification (reactive path, OGA-446). It adds the third
+// outcome and instructs WHEN to use it. The proactive path never appends this,
+// so its contract is byte-identical to pre-OGA-446 (Property 1).
+const nextStepClarifyContract = `
+
+You may ALSO pause to ask the user when you genuinely cannot proceed safely on
+your own. Use this when: the target entity is AMBIGUOUS (your search returned
+more than one plausible match), a REQUIRED argument is unknown and not derivable
+from the observations, or you are about to perform a STATE-CHANGING action (a
+create/update/delete) — in that last case ALWAYS confirm the exact action and its
+arguments with the user before doing it. Prefer best-effort retrieval for
+read-only lookups; reserve this for ambiguous targets and before any write.
+Ask ONE focused question. Add a third allowed JSON object:
+  {"thought": "<why you must ask>", "clarify": {"question": "<one question>",
+   "kind": "disambiguation|missing_field|confirmation",
+   "missing": ["<field>"], "options": [{"id": "<id>", "label": "<label>"}],
+   "pending_tool": "<tool you will call once answered>",
+   "partial_arguments": {<args gathered so far>}}}`
+
 // nextStepCorrection is the corrective turn used when the first reply does not
 // parse as the required JSON object.
 const nextStepCorrection = `Your previous reply was not a single valid JSON object in the required shape.
@@ -143,6 +186,9 @@ func RequestNextStep(
 	cfg PlannerConfig,
 ) (*NextStepDecision, error) {
 	system := req.SystemPrompt + renderToolPalette(req.Tools, req.ToolSchemas) + renderHints(req.Hints) + nextStepContract
+	if req.AllowClarification {
+		system += nextStepClarifyContract
+	}
 	user := renderNextStepUser(req)
 
 	messages := []gateway.ChatMessage{
@@ -202,8 +248,24 @@ func parseNextStep(raw string) (*NextStepDecision, error) {
 		return nil, fmt.Errorf("unmarshal next-step: %w", err)
 	}
 	d := &NextStepDecision{Thought: strings.TrimSpace(w.Thought)}
-	// Final wins when set or when no action is provided.
-	if w.Final || w.Action == nil || strings.TrimSpace(w.Action.Tool) == "" {
+	// Final wins when explicitly set. Then clarify (reactive pause). Then action.
+	if w.Final {
+		d.Final = true
+		return d, nil
+	}
+	if w.Clarify != nil && strings.TrimSpace(w.Clarify.Question) != "" {
+		d.Clarification = &ClarificationPayload{
+			Question:         strings.TrimSpace(w.Clarify.Question),
+			Kind:             strings.TrimSpace(w.Clarify.Kind),
+			MissingFields:    w.Clarify.Missing,
+			Options:          w.Clarify.Options,
+			PendingTool:      strings.TrimSpace(w.Clarify.PendingTool),
+			PartialArguments: w.Clarify.PartialArguments,
+		}
+		return d, nil
+	}
+	// No action provided → treat as final (mirrors pre-OGA-446 behavior).
+	if w.Action == nil || strings.TrimSpace(w.Action.Tool) == "" {
 		d.Final = true
 		return d, nil
 	}
