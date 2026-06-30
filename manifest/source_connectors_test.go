@@ -30,6 +30,51 @@ func TestValidate_SourceConnectors_Valid(t *testing.T) {
 	}
 }
 
+// TestParse_SourceConnectorContainerEnv proves the strict decoder (Parse uses
+// KnownFields(true)) accepts a source connector's container.env block and
+// decodes it — so a kit can deliver per-tenant connector config such as
+// WO_MGMT_URL via a secret:// reference (continuous-ingress-connectors,
+// OGA-437) without the strict parse rejecting the unknown field.
+func TestParse_SourceConnectorContainerEnv(t *testing.T) {
+	y := `
+api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: kit
+  version: 1.0.0
+spec:
+  platform_version: ">=1.0.0"
+  source_connectors:
+    - name: wo-connector
+      image: ghcr.io/ontogisai/oga-kit-built-environment/wo-connector:1.0.0
+      container:
+        env:
+          WO_MGMT_URL: "secret://wo-mgmt-url"
+          WO_POLL_INTERVAL: "30s"
+      bindings:
+        - id: wo-status
+          external_system: contract_wo_mgmt
+          source_type: wo_status_feed
+          modes: [poll, webhook]
+      credential_refs:
+        - wo-mgmt-api-key
+`
+	m, err := Parse(strings.NewReader(y))
+	if err != nil {
+		t.Fatalf("strict Parse rejected container.env on a source connector: %v", err)
+	}
+	if len(m.Spec.SourceConnectors) != 1 {
+		t.Fatalf("source_connectors = %d, want 1", len(m.Spec.SourceConnectors))
+	}
+	c := m.Spec.SourceConnectors[0]
+	if got := c.Container.Env["WO_MGMT_URL"]; got != "secret://wo-mgmt-url" {
+		t.Errorf("container.env WO_MGMT_URL = %q, want secret://wo-mgmt-url", got)
+	}
+	if got := c.Container.Env["WO_POLL_INTERVAL"]; got != "30s" {
+		t.Errorf("container.env WO_POLL_INTERVAL = %q, want 30s", got)
+	}
+}
+
 func TestValidate_SourceConnectors_Errors(t *testing.T) {
 	cases := []struct {
 		name  string

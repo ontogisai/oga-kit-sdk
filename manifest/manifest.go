@@ -225,6 +225,53 @@ type SourceConnectorSpec struct {
 	// CredentialRefs lists SecretStore secret names the platform injects for
 	// the connector to authenticate to its external systems (one or more).
 	CredentialRefs []string `yaml:"credential_refs,omitempty"`
+
+	// Container holds optional deployment overrides (image already lives at
+	// the top level; this carries port, resources, and env). The most common
+	// use is env: per-tenant, non-baked configuration such as an external
+	// system's base URL delivered via a SecretStore reference, e.g.
+	//   container:
+	//     env:
+	//       WO_MGMT_URL: "secret://wo-mgmt-url"
+	// The platform resolves a "secret://<name>" env value to the tenant-scoped
+	// SecretStore secret at connector deploy time. Mirrors the platform's
+	// domainkit.SidecarContainerSpec field-for-field (continuous-ingress-
+	// connectors, OGA-437).
+	Container SidecarContainerSpec `yaml:"container,omitempty"`
+}
+
+// SidecarContainerSpec holds optional deployment overrides for a sidecar the
+// platform deploys from a kit manifest declaration. It mirrors the platform's
+// internal domainkit.SidecarContainerSpec field-for-field so a kit author gets
+// the same parse result locally as at install time.
+type SidecarContainerSpec struct {
+	// Image overrides the image reference (specs that declare image at the
+	// top level leave this empty).
+	Image string `yaml:"image,omitempty"`
+
+	// Port overrides the container port; zero lets the platform allocate from
+	// the sidecar role's range.
+	Port int `yaml:"port,omitempty"`
+
+	// Resources is the canonical home for memory + CPU limits. When absent the
+	// flat MemoryMB / CPUMilli fields are used as fallbacks.
+	Resources SidecarResourceSpec `yaml:"resources,omitempty"`
+
+	// MemoryMB / CPUMilli are legacy flat aliases for the Resources block.
+	MemoryMB int `yaml:"memory_mb,omitempty"`
+	CPUMilli int `yaml:"cpu_milli,omitempty"`
+
+	// Env injects additional environment variables into the container. A value
+	// of the form "secret://<name>" is resolved by the platform to the
+	// tenant-scoped SecretStore secret <name> at deploy time; any other value
+	// is injected verbatim.
+	Env map[string]string `yaml:"env,omitempty"`
+}
+
+// SidecarResourceSpec is the nested resources: block of a SidecarContainerSpec.
+type SidecarResourceSpec struct {
+	MemoryMB int `yaml:"memory_mb,omitempty"`
+	CPUMilli int `yaml:"cpu_milli,omitempty"`
 }
 
 // SourceBindingSpec is one (external_system, source_type) feed of a connector.
