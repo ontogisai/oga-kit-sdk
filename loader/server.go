@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +17,80 @@ import (
 
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
+
+// maxRemoteSourceBytes caps a materialized remote source download
+// (defense against a hostile/misconfigured URL exhausting disk). 512 MiB
+// comfortably covers kit data files (the full Brick schema is ~2 MiB).
+const maxRemoteSourceBytes int64 = 512 << 20
+
+// remoteSourceHTTPClient bounds the fetch of a remote source_uri.
+var remoteSourceHTTPClient = &http.Client{Timeout: 5 * time.Minute}
+
+// materializeRemoteSource downloads an http(s):// source_uri (e.g. a
+// presigned object-store GET URL the platform issues) to a local temp
+// file and rewrites req.SourceURI to a file:// path, so file://-only
+// loader handlers work when the source is not on a shared filesystem
+// (Kubernetes: the loader pod cannot see the installer's staging dir).
+//
+// Returns a cleanup func the caller MUST defer (removes the temp file).
+// No-op — returning a no-op cleanup — for file:// / bare-path / empty
+// source URIs, which the handler resolves locally as before.
+func materializeRemoteSource(ctx context.Context, req *LoadRequest) (func(), error) {
+	noop := func() {}
+	if req == nil || req.SourceURI == "" {
+		return noop, nil
+	}
+	u, err := url.Parse(req.SourceURI)
+	if err != nil {
+		// Leave malformed URIs for the handler to reject with its own
+		// (kit-specific) error message.
+		return noop, nil
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		// fall through to download
+	default:
+		return noop, nil
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, req.SourceURI, nil)
+	if err != nil {
+		return noop, fmt.Errorf("build source request: %w", err)
+	}
+	resp, err := remoteSourceHTTPClient.Do(httpReq)
+	if err != nil {
+		return noop, fmt.Errorf("fetch remote source: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return noop, fmt.Errorf("fetch remote source: unexpected status %d", resp.StatusCode)
+	}
+
+	tmp, err := os.CreateTemp("", "oga-loader-source-*")
+	if err != nil {
+		return noop, fmt.Errorf("create temp source file: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(tmp.Name()) }
+	n, err := io.Copy(tmp, io.LimitReader(resp.Body, maxRemoteSourceBytes+1))
+	if err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return noop, fmt.Errorf("write temp source file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return noop, fmt.Errorf("close temp source file: %w", err)
+	}
+	if n > maxRemoteSourceBytes {
+		cleanup()
+		return noop, fmt.Errorf("remote source exceeds %d bytes", maxRemoteSourceBytes)
+	}
+
+	// Rewrite to a file:// URI the kit handler resolves locally. tmp.Name()
+	// is absolute (leading "/"), so "file://" + "/tmp/x" = "file:///tmp/x".
+	req.SourceURI = "file://" + tmp.Name()
+	return cleanup, nil
+}
 
 // Handler returns an [http.Handler] that exposes the loader contract
 // for the supplied [LoaderHandler]. Kit authors call this when they
@@ -235,6 +311,16 @@ func loadHandlerFunc(impl LoaderHandler, cfg *handlerConfig) http.HandlerFunc {
 		if !ok {
 			return
 		}
+
+		// Materialize a remote (http/https) source to a local temp file so
+		// file://-only loader handlers work when the source is not on a shared
+		// filesystem (Kubernetes). No-op for file:// sources.
+		cleanupSource, err := materializeRemoteSource(r.Context(), req)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "source_fetch_failed", err.Error())
+			return
+		}
+		defer cleanupSource()
 
 		writer, err := cfg.writerFactory(r.Context(), cfg.kind, req)
 		if err != nil {
