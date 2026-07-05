@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestSummarizeSchema verifies the compact argument summary: required fields
@@ -170,5 +171,92 @@ func TestRequestNextStep_RendersSchemasInPrompt(t *testing.T) {
 	}
 	if !strings.Contains(capturedSystem, "query(string)*") {
 		t.Errorf("decision prompt should carry the tool arg schema, got:\n%s", capturedSystem)
+	}
+}
+
+// TestSummarizeSchema_RendersDescription verifies a property's description is
+// rendered after its type/enum, so the tool author's per-field guidance (e.g.
+// the per-mode required-field matrix on a `mode` field) reaches the planner
+// rather than just the bare type (OGA-470).
+func TestSummarizeSchema_RendersDescription(t *testing.T) {
+	schema := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"mode": {"type": "string", "enum": ["impact_chain","root_cause"],
+				"description": "Reasoning mode. impact_chain/root_cause need start_entity_id."}
+		},
+		"required": ["mode"]
+	}`)
+
+	got := summarizeSchema(schema)
+
+	if !strings.Contains(got, "mode(string=impact_chain|root_cause)*: Reasoning mode. impact_chain/root_cause need start_entity_id.") {
+		t.Errorf("expected mode description rendered after enum, got %q", got)
+	}
+}
+
+// TestSummarizeSchema_DescriptionTruncatedRuneSafe verifies a long description
+// is capped at maxPropDescLen runes with a trailing ellipsis, and that
+// truncation never splits a multibyte rune into invalid UTF-8 (OGA-470).
+func TestSummarizeSchema_DescriptionTruncatedRuneSafe(t *testing.T) {
+	longDesc := strings.Repeat("→", 400) // 400 multibyte runes, well over the cap
+	schema := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"field": {"type": "string", "description": "` + longDesc + `"}
+		}
+	}`)
+
+	got := summarizeSchema(schema)
+
+	if !strings.Contains(got, "…") {
+		t.Errorf("expected truncation marker for a long description, got %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated summary must remain valid UTF-8, got invalid bytes: %q", got)
+	}
+	// The rendered description must not exceed the per-property cap (in runes).
+	if idx := strings.Index(got, ": "); idx >= 0 {
+		desc := got[idx+2:]
+		if n := utf8.RuneCountInString(strings.TrimSuffix(desc, "…")); n > maxPropDescLen {
+			t.Errorf("description rune count %d exceeds cap %d", n, maxPropDescLen)
+		}
+	}
+}
+
+// TestTruncateRunes verifies the rune-safe truncation helper.
+func TestTruncateRunes(t *testing.T) {
+	if got := truncateRunes("hello", 10); got != "hello" {
+		t.Errorf("no truncation expected, got %q", got)
+	}
+	if got := truncateRunes("hello", 3); got != "hel…" {
+		t.Errorf("expected hel…, got %q", got)
+	}
+	// Multibyte input truncated at a rune boundary stays valid UTF-8.
+	got := truncateRunes("≥≥≥≥≥", 2)
+	if got != "≥≥…" {
+		t.Errorf("expected ≥≥…, got %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateRunes produced invalid UTF-8: %q", got)
+	}
+	if got := truncateRunes("anything", 0); got != "" {
+		t.Errorf("n<=0 must return empty, got %q", got)
+	}
+}
+
+// TestNextStepContract_ToolSelection verifies the ReAct decision contract now
+// carries the tool-selection routing guidance (OGA-470 Change B).
+func TestNextStepContract_ToolSelection(t *testing.T) {
+	for _, want := range []string{
+		"Tool selection",
+		"impact_chain",
+		"root_cause",
+		"NOT kg_geotemporal",
+		"kg_query_relationships",
+	} {
+		if !strings.Contains(nextStepContract, want) {
+			t.Errorf("nextStepContract missing %q", want)
+		}
 	}
 }
