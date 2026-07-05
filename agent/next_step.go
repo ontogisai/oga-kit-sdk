@@ -144,6 +144,14 @@ Rules:
 - Only call tools from the provided tool list.
 - When you have gathered enough evidence to answer, stop.
 
+Tool selection — match the tool to the SHAPE of the question, not to keywords
+(only pick from the tool list above; skip a rule when its tool is not offered):
+- "what is affected if X…" / downstream dependencies / impact → kg_reason with mode=impact_chain, starting from the affected entity.
+- "what caused X" / upstream fault tracing → kg_reason with mode=root_cause.
+- Relationship-based location ("what is in the basement / on floor 3 / in this zone") → kg_search then kg_query_relationships or kg_traverse. NOT kg_geotemporal — that tool is for geographic coordinates / H3 cells, not named places.
+- Physical proximity, geofence, movement/trajectory, or spatial density over time → kg_geotemporal.
+kg_traverse lists neighbors; kg_reason explains WHY / analyzes (scored, mode-specific) — prefer kg_reason for impact, cause, and path questions.
+
 Respond with a SINGLE JSON object only (no prose, no markdown fences), one of:
   {"thought": "<why this action>", "action": {"tool": "<tool_name>", "arguments": {<args>}}}
   {"thought": "<why you have enough>", "final": true}`
@@ -334,22 +342,30 @@ func renderToolPalette(tools []string, schemas []ToolSchema) string {
 }
 
 // maxSchemaSummaryLen bounds the per-tool argument summary so a verbose schema
-// can't blow the decision-prompt token budget.
-const maxSchemaSummaryLen = 600
+// can't blow the decision-prompt token budget. Raised (OGA-470) to accommodate
+// per-property descriptions, which carry the platform's per-mode required-field
+// guidance (e.g. kg_geotemporal "snapshot needs `at`; geofence needs `from`…").
+const maxSchemaSummaryLen = 1400
+
+// maxPropDescLen bounds a single property's rendered description so one verbose
+// field can't crowd out the others within maxSchemaSummaryLen (OGA-470).
+const maxPropDescLen = 160
 
 // summarizeSchema renders a compact, token-bounded view of a JSON Schema's
-// input arguments: "name(type)*, other(string), ..." where * marks a required
-// field. It reads the standard {type, properties, required} shape. When the
-// schema can't be parsed into that shape it falls back to the compacted raw
-// JSON, truncated to maxSchemaSummaryLen. Returns "" for an empty schema.
+// input arguments: "name(type)*: description, other(string), ..." where * marks
+// a required field and the description (when present) carries the tool author's
+// per-field guidance. It reads the standard {type, properties, required} shape.
+// When the schema can't be parsed into that shape it falls back to the compacted
+// raw JSON, truncated to maxSchemaSummaryLen. Returns "" for an empty schema.
 func summarizeSchema(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
 	var doc struct {
 		Properties map[string]struct {
-			Type string `json:"type"`
-			Enum []any  `json:"enum"`
+			Type        string `json:"type"`
+			Enum        []any  `json:"enum"`
+			Description string `json:"description"`
 		} `json:"properties"`
 		Required []string `json:"required"`
 	}
@@ -396,6 +412,13 @@ func summarizeSchema(raw json.RawMessage) string {
 		if _, req := required[name]; req {
 			b.WriteString("*")
 		}
+		// Render the field's description (when present) so the tool author's
+		// per-field guidance — e.g. the per-mode required-field matrix on a
+		// `mode` field — reaches the planner, not just the bare type (OGA-470).
+		if d := strings.TrimSpace(p.Description); d != "" {
+			b.WriteString(": ")
+			b.WriteString(truncateRunes(d, maxPropDescLen))
+		}
 	}
 	for _, r := range doc.Required {
 		if _, ok := doc.Properties[r]; ok {
@@ -409,11 +432,22 @@ func summarizeSchema(raw json.RawMessage) string {
 		write(n)
 	}
 
-	out := b.String()
-	if len(out) > maxSchemaSummaryLen {
-		out = out[:maxSchemaSummaryLen] + "…"
+	return truncateRunes(b.String(), maxSchemaSummaryLen)
+}
+
+// truncateRunes returns s limited to at most n runes, appending "…" when it had
+// to cut. It is rune-safe: unlike a raw byte slice it never splits a multibyte
+// rune, so descriptions containing characters like "→" or "≥" can't be turned
+// into invalid UTF-8 in the decision prompt (OGA-470).
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
 	}
-	return out
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // summarizeEnum renders a JSON Schema enum's allowed values as "a|b|c",
@@ -433,8 +467,8 @@ func summarizeEnum(values []any) string {
 		parts = append(parts, fmt.Sprintf("%v", v))
 	}
 	out := strings.Join(parts, "|")
-	if len(out) > maxLen {
-		out = out[:maxLen]
+	if r := []rune(out); len(r) > maxLen {
+		out = string(r[:maxLen])
 		truncated = true
 	}
 	if truncated {
@@ -450,11 +484,7 @@ func compactTruncate(raw json.RawMessage, maxLen int) string {
 	if err := json.Compact(&buf, raw); err != nil {
 		return ""
 	}
-	s := buf.String()
-	if len(s) > maxLen {
-		return s[:maxLen] + "…"
-	}
-	return s
+	return truncateRunes(buf.String(), maxLen)
 }
 
 // renderHints renders advisory grounding hints into the system prompt.
