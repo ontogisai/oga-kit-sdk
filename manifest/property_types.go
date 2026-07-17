@@ -30,7 +30,10 @@ var supportedPropertyTypes = map[string]struct{}{
 	"bool": {}, "boolean": {},
 	// Integers (platform stores all as LONG).
 	"int": {}, "integer": {}, "int64": {}, "long": {},
-	// Floats (float/float64/double/number → DOUBLE; float32 → FLOAT).
+	// Floats. The platform's float is 64-bit: float/float64/double/number →
+	// DOUBLE; only float32 → FLOAT (the explicit 32-bit opt-in). Bare `float`
+	// is 64-bit by design (see the platform propertyTypeTable comment) — it is
+	// NOT 32-bit, to avoid silently narrowing measurement values.
 	"float": {}, "float64": {}, "double": {}, "number": {}, "float32": {},
 	// Exact fixed-point (money) → DECIMAL.
 	"decimal": {},
