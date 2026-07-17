@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -83,5 +84,50 @@ func TestParse_BuiltEnvironmentKit_HasPolicies(t *testing.T) {
 	}
 	if err := validateKitPolicies(lenient.Spec.Policies); err != nil {
 		t.Fatalf("validateKitPolicies rejected the kit's policies block: %v", err)
+	}
+}
+
+// TestValidate_BuiltEnvironmentKit_OntologyPropertyTypes is a cross-repo
+// regression guard for OGA-569. It loads the in-tree oga-kit-built-environment
+// kit (sibling directory under the workspace root) and asserts every property
+// type declared across its ontology + extension files is representable by the
+// platform — i.e. the SDK's SupportedPropertyType set covers the flagship
+// kit's full vocabulary (float64, enum, string_array, decimal, geo_polygon,
+// ...). Skipped when the sibling repo is not present (CI without a multi-repo
+// checkout).
+//
+// This is the SDK-side proof that ValidateOntologyFile accepts the flagship
+// kit; the kit repo carries the companion CI test that runs the same validator
+// as its own gate (matching TestOntologyYAMLs_NoShortFormLocaleKeys).
+func TestValidate_BuiltEnvironmentKit_OntologyPropertyTypes(t *testing.T) {
+	const kitRoot = "../../oga-kit-built-environment"
+	manifestPath := filepath.Join(kitRoot, "manifest.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Skipf("oga-kit-built-environment not present at %s: %v", manifestPath, err)
+	}
+
+	// Lenient decode to reach spec.ontology_files + spec.extension_files
+	// (the strict parser trips on the kit's known unmodeled fields).
+	var m KitManifest
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(false)
+	if err := dec.Decode(&m); err != nil {
+		t.Fatalf("lenient decode: %v", err)
+	}
+
+	refs := append([]string{}, m.Spec.OntologyFiles...)
+	refs = append(refs, m.Spec.ExtensionFiles...)
+	if len(refs) == 0 {
+		t.Fatal("expected the built-environment kit to declare ontology_files/extension_files")
+	}
+	for _, ref := range refs {
+		ref := ref
+		t.Run(ref, func(t *testing.T) {
+			if err := ValidateOntologyFilePath(filepath.Join(kitRoot, ref)); err != nil {
+				t.Errorf("built-environment ontology file %s has an unrepresentable property type "+
+					"(SDK supported-set gap vs the platform table?): %v", ref, err)
+			}
+		})
 	}
 }
