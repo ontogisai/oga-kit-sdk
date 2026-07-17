@@ -28,8 +28,10 @@ var supportedPropertyTypes = map[string]struct{}{
 	"string": {}, "text": {},
 	// Boolean.
 	"bool": {}, "boolean": {},
-	// Integers (platform stores all as LONG).
-	"int": {}, "integer": {}, "int64": {}, "long": {},
+	// Integers. Bare int/integer (and int64/long) → LONG (64-bit); only int32
+	// → INTEGER (the explicit 32-bit opt-in, mirroring float32→FLOAT). Bare
+	// `int` is 64-bit by design to avoid overflowing values like byte counts.
+	"int": {}, "integer": {}, "int64": {}, "long": {}, "int32": {},
 	// Floats. The platform's float is 64-bit: float/float64/double/number →
 	// DOUBLE; only float32 → FLOAT (the explicit 32-bit opt-in). Bare `float`
 	// is 64-bit by design (see the platform propertyTypeTable comment) — it is

@@ -8,7 +8,7 @@ import (
 func TestSupportedPropertyType(t *testing.T) {
 	supported := []string{
 		"string", "text", "bool", "boolean",
-		"int", "integer", "int64", "long",
+		"int", "integer", "int64", "long", "int32",
 		"float", "float64", "double", "number", "float32",
 		"decimal", "datetime", "timestamp", "enum", "string_array",
 		"geo_point", "geopoint", "point", "geo_polygon",
