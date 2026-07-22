@@ -39,10 +39,6 @@ func (c *countingCloseWriter) WriteEntityType(context.Context, transfer.EntityTy
 	c.wrote = true
 	return nil
 }
-func (c *countingCloseWriter) WriteRelationshipType(context.Context, transfer.RelationshipTypeDef) error {
-	c.wrote = true
-	return nil
-}
 func (c *countingCloseWriter) WriteHierarchy(context.Context, transfer.HierarchyEntry) error {
 	c.wrote = true
 	return nil

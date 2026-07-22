@@ -3,6 +3,7 @@ package transfer_test
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,32 +86,33 @@ func TestEntityTypeDef_PhysicalDefaultOmitsFields(t *testing.T) {
 	}
 }
 
-// TestRelationshipTypeDef_WireRoundTrip verifies WriteRelationshipType emits a
-// relationship_type envelope carrying the endpoint fields plus the hybrid
-// Materialization + PhysicalType (OGA-584 C7).
-func TestRelationshipTypeDef_WireRoundTrip(t *testing.T) {
+// TestRelationshipTypeDef_JSONContract locks the RelationshipTypeDef JSON
+// contract (OGA-584 C7): the hybrid Materialization + PhysicalType fields
+// round-trip with the expected json tags, and both are omitted when empty
+// (a physical relationship type stays back-compatible on the wire).
+//
+// RelationshipTypeDef is the shared ontology relationship contract; the
+// platform registers relationship types from manifest YAML and resolves new
+// predicates onto RELATES at edge-write time, so the type is not streamed
+// through the transfer writer (there is no WriteRelationshipType). This test
+// therefore exercises the JSON shape directly rather than a writer path.
+func TestRelationshipTypeDef_JSONContract(t *testing.T) {
 	t.Parallel()
-	fc := &transfer.FakeCommitClient{}
-	w := transfer.NewOntologyWriter(fc, "oga-kit-sj24k")
-	ctx := context.Background()
 
-	if err := w.WriteRelationshipType(ctx, transfer.RelationshipTypeDef{
+	// Logical: hybrid fields present and correctly tagged.
+	logical := transfer.RelationshipTypeDef{
 		Name:            "feeds",
 		SourceType:      "brick_AHU",
 		TargetType:      "brick_VAV",
 		Cardinality:     "one_to_many",
 		Materialization: transfer.MaterializationLogical,
 		PhysicalType:    "RELATES",
-	}); err != nil {
-		t.Fatalf("WriteRelationshipType: %v", err)
 	}
-	if _, err := w.Close(ctx); err != nil {
-		t.Fatalf("Close: %v", err)
+	raw, err := json.Marshal(logical)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-
-	body := fc.LastBody()
 	for _, want := range []string{
-		`"kind":"relationship_type"`,
 		`"name":"feeds"`,
 		`"source_type":"brick_AHU"`,
 		`"target_type":"brick_VAV"`,
@@ -118,29 +120,29 @@ func TestRelationshipTypeDef_WireRoundTrip(t *testing.T) {
 		`"materialization":"logical"`,
 		`"physical_type":"RELATES"`,
 	} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("body missing %q\nbody: %s", want, body)
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("marshaled JSON missing %q\njson: %s", want, raw)
 		}
 	}
-
-	got := decodeRelationshipType(t, body)
-	if got.Materialization != transfer.MaterializationLogical || got.PhysicalType != "RELATES" {
-		t.Errorf("decoded relationship hybrid fields = (%q,%q), want (logical,RELATES)",
-			got.Materialization, got.PhysicalType)
+	var back transfer.RelationshipTypeDef
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.SourceType != "brick_AHU" || got.TargetType != "brick_VAV" {
-		t.Errorf("decoded endpoints = (%q,%q)", got.SourceType, got.TargetType)
+	if !reflect.DeepEqual(back, logical) {
+		t.Errorf("round-trip mismatch:\n got %+v\nwant %+v", back, logical)
 	}
-}
 
-// TestWriteRelationshipType_RequiresName confirms the writer rejects a
-// relationship type with no name.
-func TestWriteRelationshipType_RequiresName(t *testing.T) {
-	t.Parallel()
-	fc := &transfer.FakeCommitClient{}
-	w := transfer.NewOntologyWriter(fc, "k")
-	if err := w.WriteRelationshipType(context.Background(), transfer.RelationshipTypeDef{}); err == nil {
-		t.Error("expected error for relationship type with no name")
+	// Physical (default): hybrid fields omitted, back-compatible on the wire.
+	physical := transfer.RelationshipTypeDef{Name: "equipmentHasSchedule"}
+	raw, err = json.Marshal(physical)
+	if err != nil {
+		t.Fatalf("marshal physical: %v", err)
+	}
+	if strings.Contains(string(raw), "materialization") {
+		t.Errorf("physical relationship type should omit materialization\njson: %s", raw)
+	}
+	if strings.Contains(string(raw), "physical_type") {
+		t.Errorf("physical relationship type should omit physical_type\njson: %s", raw)
 	}
 }
 
@@ -160,18 +162,6 @@ func decodeEntityType(t *testing.T, body []byte) transfer.EntityTypeDef {
 		t.Fatalf("decode EntityTypeDef: %v", err)
 	}
 	return et
-}
-
-// decodeRelationshipType finds the first relationship_type envelope in an
-// NDJSON body and decodes its value.
-func decodeRelationshipType(t *testing.T, body []byte) transfer.RelationshipTypeDef {
-	t.Helper()
-	raw := findEnvelopeValue(t, body, string(transfer.EntryRelationshipType))
-	var rt transfer.RelationshipTypeDef
-	if err := json.Unmarshal(raw, &rt); err != nil {
-		t.Fatalf("decode RelationshipTypeDef: %v", err)
-	}
-	return rt
 }
 
 func findEnvelopeValue(t *testing.T, body []byte, kind string) json.RawMessage {

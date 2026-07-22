@@ -254,15 +254,20 @@ type EntityTypeDef struct {
 	PhysicalType string `json:"physical_type,omitempty"`
 }
 
-// RelationshipTypeDef is the shape used by ontology loaders to register a
-// relationship (edge) type. It mirrors the relationship_types entries a kit
-// declares in its ontology YAML (name, display_name, description,
-// source_type, target_type, cardinality, properties) and carries the same
-// hybrid ontology modeling fields as EntityTypeDef (OGA-584, C7). A physical
-// relationship type is a real DDL edge type (EXTENDS BaseRelationship); a
-// logical one is a catalog-only predicate mapped onto a coarser physical
-// edge type (e.g. the generic RELATES) with the fine predicate carried in
-// relationship_type data.
+// RelationshipTypeDef is the ontology relationship (edge) type contract. It
+// mirrors the relationship_types entries a kit declares in its ontology YAML
+// (name, display_name, description, source_type, target_type, cardinality,
+// properties) and carries the same hybrid ontology modeling fields as
+// EntityTypeDef (OGA-584, C7). A physical relationship type is a real DDL
+// edge type (EXTENDS BaseRelationship); a logical one is a catalog-only
+// predicate mapped onto a coarser physical edge type (e.g. the generic
+// RELATES), with the fine predicate carried in relationship_type data.
+//
+// The platform registers relationship types from the manifest ontology YAML
+// (declarative path) and resolves new predicates onto RELATES at edge-write
+// time; this type is the shared shape the platform and kit reference. It is
+// not currently streamed through the transfer writer (which handles vertices,
+// edges, entity types, and hierarchy) — so there is no WriteRelationshipType.
 type RelationshipTypeDef struct {
 	// Name is the stable identifier (e.g. "equipmentHasSchedule"). Must
 	// match the DDL type name without tenant prefix; the platform adds the
@@ -350,11 +355,10 @@ type Header struct {
 type EntryKind string
 
 const (
-	EntryVertex           EntryKind = "vertex"
-	EntryEdge             EntryKind = "edge"
-	EntryEntityType       EntryKind = "entity_type"
-	EntryRelationshipType EntryKind = "relationship_type"
-	EntryHierarchy        EntryKind = "hierarchy"
+	EntryVertex     EntryKind = "vertex"
+	EntryEdge       EntryKind = "edge"
+	EntryEntityType EntryKind = "entity_type"
+	EntryHierarchy  EntryKind = "hierarchy"
 )
 
 // Envelope wraps each non-header record so the platform's stream

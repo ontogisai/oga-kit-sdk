@@ -102,7 +102,8 @@ func TestRegistrar_PassesPropertiesThrough(t *testing.T) {
 
 // TestRegistrar_ThreadsHybridFields verifies RegisterTypes threads the
 // Materialization + PhysicalType fields (OGA-584) from the ontology-package
-// mirror into the transfer wire records.
+// EntityTypeDef mirror into the transfer wire records, and that a physical
+// (default) type emits neither hybrid field.
 func TestRegistrar_ThreadsHybridFields(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
@@ -119,27 +120,12 @@ func TestRegistrar_ThreadsHybridFields(t *testing.T) {
 				PhysicalType:    "Equipment",
 			},
 		},
-		RelationshipTypes: []ontology.RelationshipTypeDef{
-			{
-				Name:            "feeds",
-				SourceType:      "brick_AHU",
-				TargetType:      "brick_VAV",
-				Cardinality:     "one_to_many",
-				Materialization: transfer.MaterializationLogical,
-				PhysicalType:    "RELATES",
-			},
-		},
 	}
 	if err := reg.RegisterTypes(context.Background(), req); err != nil {
 		t.Fatalf("RegisterTypes: %v", err)
 	}
-	receipt, err := w.Close(context.Background())
-	if err != nil {
+	if _, err := w.Close(context.Background()); err != nil {
 		t.Fatalf("writer Close: %v", err)
-	}
-	// 2 entity types + 1 relationship type = 3 records.
-	if receipt.EntryCount != 3 {
-		t.Errorf("EntryCount = %d, want 3", receipt.EntryCount)
 	}
 
 	body := string(fc.LastBody())
@@ -148,10 +134,6 @@ func TestRegistrar_ThreadsHybridFields(t *testing.T) {
 		`"name":"brick_AHU"`,
 		`"materialization":"logical"`,
 		`"physical_type":"Equipment"`,
-		`"kind":"relationship_type"`,
-		`"name":"feeds"`,
-		`"source_type":"brick_AHU"`,
-		`"physical_type":"RELATES"`,
 	} {
 		if !contains(body, want) {
 			t.Errorf("body missing %q\nbody: %s", want, body)

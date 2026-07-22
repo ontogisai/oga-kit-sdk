@@ -237,14 +237,6 @@ func (c *countingWriter) WriteEntityType(ctx context.Context, t transfer.EntityT
 	return nil
 }
 
-func (c *countingWriter) WriteRelationshipType(ctx context.Context, t transfer.RelationshipTypeDef) error {
-	if err := c.Writer.WriteRelationshipType(ctx, t); err != nil {
-		return err
-	}
-	c.n++
-	return nil
-}
-
 func (c *countingWriter) WriteHierarchy(ctx context.Context, h transfer.HierarchyEntry) error {
 	if err := c.Writer.WriteHierarchy(ctx, h); err != nil {
 		return err
