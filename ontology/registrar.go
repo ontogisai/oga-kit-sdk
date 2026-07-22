@@ -47,12 +47,30 @@ func (r *Registrar) RegisterTypes(ctx context.Context, req RegisterTypesRequest)
 	for i := range req.EntityTypes {
 		t := req.EntityTypes[i]
 		if err := r.writer.WriteEntityType(ctx, transfer.EntityTypeDef{
-			Name:        t.Name,
-			DisplayName: t.DisplayName,
-			Description: t.Description,
-			ParentType:  t.ParentType,
-			Category:    t.Category,
-			Properties:  toTransferProperties(t.Properties),
+			Name:            t.Name,
+			DisplayName:     t.DisplayName,
+			Description:     t.Description,
+			ParentType:      t.ParentType,
+			Category:        t.Category,
+			Properties:      toTransferProperties(t.Properties),
+			Materialization: t.Materialization,
+			PhysicalType:    t.PhysicalType,
+		}); err != nil {
+			return err
+		}
+	}
+	for i := range req.RelationshipTypes {
+		rt := req.RelationshipTypes[i]
+		if err := r.writer.WriteRelationshipType(ctx, transfer.RelationshipTypeDef{
+			Name:            rt.Name,
+			DisplayName:     rt.DisplayName,
+			Description:     rt.Description,
+			SourceType:      rt.SourceType,
+			TargetType:      rt.TargetType,
+			Cardinality:     rt.Cardinality,
+			Properties:      toTransferProperties(rt.Properties),
+			Materialization: rt.Materialization,
+			PhysicalType:    rt.PhysicalType,
 		}); err != nil {
 			return err
 		}
@@ -74,6 +92,11 @@ type RegisterTypesRequest struct {
 	// EntityTypes is the type catalog this call registers. Required.
 	EntityTypes []EntityTypeDef
 
+	// RelationshipTypes declares edge types this call registers.
+	// Optional — a kit that only registers entity types leaves this
+	// empty. Relationship types are streamed after the entity types.
+	RelationshipTypes []RelationshipTypeDef
+
 	// TypeHierarchy declares parent-child relationships among
 	// EntityTypes. Optional — hierarchy can also be encoded on
 	// EntityTypeDef.ParentType, but providing the explicit
@@ -92,6 +115,35 @@ type EntityTypeDef struct {
 	ParentType  string
 	Category    string
 	Properties  []TypeProperty
+
+	// Materialization is "physical" (default/empty) or "logical" — the
+	// hybrid ontology modeling flag (OGA-584). Empty ⇒ physical.
+	Materialization transfer.Materialization
+
+	// PhysicalType is the materialised physical type a logical type's
+	// instances are stored under. Required iff Materialization == logical.
+	PhysicalType string
+}
+
+// RelationshipTypeDef is the kit-author-facing relationship type
+// definition. Mirrors transfer.RelationshipTypeDef.
+type RelationshipTypeDef struct {
+	Name        string
+	DisplayName map[string]string
+	Description map[string]string
+	SourceType  string
+	TargetType  string
+	Cardinality string
+	Properties  []TypeProperty
+
+	// Materialization is "physical" (default/empty) or "logical" — the
+	// hybrid ontology modeling flag (OGA-584, C7). Empty ⇒ physical.
+	Materialization transfer.Materialization
+
+	// PhysicalType is the materialised physical edge type a logical
+	// relationship's instances are stored under. Required iff
+	// Materialization == logical.
+	PhysicalType string
 }
 
 // TypeProperty mirrors transfer.TypeProperty.

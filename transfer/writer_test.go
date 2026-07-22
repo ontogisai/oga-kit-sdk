@@ -157,6 +157,9 @@ func TestWriter_RejectsMissingRequiredFields(t *testing.T) {
 		{"entity_type_no_name", func() error {
 			return w.WriteEntityType(ctx, transfer.EntityTypeDef{})
 		}},
+		{"relationship_type_no_name", func() error {
+			return w.WriteRelationshipType(ctx, transfer.RelationshipTypeDef{})
+		}},
 		{"hierarchy_no_type_name", func() error {
 			return w.WriteHierarchy(ctx, transfer.HierarchyEntry{ParentType: "p"})
 		}},

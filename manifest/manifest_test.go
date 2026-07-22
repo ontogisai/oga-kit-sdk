@@ -762,3 +762,227 @@ func TestValidate_Monitors(t *testing.T) {
 		})
 	}
 }
+
+// TestParse_ModelingHybrid covers the happy path: a manifest carrying a valid
+// spec.modeling hybrid block parses, the values round-trip into the typed
+// structure, and Validate accepts them.
+func TestParse_ModelingHybrid(t *testing.T) {
+	input := `
+api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: oga-kit-sj24k
+  version: "1.0.0"
+spec:
+  platform_version: ">=1.0.0"
+  modeling:
+    mode: hybrid
+    default_physical_type: Asset
+    physical_types:
+      - name: Equipment
+        anchor_roots: [brick_Equipment, brick_System]
+      - name: Location
+        anchor_roots: [brick_Location]
+      - name: Asset
+`
+	m, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if m.Spec.Modeling == nil {
+		t.Fatal("Spec.Modeling is nil, want populated block")
+	}
+	if got := m.Spec.ModelingMode(); got != ModelingModeHybrid {
+		t.Errorf("ModelingMode() = %q, want %q", got, ModelingModeHybrid)
+	}
+	if got := len(m.Spec.Modeling.PhysicalTypes); got != 3 {
+		t.Fatalf("PhysicalTypes count = %d, want 3", got)
+	}
+	if m.Spec.Modeling.DefaultPhysicalType != "Asset" {
+		t.Errorf("DefaultPhysicalType = %q, want %q", m.Spec.Modeling.DefaultPhysicalType, "Asset")
+	}
+	pt0 := m.Spec.Modeling.PhysicalTypes[0]
+	if pt0.Name != "Equipment" {
+		t.Errorf("physical_types[0].Name = %q, want Equipment", pt0.Name)
+	}
+	if len(pt0.AnchorRoots) != 2 || pt0.AnchorRoots[0] != "brick_Equipment" {
+		t.Errorf("physical_types[0].AnchorRoots = %v", pt0.AnchorRoots)
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestParse_ModelingRejectsUnknownSubKey proves the strict KnownFields
+// decoding still fires inside the new spec.modeling block.
+func TestParse_ModelingRejectsUnknownSubKey(t *testing.T) {
+	input := `
+api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: k
+  version: "1.0.0"
+spec:
+  platform_version: ">=1.0.0"
+  modeling:
+    mode: hybrid
+    default_physical_type: Asset
+    physical_types:
+      - name: Asset
+    bogus_key: nope
+`
+	if _, err := Parse(strings.NewReader(input)); err == nil {
+		t.Fatal("expected Parse to reject unknown modeling sub-key, got nil")
+	} else if !strings.Contains(err.Error(), "bogus_key") {
+		t.Errorf("error = %q, want it to mention the unknown field bogus_key", err)
+	}
+}
+
+// TestParse_ModelingDefaultsTyped confirms a manifest with NO spec.modeling
+// block parses, validates, and reports the typed mode — the default-off
+// contract.
+func TestParse_ModelingDefaultsTyped(t *testing.T) {
+	input := `
+api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: built-environment
+  version: "1.0.0"
+spec:
+  platform_version: ">=1.0.0"
+`
+	m, err := Parse(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if m.Spec.Modeling != nil {
+		t.Errorf("Spec.Modeling = %+v, want nil (absent block)", m.Spec.Modeling)
+	}
+	if got := m.Spec.ModelingMode(); got != ModelingModeTyped {
+		t.Errorf("ModelingMode() = %q, want %q", got, ModelingModeTyped)
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestValidate_Modeling covers the per-field rules of spec.modeling.
+func TestValidate_Modeling(t *testing.T) {
+	base := func(md *ModelingSpec) *KitManifest {
+		return &KitManifest{
+			APIVersion: "ontogis.ai/v1",
+			Kind:       "DomainKitManifest",
+			Metadata:   KitMetadata{Name: "k", Version: "1.0.0"},
+			Spec:       KitSpec{PlatformVersion: ">=1.0.0", Modeling: md},
+		}
+	}
+
+	t.Run("valid hybrid", func(t *testing.T) {
+		err := Validate(base(&ModelingSpec{
+			Mode:                "hybrid",
+			DefaultPhysicalType: "Asset",
+			PhysicalTypes: []PhysicalTypeSpec{
+				{Name: "Equipment", AnchorRoots: []string{"brick_Equipment"}},
+				{Name: "Asset"},
+			},
+		}))
+		if err != nil {
+			t.Fatalf("valid hybrid rejected: %v", err)
+		}
+	})
+
+	t.Run("typed mode ignores physical_types", func(t *testing.T) {
+		// A typed block with no physical_types / default must still pass.
+		if err := Validate(base(&ModelingSpec{Mode: "typed"})); err != nil {
+			t.Fatalf("typed block rejected: %v", err)
+		}
+	})
+
+	t.Run("empty mode treated as typed", func(t *testing.T) {
+		if err := Validate(base(&ModelingSpec{})); err != nil {
+			t.Fatalf("empty-mode block rejected: %v", err)
+		}
+	})
+
+	bad := []struct {
+		name    string
+		md      *ModelingSpec
+		wantErr string
+	}{
+		{
+			name:    "invalid mode",
+			md:      &ModelingSpec{Mode: "generalised"},
+			wantErr: `mode = "generalised" is invalid`,
+		},
+		{
+			name:    "hybrid empty physical_types",
+			md:      &ModelingSpec{Mode: "hybrid", DefaultPhysicalType: "Asset"},
+			wantErr: "physical_types must be non-empty",
+		},
+		{
+			name: "hybrid missing default",
+			md: &ModelingSpec{
+				Mode:          "hybrid",
+				PhysicalTypes: []PhysicalTypeSpec{{Name: "Asset"}},
+			},
+			wantErr: "default_physical_type is required",
+		},
+		{
+			name: "hybrid default not in set",
+			md: &ModelingSpec{
+				Mode:                "hybrid",
+				DefaultPhysicalType: "Nope",
+				PhysicalTypes:       []PhysicalTypeSpec{{Name: "Asset"}},
+			},
+			wantErr: `default_physical_type = "Nope" must be one of physical_types`,
+		},
+		{
+			name: "physical type missing name",
+			md: &ModelingSpec{
+				Mode:                "hybrid",
+				DefaultPhysicalType: "Asset",
+				PhysicalTypes:       []PhysicalTypeSpec{{Name: "Asset"}, {AnchorRoots: []string{"x"}}},
+			},
+			wantErr: "spec.modeling.physical_types[1]: name is required",
+		},
+		{
+			name: "duplicate physical type name",
+			md: &ModelingSpec{
+				Mode:                "hybrid",
+				DefaultPhysicalType: "Asset",
+				PhysicalTypes:       []PhysicalTypeSpec{{Name: "Asset"}, {Name: "Asset"}},
+			},
+			wantErr: `name = "Asset" duplicates spec.modeling.physical_types[0]`,
+		},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Validate(base(tt.md))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestIsValidModelingMode exercises the helper directly.
+func TestIsValidModelingMode(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"typed", true},
+		{"hybrid", true},
+		{"", false},
+		{"generalised", false},
+		{"Hybrid", false}, // case-sensitive
+	}
+	for _, tt := range tests {
+		if got := IsValidModelingMode(tt.in); got != tt.want {
+			t.Errorf("IsValidModelingMode(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
