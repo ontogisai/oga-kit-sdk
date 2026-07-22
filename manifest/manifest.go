@@ -127,6 +127,87 @@ type KitSpec struct {
 	// internal/anomalymonitor.RawMonitorConfig exactly so YAML authored against
 	// either type round-trips without translation.
 	Monitors []MonitorSpec `yaml:"monitors,omitempty"`
+
+	// Modeling opts a kit into the hybrid ontology modeling mode
+	// (OGA-584 / hybrid-ontology-modeling design). When absent the kit is
+	// "typed" — one physical vertex type per ontology class, exactly as
+	// before this field existed (default-off). When mode is "hybrid" the
+	// kit declares a small set of materialised functional physical types;
+	// fine leaf classes are registered as logical, catalog-only types
+	// stored under one of the physical types (no per-leaf DDL). See
+	// ModelingSpec for the field-level contract.
+	Modeling *ModelingSpec `yaml:"modeling,omitempty"`
+}
+
+// ModelingMode enumerates the ontology materialization mode a kit runs in.
+type ModelingMode = string
+
+// Recognized modeling modes.
+const (
+	// ModelingModeTyped is the default: one physical vertex type per
+	// ontology class (class-as-schema). This is the pre-hybrid behaviour
+	// and is what an SDK consumer that declares no spec.modeling gets.
+	ModelingModeTyped ModelingMode = "typed"
+
+	// ModelingModeHybrid decouples the logical type from the physical
+	// vertex type: fine leaf classes are catalog-only logical types stored
+	// under a coarser materialised physical type resolved at write time.
+	ModelingModeHybrid ModelingMode = "hybrid"
+)
+
+// ModelingSpec is the optional spec.modeling block. It is opt-in and
+// default-off: a nil *ModelingSpec (absent block) means the kit runs in
+// ModelingModeTyped.
+type ModelingSpec struct {
+	// Mode is "typed" (default) or "hybrid". An empty Mode is treated as
+	// "typed" so that a spec.modeling block that only overrides, say, the
+	// physical types without setting mode still parses; Validate rejects
+	// any other value.
+	Mode string `yaml:"mode,omitempty"`
+
+	// PhysicalTypes is the set of materialised functional physical types
+	// the kit registers real DDL for. Required (non-empty) when
+	// Mode == hybrid; ignored when typed.
+	PhysicalTypes []PhysicalTypeSpec `yaml:"physical_types,omitempty"`
+
+	// DefaultPhysicalType is the physical type a leaf falls back to when
+	// its ancestry matches none of the physical types' anchor_roots.
+	// Required when Mode == hybrid and MUST name one of PhysicalTypes.
+	DefaultPhysicalType string `yaml:"default_physical_type,omitempty"`
+}
+
+// PhysicalTypeSpec declares one materialised functional physical type in a
+// hybrid kit.
+type PhysicalTypeSpec struct {
+	// Name is the physical vertex type name (e.g. "Equipment"). The
+	// platform tenant-prefixes it at persistence time. Required and unique
+	// within the kit.
+	Name string `yaml:"name"`
+
+	// AnchorRoots are opaque ontology root type names whose subtree resolves
+	// to this physical type. They carry no domain semantics to the SDK — the
+	// platform's write-time resolver walks a leaf's ancestry to the first
+	// anchor_roots match. Optional: a physical type with no anchor_roots is
+	// only reachable as the default_physical_type or by an explicit
+	// physical-leaf override.
+	AnchorRoots []string `yaml:"anchor_roots,omitempty"`
+}
+
+// ModelingMode reports the effective modeling mode for the kit: the declared
+// spec.modeling.mode, or ModelingModeTyped when the block is absent or its
+// mode is empty. Callers should use this rather than reading Spec.Modeling
+// directly so the default-off behaviour is applied uniformly.
+func (s *KitSpec) ModelingMode() ModelingMode {
+	if s.Modeling == nil || s.Modeling.Mode == "" {
+		return ModelingModeTyped
+	}
+	return s.Modeling.Mode
+}
+
+// IsValidModelingMode reports whether s is one of the recognized modeling
+// mode values (typed | hybrid).
+func IsValidModelingMode(s string) bool {
+	return s == ModelingModeTyped || s == ModelingModeHybrid
 }
 
 // PromptFragmentEntry declares a prompt fragment file targeting a specific
@@ -490,6 +571,62 @@ func Validate(m *KitManifest) error {
 	}
 	if err := validateMonitors(m.Spec.Monitors); err != nil {
 		return err
+	}
+	if err := validateModeling(m.Spec.Modeling); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateModeling enforces the spec.modeling contract (OGA-584). An absent
+// block (nil) is valid — the kit defaults to typed. When present:
+//   - mode must be "" (treated as typed), "typed", or "hybrid".
+//   - when mode == hybrid: physical_types must be non-empty, each physical
+//     type must have a name, names must be unique, and default_physical_type
+//     is required and must name one of the declared physical types.
+//
+// anchor_roots are opaque ontology root type names — the SDK does not
+// interpret them, so they are not validated beyond being carried through.
+func validateModeling(md *ModelingSpec) error {
+	if md == nil {
+		return nil
+	}
+	if md.Mode != "" && !IsValidModelingMode(md.Mode) {
+		return fmt.Errorf(
+			"spec.modeling: mode = %q is invalid; must be %q or %q",
+			md.Mode, ModelingModeTyped, ModelingModeHybrid,
+		)
+	}
+	// typed (or empty ⇒ typed) has no further requirements; physical_types /
+	// default_physical_type are ignored.
+	if md.Mode != ModelingModeHybrid {
+		return nil
+	}
+	if len(md.PhysicalTypes) == 0 {
+		return fmt.Errorf("spec.modeling: physical_types must be non-empty when mode is %q", ModelingModeHybrid)
+	}
+	seen := make(map[string]int, len(md.PhysicalTypes))
+	for i := range md.PhysicalTypes {
+		pt := &md.PhysicalTypes[i]
+		if pt.Name == "" {
+			return fmt.Errorf("spec.modeling.physical_types[%d]: name is required", i)
+		}
+		if prev, ok := seen[pt.Name]; ok {
+			return fmt.Errorf(
+				"spec.modeling.physical_types[%d]: name = %q duplicates spec.modeling.physical_types[%d]",
+				i, pt.Name, prev,
+			)
+		}
+		seen[pt.Name] = i
+	}
+	if md.DefaultPhysicalType == "" {
+		return fmt.Errorf("spec.modeling: default_physical_type is required when mode is %q", ModelingModeHybrid)
+	}
+	if _, ok := seen[md.DefaultPhysicalType]; !ok {
+		return fmt.Errorf(
+			"spec.modeling: default_physical_type = %q must be one of physical_types",
+			md.DefaultPhysicalType,
+		)
 	}
 	return nil
 }

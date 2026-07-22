@@ -47,12 +47,14 @@ func (r *Registrar) RegisterTypes(ctx context.Context, req RegisterTypesRequest)
 	for i := range req.EntityTypes {
 		t := req.EntityTypes[i]
 		if err := r.writer.WriteEntityType(ctx, transfer.EntityTypeDef{
-			Name:        t.Name,
-			DisplayName: t.DisplayName,
-			Description: t.Description,
-			ParentType:  t.ParentType,
-			Category:    t.Category,
-			Properties:  toTransferProperties(t.Properties),
+			Name:            t.Name,
+			DisplayName:     t.DisplayName,
+			Description:     t.Description,
+			ParentType:      t.ParentType,
+			Category:        t.Category,
+			Properties:      toTransferProperties(t.Properties),
+			Materialization: t.Materialization,
+			PhysicalType:    t.PhysicalType,
 		}); err != nil {
 			return err
 		}
@@ -92,6 +94,14 @@ type EntityTypeDef struct {
 	ParentType  string
 	Category    string
 	Properties  []TypeProperty
+
+	// Materialization is "physical" (default/empty) or "logical" — the
+	// hybrid ontology modeling flag (OGA-584). Empty ⇒ physical.
+	Materialization transfer.Materialization
+
+	// PhysicalType is the materialised physical type a logical type's
+	// instances are stored under. Required iff Materialization == logical.
+	PhysicalType string
 }
 
 // TypeProperty mirrors transfer.TypeProperty.
