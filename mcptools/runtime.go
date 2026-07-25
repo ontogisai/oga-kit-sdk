@@ -30,15 +30,62 @@ const (
 type ToolHandler func(ctx context.Context, args json.RawMessage) (any, error)
 
 // Tool is a registered tool: its MCP definition plus the handler that runs it.
+//
+// A Tool is the SINGLE declaration a kit writes for each Tier 3 tool. The
+// runtime serves it via tools/list, and RenderToolsManifest emits it into the
+// kit manifest's tools/*.yaml — so the schema the sidecar serves and the schema
+// the platform registers from the manifest can never diverge (the OGA-582 root
+// cause of a hand-authored YAML drifting from the runtime Go schemas). Because
+// InputSchema is a Go value marshaled by the emitter, a localized-object
+// property description (the OGA-582 bug) is structurally impossible.
 type Tool struct {
 	// Name is the unique tool name (e.g. "fm_get_building_overview").
 	Name string
 	// Description is the human-readable tool description surfaced in tools/list.
+	// When DisplayNameI18n/DescriptionI18n are set for the manifest, this is
+	// optional — tools/list falls back to DescriptionI18n["en-US"].
 	Description string
-	// InputSchema is the JSON Schema for the tool arguments (tools/list).
+	// InputSchema is the JSON Schema for the tool arguments (tools/list +
+	// manifest). Every `description` within it MUST be a plain string (JSON
+	// Schema property descriptions are not localizable — OGA-582).
 	InputSchema json.RawMessage
-	// Handler runs the tool.
+	// Handler runs the tool. Required to Register (serve); may be nil in a slice
+	// passed to RenderToolsManifest (emission reads metadata only, never calls
+	// the handler).
 	Handler ToolHandler
+
+	// --- Manifest metadata (OGA-582). Optional; consumed by RenderToolsManifest,
+	// ignored by tools/list except DescriptionI18n's en-US fallback. ---
+
+	// DisplayNameI18n is the localized, human-readable tool name (manifest
+	// metadata.tools[].display_name). Legitimately localizable.
+	DisplayNameI18n map[string]string
+	// DescriptionI18n is the localized tool-level description
+	// (manifest tools[].description). Legitimately localizable. When set, its
+	// en-US value is the tools/list description if Description is empty.
+	DescriptionI18n map[string]string
+	// Mutates marks a state-changing tool (confirm-before-write gate, OGA-446).
+	Mutates bool
+	// Composition records the platform Tier 1/2 tools the handler calls
+	// internally (manifest composition_reference). Documentation only.
+	Composition []string
+}
+
+// listDescription is the description tools/list advertises: the explicit
+// Description, else the en-US localized description, else any locale.
+func (t Tool) listDescription() string {
+	if t.Description != "" {
+		return t.Description
+	}
+	if v, ok := t.DescriptionI18n["en-US"]; ok && v != "" {
+		return v
+	}
+	for _, v := range t.DescriptionI18n {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // Runtime is the default MCP tool server runtime for domain-kit Tier 3

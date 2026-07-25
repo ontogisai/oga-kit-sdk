@@ -192,7 +192,7 @@ func (r *Runtime) listToolsResult() map[string]any {
 		}
 		out = append(out, map[string]any{
 			"name":        t.Name,
-			"description": t.Description,
+			"description": t.listDescription(),
 			"inputSchema": schema,
 		})
 	}
