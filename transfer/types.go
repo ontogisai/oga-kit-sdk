@@ -318,6 +318,15 @@ type TypeProperty struct {
 	Description map[string]string `json:"description,omitempty"`
 	Type        string            `json:"type,omitempty"`
 	Required    bool              `json:"required,omitempty"`
+
+	// NOTE (KIV): there is deliberately NO allowed-values / enum field here
+	// yet. The platform's ontology model keeps a per-property allowed-values
+	// list (domainkit PropertyDef.Values, YAML `values:`) reserved for a
+	// planned enum-constraint feature, but it is not yet enforced/persisted
+	// and is NOT part of this wire contract. When enum support lands, add a
+	// `Values []string json:"values,omitempty"` here (and to the ontology
+	// Registrar) so an enum declared through the programmatic loader path can
+	// flow to the platform — until then it cannot. Tracked in OGA-615.
 }
 
 // HierarchyEntry declares a parent-child relationship between two
