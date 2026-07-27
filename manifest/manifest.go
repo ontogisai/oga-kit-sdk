@@ -296,8 +296,12 @@ type SourceConnectorSpec struct {
 	Name string `yaml:"name"`
 
 	// Image is the container image reference (with digest) for the connector
-	// sidecar.
-	Image string `yaml:"image"`
+	// sidecar. DEPRECATED as the declaration site: declare the image under
+	// container.image instead, consistent with agents / MCP servers / loaders
+	// (OGA-637). This top-level field is still honored as a fallback for kits
+	// authored before the convention converged; when both are set,
+	// container.image wins. Use EffectiveImage() to resolve.
+	Image string `yaml:"image,omitempty"`
 
 	// Bindings are the (external_system, source_type) feeds this connector
 	// serves. At least one is required.
@@ -307,11 +311,14 @@ type SourceConnectorSpec struct {
 	// the connector to authenticate to its external systems (one or more).
 	CredentialRefs []string `yaml:"credential_refs,omitempty"`
 
-	// Container holds optional deployment overrides (image already lives at
-	// the top level; this carries port, resources, and env). The most common
-	// use is env: per-tenant, non-baked configuration such as an external
-	// system's base URL delivered via a SecretStore reference, e.g.
+	// Container holds the connector's deployment details. container.image is
+	// the CANONICAL place to declare the connector image (consistent with
+	// agents / MCP servers / loaders — OGA-637); it also carries port,
+	// resources, and env. A common env use is per-tenant, non-baked config such
+	// as an external system's base URL delivered via a SecretStore reference,
+	// e.g.
 	//   container:
+	//     image: ghcr.io/acme/wo-connector@sha256:...
 	//     env:
 	//       WO_MGMT_URL: "secret://wo-mgmt-url"
 	// The platform resolves a "secret://<name>" env value to the tenant-scoped
@@ -319,6 +326,17 @@ type SourceConnectorSpec struct {
 	// domainkit.SidecarContainerSpec field-for-field (continuous-ingress-
 	// connectors, OGA-437).
 	Container SidecarContainerSpec `yaml:"container,omitempty"`
+}
+
+// EffectiveImage returns the connector's container image, preferring the
+// canonical Container.Image and falling back to the deprecated top-level Image
+// for backward-compatibility (OGA-637). Kit authors should declare the image
+// under container.image; validate + the platform both resolve through here.
+func (c *SourceConnectorSpec) EffectiveImage() string {
+	if c.Container.Image != "" {
+		return c.Container.Image
+	}
+	return c.Image
 }
 
 // SidecarContainerSpec holds optional deployment overrides for a sidecar the
@@ -806,8 +824,8 @@ func validateSourceConnectors(conns []SourceConnectorSpec) error {
 			)
 		}
 		seenConn[c.Name] = i
-		if c.Image == "" {
-			return fmt.Errorf("spec.source_connectors[%d]: image is required", i)
+		if c.EffectiveImage() == "" {
+			return fmt.Errorf("spec.source_connectors[%d]: image is required (declare it under container.image)", i)
 		}
 		if len(c.Bindings) == 0 {
 			return fmt.Errorf("spec.source_connectors[%d]: at least one binding is required", i)

@@ -30,6 +30,40 @@ func TestValidate_SourceConnectors_Valid(t *testing.T) {
 	}
 }
 
+// TestValidate_SourceConnectors_ContainerImage proves the canonical location
+// for a connector image is container.image (OGA-637): a connector declaring
+// the image ONLY under container.image validates, matching agents/MCP/loaders.
+func TestValidate_SourceConnectors_ContainerImage(t *testing.T) {
+	m := baseManifestWithConnectors([]SourceConnectorSpec{{
+		Name:      "fm-wo-connector",
+		Container: SidecarContainerSpec{Image: "ghcr.io/ontogisai/oga-kit-built-environment/fm-wo-connector@sha256:abc", Port: 8500},
+		Bindings:  []SourceBindingSpec{{ID: "wo-status", ExternalSystem: "contract_wo_mgmt", SourceType: "wo_status_feed", Modes: []string{"webhook"}}},
+	}})
+	if err := Validate(m); err != nil {
+		t.Fatalf("connector with container.image should be valid, got %v", err)
+	}
+}
+
+// TestSourceConnectorSpec_EffectiveImage locks the precedence: container.image
+// canonical, top-level image the back-compat fallback.
+func TestSourceConnectorSpec_EffectiveImage(t *testing.T) {
+	cases := []struct {
+		name string
+		spec SourceConnectorSpec
+		want string
+	}{
+		{"container only", SourceConnectorSpec{Container: SidecarContainerSpec{Image: "c:2"}}, "c:2"},
+		{"top-level only", SourceConnectorSpec{Image: "c:1"}, "c:1"},
+		{"both → container wins", SourceConnectorSpec{Image: "c:1", Container: SidecarContainerSpec{Image: "c:2"}}, "c:2"},
+		{"neither", SourceConnectorSpec{}, ""},
+	}
+	for _, tt := range cases {
+		if got := tt.spec.EffectiveImage(); got != tt.want {
+			t.Errorf("%s: EffectiveImage() = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
 // TestParse_SourceConnectorContainerEnv proves the strict decoder (Parse uses
 // KnownFields(true)) accepts a source connector's container.env block and
 // decodes it — so a kit can deliver per-tenant connector config such as
