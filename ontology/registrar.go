@@ -127,9 +127,13 @@ type EntityTypeDef struct {
 }
 
 // RelationshipTypeDef is the kit-author-facing relationship type
-// definition. Mirrors transfer.RelationshipTypeDef (OGA-659).
+// definition. Mirrors transfer.RelationshipTypeDef (OGA-659) — declare
+// DisplayName/Description the same way you do on EntityTypeDef.
 type RelationshipTypeDef struct {
-	Name        string
+	Name string
+	// DisplayName is the per-locale (BCP-47) human label; the platform
+	// preserves every locale as the edge type's localized label (NameI18n).
+	// Same convention as EntityTypeDef.
 	DisplayName map[string]string
 	Description map[string]string
 	SourceType  string

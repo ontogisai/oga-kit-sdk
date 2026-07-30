@@ -285,9 +285,18 @@ type RelationshipTypeDef struct {
 	// DisplayName is the human-readable name keyed by full BCP-47 locale
 	// tag (e.g. "en-US", "vi-VN"). Short-form keys are rejected by
 	// ValidateLocaleKeys — same convention as EntityTypeDef.
+	//
+	// The platform stores these per-locale as the relationship type's
+	// localized label (its NameI18n), rendered per-locale at the API boundary
+	// (OGA-659). Unlike EntityTypeDef there is no en-US "display name" scalar
+	// on the platform edge — an edge has no keyword-search surface that would
+	// consume one — but every locale you set here is preserved.
 	DisplayName map[string]string `json:"display_name,omitempty"`
 
 	// Description is a detailed description keyed by full BCP-47 locale tag.
+	// The en-US entry is the canonical input for the relationship type's
+	// embedding text (semantic predicate search); all locales are also
+	// preserved as the platform's DescriptionI18n (OGA-659).
 	Description map[string]string `json:"description,omitempty"`
 
 	// SourceType is the source entity type name, or "*" for any. Mirrors
