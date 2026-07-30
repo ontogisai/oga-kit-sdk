@@ -28,6 +28,9 @@ func (f *fakeWriter) WriteVertex(_ context.Context, v transfer.Vertex) error {
 }
 func (f *fakeWriter) WriteEdge(context.Context, transfer.Edge) error                { return nil }
 func (f *fakeWriter) WriteEntityType(context.Context, transfer.EntityTypeDef) error { return nil }
+func (f *fakeWriter) WriteRelationshipType(context.Context, transfer.RelationshipTypeDef) error {
+	return nil
+}
 func (f *fakeWriter) WriteHierarchy(context.Context, transfer.HierarchyEntry) error { return nil }
 func (f *fakeWriter) Close(context.Context) (*transfer.Receipt, error) {
 	f.closed = true

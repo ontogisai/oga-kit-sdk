@@ -263,11 +263,19 @@ type EntityTypeDef struct {
 // predicate mapped onto a coarser physical edge type (e.g. the generic
 // RELATES), with the fine predicate carried in relationship_type data.
 //
-// The platform registers relationship types from the manifest ontology YAML
-// (declarative path) and resolves new predicates onto RELATES at edge-write
-// time; this type is the shared shape the platform and kit reference. It is
-// not currently streamed through the transfer writer (which handles vertices,
-// edges, entity types, and hierarchy) — so there is no WriteRelationshipType.
+// Two paths register relationship types dynamically (OGA-659):
+//
+//   - The transfer writer, via [Writer.WriteRelationshipType], lets a
+//     kind=ontology loader stream edge-type definitions alongside its entity
+//     types + hierarchy — the streaming-loader edge path, symmetric with
+//     WriteEntityType. The platform MERGES them into the active ontology (it
+//     never carries relationship types forward blindly — OGA-564).
+//   - The connector [OntologySnapshot] carries the full desired relationship
+//     type set for a Source Connector's gated ontology-refresh.
+//
+// New predicates a loader/connector does not register still resolve to the
+// generic RELATES edge type at edge-write time — the safety net for
+// genuinely-unknown predicates.
 type RelationshipTypeDef struct {
 	// Name is the stable identifier (e.g. "equipmentHasSchedule"). Must
 	// match the DDL type name without tenant prefix; the platform adds the
@@ -364,10 +372,11 @@ type Header struct {
 type EntryKind string
 
 const (
-	EntryVertex     EntryKind = "vertex"
-	EntryEdge       EntryKind = "edge"
-	EntryEntityType EntryKind = "entity_type"
-	EntryHierarchy  EntryKind = "hierarchy"
+	EntryVertex           EntryKind = "vertex"
+	EntryEdge             EntryKind = "edge"
+	EntryEntityType       EntryKind = "entity_type"
+	EntryRelationshipType EntryKind = "relationship_type"
+	EntryHierarchy        EntryKind = "hierarchy"
 )
 
 // Envelope wraps each non-header record so the platform's stream

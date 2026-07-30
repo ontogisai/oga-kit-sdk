@@ -59,6 +59,22 @@ func (r *Registrar) RegisterTypes(ctx context.Context, req RegisterTypesRequest)
 			return err
 		}
 	}
+	for i := range req.RelationshipTypes {
+		rt := req.RelationshipTypes[i]
+		if err := r.writer.WriteRelationshipType(ctx, transfer.RelationshipTypeDef{
+			Name:            rt.Name,
+			DisplayName:     rt.DisplayName,
+			Description:     rt.Description,
+			SourceType:      rt.SourceType,
+			TargetType:      rt.TargetType,
+			Cardinality:     rt.Cardinality,
+			Properties:      toTransferProperties(rt.Properties),
+			Materialization: rt.Materialization,
+			PhysicalType:    rt.PhysicalType,
+		}); err != nil {
+			return err
+		}
+	}
 	for i := range req.TypeHierarchy {
 		h := req.TypeHierarchy[i]
 		if err := r.writer.WriteHierarchy(ctx, transfer.HierarchyEntry{
@@ -75,6 +91,12 @@ func (r *Registrar) RegisterTypes(ctx context.Context, req RegisterTypesRequest)
 type RegisterTypesRequest struct {
 	// EntityTypes is the type catalog this call registers. Required.
 	EntityTypes []EntityTypeDef
+
+	// RelationshipTypes declares edge types this call registers.
+	// Optional — a kit that only registers entity types leaves this
+	// empty. Relationship types are streamed after the entity types
+	// (OGA-659).
+	RelationshipTypes []RelationshipTypeDef
 
 	// TypeHierarchy declares parent-child relationships among
 	// EntityTypes. Optional — hierarchy can also be encoded on
@@ -101,6 +123,27 @@ type EntityTypeDef struct {
 
 	// PhysicalType is the materialised physical type a logical type's
 	// instances are stored under. Required iff Materialization == logical.
+	PhysicalType string
+}
+
+// RelationshipTypeDef is the kit-author-facing relationship type
+// definition. Mirrors transfer.RelationshipTypeDef (OGA-659).
+type RelationshipTypeDef struct {
+	Name        string
+	DisplayName map[string]string
+	Description map[string]string
+	SourceType  string
+	TargetType  string
+	Cardinality string
+	Properties  []TypeProperty
+
+	// Materialization is "physical" (default/empty) or "logical" — the
+	// hybrid ontology modeling flag (OGA-584, C7). Empty ⇒ physical.
+	Materialization transfer.Materialization
+
+	// PhysicalType is the materialised physical edge type a logical
+	// relationship's instances are stored under. Required iff
+	// Materialization == logical.
 	PhysicalType string
 }
 
