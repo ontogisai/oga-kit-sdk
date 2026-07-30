@@ -35,6 +35,14 @@ type Writer interface {
 	// WriteEntityType emits one entity-type definition.
 	WriteEntityType(ctx context.Context, t EntityTypeDef) error
 
+	// WriteRelationshipType emits one relationship (edge) type
+	// definition. Used by kind=ontology loaders that register edge
+	// types dynamically (OGA-659) — symmetric with WriteEntityType.
+	// The platform merges these into the active ontology's relationship
+	// types (it never blindly carries them forward — OGA-564) and
+	// materializes the {tenant}_RelationshipTypeDef projection.
+	WriteRelationshipType(ctx context.Context, t RelationshipTypeDef) error
+
 	// WriteHierarchy emits one parent-child relationship between two
 	// entity types. Send these only after the corresponding
 	// EntityTypeDef entries.
@@ -196,6 +204,13 @@ func (w *bufferedWriter) WriteEntityType(_ context.Context, t EntityTypeDef) err
 		return errors.New("transfer.WriteEntityType: name is required")
 	}
 	return w.writeEnvelope(EntryEntityType, t)
+}
+
+func (w *bufferedWriter) WriteRelationshipType(_ context.Context, t RelationshipTypeDef) error {
+	if t.Name == "" {
+		return errors.New("transfer.WriteRelationshipType: name is required")
+	}
+	return w.writeEnvelope(EntryRelationshipType, t)
 }
 
 func (w *bufferedWriter) WriteHierarchy(_ context.Context, h HierarchyEntry) error {

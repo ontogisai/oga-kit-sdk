@@ -52,6 +52,64 @@ func TestRegistrar_RegisterTypes_StreamsAllEntries(t *testing.T) {
 	}
 }
 
+// TestRegistrar_RegisterTypes_StreamsRelationshipTypes verifies RegisterTypes
+// streams relationship (edge) types after the entity types (OGA-659), threading
+// the source/target/cardinality + hybrid fields into the wire records.
+func TestRegistrar_RegisterTypes_StreamsRelationshipTypes(t *testing.T) {
+	t.Parallel()
+	fc := &transfer.FakeCommitClient{}
+	w := transfer.NewOntologyWriter(fc, "oga-kit-sj24k")
+	reg := ontology.NewRegistrar(w)
+
+	req := ontology.RegisterTypesRequest{
+		EntityTypes: []ontology.EntityTypeDef{
+			{Name: "brick_AHU"},
+			{Name: "brick_VAV"},
+		},
+		RelationshipTypes: []ontology.RelationshipTypeDef{
+			{
+				Name:        "brick_feeds",
+				DisplayName: map[string]string{"en-US": "Feeds"},
+				SourceType:  "brick_AHU",
+				TargetType:  "brick_VAV",
+				Cardinality: "one_to_many",
+			},
+			{
+				Name:            "brick_hasPoint",
+				SourceType:      "brick_AHU",
+				TargetType:      "*",
+				Materialization: transfer.MaterializationLogical,
+				PhysicalType:    "RELATES",
+			},
+		},
+	}
+	if err := reg.RegisterTypes(context.Background(), req); err != nil {
+		t.Fatalf("RegisterTypes: %v", err)
+	}
+	receipt, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("writer Close: %v", err)
+	}
+	// 2 entity types + 2 relationship types = 4 records.
+	if receipt.EntryCount != 4 {
+		t.Errorf("EntryCount = %d, want 4 (2 entity + 2 relationship types)", receipt.EntryCount)
+	}
+	body := string(fc.LastBody())
+	for _, want := range []string{
+		`"kind":"relationship_type"`,
+		`"name":"brick_feeds"`,
+		`"target_type":"brick_VAV"`,
+		`"cardinality":"one_to_many"`,
+		`"name":"brick_hasPoint"`,
+		`"materialization":"logical"`,
+		`"physical_type":"RELATES"`,
+	} {
+		if !contains(body, want) {
+			t.Errorf("body missing %q\nbody: %s", want, body)
+		}
+	}
+}
+
 func TestRegistrar_RejectsEmpty(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}

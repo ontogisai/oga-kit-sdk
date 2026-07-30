@@ -174,6 +174,58 @@ func TestWriter_RejectsMissingRequiredFields(t *testing.T) {
 	}
 }
 
+// TestWriter_RelationshipTypeEmitsEnvelope verifies WriteRelationshipType
+// streams a relationship_type envelope carrying the edge-type contract fields
+// (name, source/target, cardinality, hybrid materialization) — the streaming
+// loader edge path (OGA-659).
+func TestWriter_RelationshipTypeEmitsEnvelope(t *testing.T) {
+	t.Parallel()
+	fc := &transfer.FakeCommitClient{}
+	w := transfer.NewOntologyWriter(fc, "oga-kit-sj24k")
+	ctx := context.Background()
+
+	if err := w.WriteEntityType(ctx, transfer.EntityTypeDef{Name: "brick_AHU"}); err != nil {
+		t.Fatalf("WriteEntityType: %v", err)
+	}
+	if err := w.WriteRelationshipType(ctx, transfer.RelationshipTypeDef{
+		Name:        "brick_feeds",
+		DisplayName: map[string]string{"en-US": "Feeds"},
+		SourceType:  "brick_AHU",
+		TargetType:  "brick_VAV",
+		Cardinality: "one_to_many",
+	}); err != nil {
+		t.Fatalf("WriteRelationshipType: %v", err)
+	}
+	receipt, err := w.Close(ctx)
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if receipt.EntryCount != 2 {
+		t.Errorf("EntryCount = %d, want 2 (1 entity type + 1 relationship type)", receipt.EntryCount)
+	}
+	body := string(fc.LastBody())
+	for _, want := range []string{
+		`"kind":"relationship_type"`,
+		`"name":"brick_feeds"`,
+		`"source_type":"brick_AHU"`,
+		`"target_type":"brick_VAV"`,
+		`"cardinality":"one_to_many"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q\nbody: %s", want, body)
+		}
+	}
+}
+
+func TestWriter_RelationshipTypeRejectsMissingName(t *testing.T) {
+	t.Parallel()
+	fc := &transfer.FakeCommitClient{}
+	w := transfer.NewOntologyWriter(fc, "test-kit")
+	if err := w.WriteRelationshipType(context.Background(), transfer.RelationshipTypeDef{SourceType: "a"}); err == nil {
+		t.Error("WriteRelationshipType with no name should return error")
+	}
+}
+
 func TestWriter_CloseTwiceFails(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}

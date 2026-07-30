@@ -232,6 +232,17 @@ func (n *NopWriter) WriteEntityType(_ context.Context, _ EntityTypeDef) error {
 	return nil
 }
 
+// WriteRelationshipType implements transfer.Writer.
+func (n *NopWriter) WriteRelationshipType(_ context.Context, _ RelationshipTypeDef) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return errors.New("NopWriter: write after close")
+	}
+	n.count++
+	return nil
+}
+
 // WriteHierarchy implements transfer.Writer.
 func (n *NopWriter) WriteHierarchy(_ context.Context, _ HierarchyEntry) error {
 	n.mu.Lock()
