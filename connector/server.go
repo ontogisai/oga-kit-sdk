@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
 
@@ -41,7 +42,8 @@ type Config struct {
 	// Default 30s. Bindings with no poll mode are not polled.
 	PollInterval time.Duration
 
-	// Logger for lifecycle messages. Defaults to slog.Default().
+	// Logger for lifecycle messages. Defaults to kitlog.Default() (the
+	// identity-seeded logger installed by kitlog.Init()).
 	Logger *slog.Logger
 
 	// HTTP server timeouts (sensible defaults applied when zero).
@@ -57,7 +59,7 @@ func (c *Config) defaults() {
 		c.PollInterval = 30 * time.Second
 	}
 	if c.Logger == nil {
-		c.Logger = slog.Default()
+		c.Logger = kitlog.Default()
 	}
 	if c.ReadHeaderTimeout == 0 {
 		c.ReadHeaderTimeout = 10 * time.Second

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ontogisai/oga-kit-sdk/agent"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
 // Config holds operational tunables for Pipeline.Run.
@@ -235,7 +236,7 @@ func (p *Pipeline) runInternal(
 	}
 	logger := deps.Logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = kitlog.Default()
 	}
 
 	tracker := agent.NewSpanTracker("")
@@ -777,7 +778,7 @@ func (p *Pipeline) runArtifact(
 
 	logger := deps.Logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = kitlog.Default()
 	}
 	// Per-turn ReAct logging fires under either the dedicated proactive flag or
 	// the general agent-trace flag (OGA-423 Gap 1) — so OGA_AGENT_TRACE alone
@@ -843,7 +844,7 @@ func (p *Pipeline) gatherSync(
 	}
 	logger := deps.Logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = kitlog.Default()
 	}
 
 	tracker := agent.NewSpanTracker("")
@@ -889,7 +890,7 @@ func (p *Pipeline) assembleSync(
 	}
 	logger := deps.Logger
 	if logger == nil {
-		logger = slog.Default()
+		logger = kitlog.Default()
 	}
 
 	tracker := agent.NewSpanTracker("")
