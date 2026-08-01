@@ -8,6 +8,7 @@ import (
 
 	"github.com/ontogisai/oga-kit-sdk/auth"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
 // RuntimeDepsConfig configures the dependencies for DefaultRuntime.
@@ -45,6 +46,11 @@ type RuntimeDeps struct {
 
 // ConnectRuntimeDeps establishes connections to platform services.
 func ConnectRuntimeDeps(ctx context.Context, cfg *RuntimeDepsConfig) (*RuntimeDeps, error) {
+	// Standardize the process logger (JSON→stdout, identity-seeded) so the
+	// runtime's slog calls carry kit identity. Idempotent — safe when the kit
+	// main() already called kitlog.Init().
+	kitlog.Init()
+
 	if cfg.GatewayURL == "" {
 		return nil, fmt.Errorf("GatewayURL is required")
 	}
@@ -262,9 +268,10 @@ func (rt *DefaultRuntime) HandleReactive(ctx context.Context, msg *A2AMessage) (
 		return nil, fmt.Errorf("message contains no text content")
 	}
 
-	slog.Info("handling message",
+	// tenant_id/component are seeded on the kitlog default; only agent_id +
+	// call-specific fields are added here.
+	slog.InfoContext(ctx, "handling message",
 		"agent_id", rt.profile.AgentID,
-		"tenant_id", rt.deps.TenantID,
 		"text_length", len(userText),
 	)
 
@@ -408,9 +415,8 @@ func (rt *DefaultRuntime) reason(ctx context.Context, userText string) (string, 
 				successful++
 			}
 		}
-		slog.Info("agent: plan executed",
+		slog.InfoContext(ctx, "agent: plan executed",
 			"agent_id", rt.profile.AgentID,
-			"tenant_id", rt.deps.TenantID,
 			"steps_total", len(results),
 			"steps_succeeded", successful,
 		)

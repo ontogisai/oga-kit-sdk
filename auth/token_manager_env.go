@@ -3,9 +3,10 @@ package auth
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
 // EnvTokenManagerConfig configures NewTokenManagerFromEnv.
@@ -73,7 +74,7 @@ func NewTokenManagerFromEnv(ctx context.Context, cfg EnvTokenManagerConfig) (*To
 		if mErr != nil {
 			return nil, fmt.Errorf("mint workload token: %w", mErr)
 		}
-		slog.Info("workload token: bootstrap-mint mode", "agent_registration_id", regID)
+		kitlog.From(ctx).Info("workload token: bootstrap-mint mode", kitlog.KeyRegistrationID, regID)
 		return tm, nil
 	}
 
@@ -85,8 +86,8 @@ func NewTokenManagerFromEnv(ctx context.Context, cfg EnvTokenManagerConfig) (*To
 		if mErr != nil {
 			// Non-fatal: fall back to the static file token. The sidecar still
 			// works until the token expires; we log so the gap is visible.
-			slog.Warn("token manager init failed; running without token rotation",
-				"error", mErr, "token_path", cfg.TokenPath)
+			kitlog.From(ctx).Warn("token manager init failed; running without token rotation",
+				kitlog.Err(mErr), "token_path", cfg.TokenPath)
 			return nil, nil
 		}
 		return tm, nil

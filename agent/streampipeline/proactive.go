@@ -11,6 +11,7 @@ import (
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -101,7 +102,7 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 		return fmt.Errorf("build action decision schema: %w", err)
 	}
 
-	deps := Deps{Gateway: rt.Deps().Gateway, Logger: slog.Default(), Config: DefaultConfig()}
+	deps := Deps{Gateway: rt.Deps().Gateway, Logger: kitlog.Default(), Config: DefaultConfig()}
 	persona := ""
 	var grounding []agent.GroundingStep
 	if profile.ProactiveReasoning != nil {
@@ -140,7 +141,6 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 	if usageAvail {
 		slog.InfoContext(ctx, "proactive reasoning token usage",
 			"agent_id", profile.AgentID,
-			"tenant_id", event.TenantID,
 			"event_type", event.EventType,
 			"entity_id", event.EntityID,
 			"tokens_in", usage.PromptTokens,

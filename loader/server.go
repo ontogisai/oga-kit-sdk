@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
 
@@ -204,7 +205,7 @@ type ServerConfig struct {
 	ShutdownTimeout time.Duration
 
 	// Logger is used for startup / shutdown messages. Defaults to
-	// slog.Default().
+	// kitlog.Default() (the identity-seeded logger installed by kitlog.Init()).
 	Logger *slog.Logger
 
 	// HandlerOptions are passed to [Handler] when constructing the
@@ -230,7 +231,7 @@ func (c *ServerConfig) defaults() {
 		c.ShutdownTimeout = 30 * time.Second
 	}
 	if c.Logger == nil {
-		c.Logger = slog.Default()
+		c.Logger = kitlog.Default()
 	}
 }
 
@@ -553,7 +554,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
-		slog.Error("loader: write response", "error", err, "status", status)
+		kitlog.Default().Error("loader: write response", kitlog.Err(err), "status", status)
 	}
 }
 

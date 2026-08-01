@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/ontogisai/oga-kit-sdk/agent"
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
 // LLMToolPlanner implements Planner by asking the LLM for the SINGLE next action
@@ -28,7 +29,7 @@ type LLMToolPlanner struct {
 // are supplied per turn via PlanState.Persona, so the KA (no DomainAgentProfile)
 // and domain agents share one constructor.
 func NewLLMToolPlanner(gw PlatformAccess, cfg agent.PlannerConfig) *LLMToolPlanner {
-	return &LLMToolPlanner{gw: gw, cfg: cfg, logger: slog.Default()}
+	return &LLMToolPlanner{gw: gw, cfg: cfg, logger: kitlog.Default()}
 }
 
 // Next asks the LLM for the next action against the observations so far and maps

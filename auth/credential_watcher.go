@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
 // CredentialWatcher monitors a credentials file for changes and invokes a
@@ -72,7 +73,7 @@ func (cw *CredentialWatcher) loop() {
 			if !ok {
 				return
 			}
-			slog.Error("credential watcher error", "error", err, "path", cw.path)
+			slog.Error("credential watcher error", kitlog.Err(err), "path", cw.path)
 		case <-cw.stopCh:
 			return
 		}

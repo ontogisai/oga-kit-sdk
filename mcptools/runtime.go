@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/gateway"
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
 const (
@@ -124,6 +125,10 @@ func NewRuntime(gw *gateway.PlatformGatewayClient, closer io.Closer) *Runtime {
 // gateway.NewClientFromEnv). A bootstrap-mint failure is fatal and returned as
 // an error — the sidecar must not serve without a verifiable identity.
 func NewRuntimeFromEnv(ctx context.Context) (*Runtime, error) {
+	// Standardize the process logger (JSON→stdout, identity-seeded) so the
+	// lifecycle logs below carry kit identity. Idempotent — safe when the kit
+	// main() already called kitlog.Init().
+	kitlog.Init()
 	gw, closer, err := gateway.NewClientFromEnv(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gateway client from env: %w", err)

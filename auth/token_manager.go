@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
 // TokenManager handles service token lifecycle for agent sidecars.
@@ -104,7 +105,7 @@ func NewTokenManager(ctx context.Context, cfg *TokenManagerConfig) (*TokenManage
 		tm.tokenPath = cfg.TokenPath
 		tm.refreshURL = cfg.RefreshURL
 		if err := tm.loadFromFile(); err != nil {
-			slog.Warn("initial token load failed", "error", err, "path", cfg.TokenPath)
+			kitlog.From(ctx).Warn("initial token load failed", kitlog.Err(err), "path", cfg.TokenPath)
 		}
 	}
 
@@ -185,7 +186,7 @@ func (tm *TokenManager) renewalLoop(ctx context.Context) {
 		select {
 		case <-time.After(renewAt):
 			if err := tm.renew(ctx); err != nil {
-				slog.Error("token renewal failed", "error", err)
+				kitlog.From(ctx).Error("token renewal failed", kitlog.Err(err))
 			}
 		case <-tm.stopCh:
 			return
@@ -227,20 +228,20 @@ func (tm *TokenManager) acquire(ctx context.Context, label string, persist bool,
 			// freshly-issued token (OGA-400).
 			if persist {
 				if werr := tm.atomicWriteToken(newToken); werr != nil {
-					slog.Warn("token "+label+" in memory but file persist failed (continuing)",
-						"error", werr, "path", tm.tokenPath)
+					kitlog.From(ctx).Warn("token "+label+" in memory but file persist failed (continuing)",
+						kitlog.Err(werr), "path", tm.tokenPath)
 				}
 			}
 
-			slog.Info("token "+label, "expires_at", expiresAt, "attempt", attempt+1)
+			kitlog.From(ctx).Info("token "+label, "expires_at", expiresAt, "attempt", attempt+1)
 			return nil
 		}
 
 		lastErr = err
-		slog.Warn("token "+label+" attempt failed",
+		kitlog.From(ctx).Warn("token "+label+" attempt failed",
 			"attempt", attempt+1,
 			"max_attempts", maxAttempts,
-			"error", err,
+			kitlog.Err(err),
 			"retry_in", delay,
 		)
 
