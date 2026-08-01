@@ -141,7 +141,6 @@ func runProactiveReasoning(ctx context.Context, rt *agent.DefaultRuntime, event 
 	if usageAvail {
 		slog.InfoContext(ctx, "proactive reasoning token usage",
 			"agent_id", profile.AgentID,
-			"tenant_id", event.TenantID,
 			"event_type", event.EventType,
 			"entity_id", event.EntityID,
 			"tokens_in", usage.PromptTokens,

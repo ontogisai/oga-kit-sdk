@@ -141,6 +141,45 @@ func TestProp_ErrHelper(t *testing.T) {
 	})
 }
 
+// Property 7: WithRequest is additive — it preserves base identity and adds only
+// the non-empty request fields.
+func TestProp_WithRequestAdditive(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		trace := rapid.StringMatching(`[a-z0-9]{0,10}`).Draw(rt, "trace")
+		var buf bytes.Buffer
+		base := New(Options{Writer: &buf, Fields: commonFields("sgac1", "k", "c", "sgac1.c")})
+		WithRequest(base, RequestFields{TraceID: trace}).Info("x")
+		m := parseRecord(rt, buf.Bytes())
+		requireEq(rt, m[KeyTenantID], "sgac1") // base identity preserved
+		if trace != "" {
+			requireEq(rt, m[KeyTraceID], trace)
+		} else if _, ok := m[KeyTraceID]; ok {
+			rt.Fatalf("empty trace_id must be omitted")
+		}
+		// span_id / task_id never provided ⇒ always absent
+		if _, ok := m[KeySpanID]; ok {
+			rt.Fatalf("span_id must be absent when not provided")
+		}
+	})
+}
+
+// Property 13: per-request enrichment is optional — a log through the seeded
+// base WITHOUT any WithRequest call carries identity but no correlation ids.
+func TestProp_PerRequestOptional(t *testing.T) {
+	var buf bytes.Buffer
+	base := New(Options{Writer: &buf, Fields: commonFields("sgac1", "k", "c", "sgac1.c")})
+	base.Info("no per-request code")
+	m := parseOneJSON(t, buf.Bytes())
+	if _, ok := m[KeyTenantID]; !ok {
+		t.Fatalf("identity should be present without any per-request code")
+	}
+	for _, k := range []string{KeyTraceID, KeySpanID, KeyTaskID} {
+		if _, ok := m[k]; ok {
+			t.Fatalf("%q must be absent when WithRequest is not used", k)
+		}
+	}
+}
+
 // --- rapid helpers ---
 
 func parseRecord(rt *rapid.T, b []byte) map[string]any {

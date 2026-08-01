@@ -649,7 +649,6 @@ func (p *Pipeline) streamAssembly(
 		const promptCap = 8192
 		slog.InfoContext(ctx, "trace: effective reasoning prompt",
 			"actor", input.Actor.ID,
-			"tenant_id", input.TenantID,
 			"tool_results", len(results),
 			"system_prompt", truncateForTrace(systemPrompt, promptCap),
 			"user_prompt", truncateForTrace(userPrompt, promptCap),
@@ -697,7 +696,6 @@ func (p *Pipeline) streamAssembly(
 				if traceEnabled() {
 					slog.InfoContext(ctx, "trace: stream-collect complete",
 						"actor", input.Actor.ID,
-						"tenant_id", input.TenantID,
 						"mode", "stream",
 						"chunks", chunkCount,
 						"artifact_bytes", artifactBytes,
@@ -729,7 +727,6 @@ func (p *Pipeline) streamAssembly(
 	if traceEnabled() {
 		slog.InfoContext(ctx, "trace: stream-collect complete",
 			"actor", input.Actor.ID,
-			"tenant_id", input.TenantID,
 			"mode", "sync_fallback",
 			"chunks", 1,
 			"artifact_bytes", len(answer),
@@ -813,7 +810,6 @@ func (p *Pipeline) runArtifact(
 	if traceEnabled() {
 		logger.InfoContext(ctx, "trace: artifact assembled (stream-collected)",
 			"actor", input.Actor.ID,
-			"tenant_id", input.TenantID,
 			"artifact_bytes", final.artifact.Len(),
 			"citations", len(final.citations),
 		)
@@ -940,7 +936,6 @@ func logDrainedEvent(ctx context.Context, logger *slog.Logger, input Input, evt 
 	}
 	base := []any{
 		"actor", input.Actor.ID,
-		"tenant_id", input.TenantID,
 		"seq", evt.Sequence,
 		"span_id", evt.SpanID,
 		"parent_span_id", evt.ParentSpanID,

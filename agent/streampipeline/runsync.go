@@ -88,7 +88,7 @@ func RunSyncWithUsage[T any](
 		return parsed, citations, agg, aggAvail, nil
 	} else if deps.Logger != nil {
 		deps.Logger.WarnContext(ctx, "structured output validation failed; retrying assembly only (tools not re-run)",
-			"error", perr, "tenant_id", input.TenantID)
+			"error", perr)
 	}
 
 	// Attempt 2: re-ASSEMBLE only against the same transcript with a stricter
