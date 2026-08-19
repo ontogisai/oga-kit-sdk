@@ -84,6 +84,15 @@ type KitSpec struct {
 	// emits via the transfer contract.
 	SourceConnectors []SourceConnectorSpec `yaml:"source_connectors,omitempty"`
 
+	// EgressSyncs declares egress-sync components the platform deploys as
+	// sidecars at install time and then DRIVES (kg-egress-sync): a resumable
+	// Day-1 bulk push of the declared entity types plus continuous Day-2 change
+	// sync. The OUTBOUND counterpart of SourceConnectors — the component maps
+	// entities to an external system of record and returns that system's id per
+	// entity; the platform owns reading, ordering, batching, and persisting the
+	// correlation.
+	EgressSyncs []EgressSyncSpec `yaml:"egress_syncs,omitempty"`
+
 	// GroundingDocuments lists grounding document definitions.
 	GroundingDocuments []GroundingDocument `yaml:"grounding_documents,omitempty"`
 
@@ -585,6 +594,9 @@ func Validate(m *KitManifest) error {
 		return err
 	}
 	if err := validateSourceConnectors(m.Spec.SourceConnectors); err != nil {
+		return err
+	}
+	if err := validateEgressSyncs(m.Spec.EgressSyncs); err != nil {
 		return err
 	}
 	if err := validateMonitors(m.Spec.Monitors); err != nil {
