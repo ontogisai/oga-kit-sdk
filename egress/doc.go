@@ -1,0 +1,84 @@
+// Package egress is the kit-author SDK for building egress-sync components —
+// long-running, per-tenant sidecars that push knowledge-graph state OUT to an
+// external system of record and report that system's identifier per entity.
+//
+// An egress component is the outbound counterpart of a Source Connector. Where a
+// connector adapts an external system's records INTO the graph, a component maps
+// graph entities OUT to the external system's shape and speaks its API. In both
+// directions the platform owns the plumbing and the kit owns the domain: the
+// platform reads the graph, orders and batches the work, retries transient
+// failures, and persists the correlation; the component maps and pushes.
+//
+// # Implementing a component
+//
+// A kit author implements [Component] and hands it to [ListenAndServe]:
+//
+//	c := &myComponent{...}
+//	cfg := &egress.Config{Port: "8600"}
+//	egress.ListenAndServe(ctx, cfg, c)
+//
+// The server serves POST /egress/sync, the optional GET /egress/entity-types,
+// and GET /healthz, decodes each push, and builds a response the platform will
+// accept. A minimal Sync:
+//
+//	func (c *myComponent) Sync(ctx context.Context, req *egress.SyncRequest, b *egress.Batch) error {
+//	    for _, e := range req.Entities {
+//	        if e.Correlation != nil {
+//	            id, err := c.api.Update(ctx, e.Correlation.ExternalRecordID, mapOut(e))
+//	            if err != nil {
+//	                b.FailedErr(e.ID, err) // this entity only
+//	                continue
+//	            }
+//	            b.Updated(e.ID, id)
+//	            continue
+//	        }
+//	        id, err := c.api.Create(ctx, mapOut(e))
+//	        if err != nil {
+//	            b.FailedErr(e.ID, err)
+//	            continue
+//	        }
+//	        b.Created(e.ID, id)
+//	    }
+//	    return nil
+//	}
+//
+// # The platform persists the correlation, not the component
+//
+// A component RETURNS an external_record_id and the platform writes it onto the
+// entity through its own correlation primitive. A component therefore needs no
+// knowledge-graph write privilege on the common path — it never calls back into
+// the platform to record what it just did.
+//
+// The write happens AFTER the push, because the external id does not exist until
+// the component returns it. That makes the failure window explicit: a crash
+// between the push and the persist leaves an external record created but
+// uncorrelated. The next run pushes that entity again with no correlation
+// attached, so a component MUST be able to recognize an already-created record
+// and report [OutcomeUpdated] with its existing id — otherwise every interrupted
+// run leaves duplicates behind. This is also why a component should treat
+// [SyncRequest.BatchID], which is stable across retries, as a deduplication key.
+//
+// # Errors: per entity or per batch
+//
+// The distinction is the one thing worth getting right.
+//
+//   - A per-entity problem goes on the [Batch] (b.Failed / b.FailedErr) and Sync
+//     returns nil. The batch is accepted and the entities that succeeded keep
+//     their correlations.
+//   - A batch-wide fault (the external system is down, credentials expired)
+//     returns an error from Sync. The platform retries the whole batch with the
+//     same batch id. Wrap it with [Throttled] when the external system asked for
+//     backoff, and the platform will honor the delay.
+//
+// # Tenancy
+//
+// A component never asserts its own tenant. [SyncRequest.TenantID] is
+// informational; authority is the component's workload identity, and the
+// platform never reads a tenant back out of a response.
+//
+// # Declaring the component
+//
+// The sidecar is declared in the kit manifest under spec.egress_syncs — see
+// manifest.EgressSyncSpec for the fields, notably the push ORDER of
+// entity_types and parent_edge for a hierarchical type.
+package egress
