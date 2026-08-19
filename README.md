@@ -9,6 +9,8 @@ Domain-agnostic SDK for ONTOGIS AI Platform kit development.
 `oga-kit-sdk` is the public contract for all domain kit development on the ONTOGIS AI Platform. It contains:
 
 - **Loader contract** for ontology + data loaders (HTTP sidecars on `kind: ontology|data`)
+- **Source connector contract** (`connector/`) for continuous inbound ingress — poll and/or webhook sidecars that keep the graph current
+- **Egress contract** (`egress/`) for outbound sync — sidecars that push graph entities to an external system of record and report its record id
 - **Streaming transfer pipeline** (`transfer.Writer`) for shipping load artifacts to the platform via presigned-URL handoff
 - **Ontology registrar** convenience layer for kit authors who think in "register a batch of types" terms
 - **Agent runtime chassis** (A2A-compliant HTTP server with LLM + MCP tool access)
