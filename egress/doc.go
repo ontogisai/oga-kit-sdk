@@ -70,6 +70,21 @@
 //     same batch id. Wrap it with [Throttled] when the external system asked for
 //     backoff, and the platform will honor the delay.
 //
+// # Entity types are source-native class IDs
+//
+// Every entity_type on this contract — the batch's, each entity's, the manifest's
+// entity_types[], and the optional entity-types introspection reply — is the
+// SOURCE-NATIVE CLASS ID, verbatim. It may contain a colon (`brick:AHU`,
+// `rec:Zone`) or be colon-free (`Equipment`, `WorkOrder`), and both forms are
+// class IDs naming different catalog entries; a colon-free name is not a plainer
+// spelling of a namespaced one.
+//
+// Match it exactly and route on the whole string. Do not sanitize it, fold its
+// case, split on the colon, or translate it to an internal name — the platform
+// does no translation outbound, so what arrives is already the identifier the
+// customer's ontology uses, and it is never the platform's internal storage
+// identifier.
+//
 // # Tenancy
 //
 // A component never asserts its own tenant. [SyncRequest.TenantID] is

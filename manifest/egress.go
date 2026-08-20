@@ -95,9 +95,23 @@ type EgressSyncSpec struct {
 
 // EgressEntityTypeSpec is one entity type an egress component pushes.
 type EgressEntityTypeSpec struct {
-	// Name is the entity type to push. It must exist in the tenant's active
-	// ontology at install time — a check the platform performs and the SDK
-	// deliberately does not, since it needs tenant state no local lint can see.
+	// Name is the entity type to push, as the SOURCE-NATIVE CLASS ID — the
+	// identifier the source system uses, verbatim, and the exact key under which
+	// the type is registered in the tenant's ontology catalog.
+	//
+	// It may contain a colon (`brick:AHU`, `rec:Zone`) or be colon-free
+	// (`Equipment`, `Location`). Both are class IDs; a colon-free name is not a
+	// simplified spelling of a namespaced one, so the two forms name DIFFERENT
+	// catalog entries. Changing `Equipment` to `brick:Equipment` therefore changes
+	// WHICH entities get pushed — it is not a notational tidy-up.
+	//
+	// The comparison at install time is exact. Do not write the platform's internal
+	// storage identifier here: what gets pushed is chosen by class ID, and where
+	// those rows physically live is a platform concern.
+	//
+	// The type must exist in the tenant's active ontology at install time — a check
+	// the platform performs and the SDK deliberately does not, since it needs tenant
+	// state no local lint can see.
 	Name string `yaml:"name"`
 
 	// ParentEdge names the SELF-REFERENCING containment edge of this type, when

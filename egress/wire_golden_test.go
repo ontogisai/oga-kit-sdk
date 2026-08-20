@@ -1,7 +1,9 @@
 package egress
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"testing"
 )
@@ -234,3 +236,71 @@ func TestPaths_MatchPlatformContract(t *testing.T) {
 		t.Errorf("PathHealthz = %q", PathHealthz)
 	}
 }
+
+// A colon-bearing class ID survives the wire unchanged, in both directions and at
+// both levels (batch and per-entity).
+//
+// The platform stores `entity_type` as the source-native class ID and performs no
+// translation outbound, so a namespaced id reaches a component verbatim. This test
+// exists because the SDK is where a kit author would most plausibly be tempted to
+// "clean up" such a value, and because the platform side of this exact confusion
+// produced a real defect: composing a storage identifier from the class ID
+// addressed a type that could not exist, and the run reported a successful push of
+// nothing.
+func TestClassID_ColonSurvivesTheWire(t *testing.T) {
+	const classID = "brick:AHU"
+
+	body := `{"tenant_id":"sjcs","external_system":"24k-core","entity_type":"brick:AHU",
+	  "mode":"bulk","batch_id":"b-1","entities":[{"id":"eq-1","entity_type":"brick:AHU"}]}`
+
+	var req SyncRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if req.EntityType != classID {
+		t.Errorf("batch entity_type = %q, want %q verbatim", req.EntityType, classID)
+	}
+	if len(req.Entities) != 1 || req.Entities[0].EntityType != classID {
+		t.Errorf("entity entity_type = %+v, want %q verbatim", req.Entities, classID)
+	}
+
+	// And back out: the introspection reply must not normalize it either.
+	out, err := json.Marshal(EntityTypesResponse{EntityTypes: []string{classID, "Equipment"}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got, want := string(out), `{"entity_types":["brick:AHU","Equipment"]}`; got != want {
+		t.Errorf("entity-types reply = %s, want %s", got, want)
+	}
+}
+
+// The homogeneity check compares class IDs as OPAQUE strings.
+//
+// Two ids that differ only by namespace prefix are different catalog entries, so a
+// batch mixing them is genuinely non-homogeneous and must be rejected — a check
+// that stripped the prefix before comparing would accept it and the component would
+// map half the batch to the wrong target shape.
+func TestClassID_HomogeneityIsExactNotPrefixInsensitive(t *testing.T) {
+	impl := &stubComponent{sync: func(_ context.Context, _ *SyncRequest, b *Batch) error {
+		b.Skipped("e1")
+		b.Skipped("e2")
+		return nil
+	}}
+	w := postSync(t, impl, SyncRequest{
+		TenantID: "sjcs", ExternalSystem: "24k-core", EntityType: "brick:Equipment",
+		Mode: ModeBulk, BatchID: "b-1",
+		Entities: []Entity{
+			{ID: "e1", EntityType: "brick:Equipment"},
+			{ID: "e2", EntityType: "Equipment"}, // same suffix, DIFFERENT class ID
+		},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %q and %q are different class IDs, so this "+
+			"batch is not homogeneous", w.Code, "brick:Equipment", "Equipment")
+	}
+}
+
+// The manifest half of this invariant is asserted in
+// manifest.TestValidateEgressSyncs_AcceptsNamespacedClassID — the two must agree
+// about what a legal entity type is, or a kit could declare a type it can never
+// receive.

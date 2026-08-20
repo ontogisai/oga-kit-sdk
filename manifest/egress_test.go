@@ -268,3 +268,49 @@ func TestValidateEgressSyncs_DoesNotCheckOntology(t *testing.T) {
 		t.Errorf("unknown entity type rejected locally: %v — the ontology check is install-time only", err)
 	}
 }
+
+// A namespaced class ID is a legal entity type, and validation must not sanitize
+// or reject it.
+//
+// entity_types[] entries are source-native class IDs compared exactly against the
+// tenant's ontology catalog key, so `brick:AHU` and `rec:Space` are ordinary
+// values here. The wire half of this invariant is asserted in
+// egress.TestClassID_ColonSurvivesTheWire; if the two disagree a kit could declare
+// a type it can never receive, or receive one it could not declare.
+func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
+	e := EgressSyncSpec{
+		Name:           "core-sync",
+		ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "rec:Space", ParentEdge: "hasLocation"},
+			{Name: "brick:Equipment"},
+			{Name: "Point"}, // colon-free is equally a class ID
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("namespaced class IDs rejected: %v", err)
+	}
+	// And the names are carried through unchanged, in declaration order.
+	got := e.EntityTypeNames()
+	want := []string{"rec:Space", "brick:Equipment", "Point"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("EntityTypeNames = %v, want %v verbatim and in order", got, want)
+		}
+	}
+}
+
+// A digest-pinned image contains a colon too (`@sha256:`), so the image check must
+// not be confused by one. Guards against a future "reject colons" over-correction
+// landing on the wrong field.
+func TestValidateEgressSyncs_DigestColonIsNotAClassIDColon(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{{Name: "brick:AHU"}},
+		Container:   SidecarContainerSpec{Image: "ghcr.io/ontogisai/x@sha256:deadbeef"},
+	}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("digest-pinned image with a namespaced type rejected: %v", err)
+	}
+}

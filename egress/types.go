@@ -68,7 +68,11 @@ type Correlation struct {
 // not interpret them, and mapping them to the external system's shape is the
 // component's job.
 type Entity struct {
-	ID         string         `json:"id"`
+	// ID is the platform's entity id. It is what a SyncResult must echo back —
+	// never the external system's id, which belongs in ExternalRecordID.
+	ID string `json:"id"`
+	// EntityType is the source-native class ID, matching the batch's EntityType
+	// (a batch is homogeneous). See SyncRequest.EntityType for the matching rule.
 	EntityType string         `json:"entity_type"`
 	Properties map[string]any `json:"properties,omitempty"`
 
@@ -98,7 +102,20 @@ type SyncRequest struct {
 	// on it.
 	ExternalSystem string `json:"external_system"`
 
-	// EntityType is the single type this batch carries.
+	// EntityType is the single type this batch carries, as the SOURCE-NATIVE
+	// CLASS ID — the identifier the source system uses, verbatim.
+	//
+	// It may contain a colon (`brick:AHU`, `rec:Zone`) and it may equally be
+	// colon-free (`Equipment`, `WorkOrder`); both forms are class IDs, and a
+	// colon-free one is not a "plainer" spelling of a namespaced one — they are
+	// different catalog entries. Match it EXACTLY as received and route on the
+	// whole string. Do not sanitize it, normalize the case, split on the colon, or
+	// map it to some tidier internal name: the platform performs no translation
+	// outbound, so this value is already the customer-facing identifier, and the
+	// manifest's entity_types[] entry it corresponds to is the same string.
+	//
+	// It is NEVER the platform's internal storage identifier. Where rows physically
+	// live is a platform concern the contract does not expose.
 	EntityType string `json:"entity_type"`
 
 	// Mode is bulk (Day-1) or change (Day-2).
