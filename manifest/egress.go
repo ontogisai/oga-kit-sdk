@@ -118,6 +118,17 @@ type EgressEntityTypeSpec struct {
 	// it has one. Its presence changes the platform's walk from "page by id" to
 	// "level by level, roots first".
 	//
+	// SUPERSEDED, not yet renamed. The design specifies `ParentEdges []string`
+	// plus an explicit `Hierarchical bool` — see
+	// .kiro/specs/kg-egress-sync/design.md v1.5 (EgressEntityTypeSpec, and C9 (b)
+	// for why Hierarchical cannot be inferred) and OGA-822, which renames both
+	// sides together. The rename is NOT made here first on purpose: the
+	// platform's domainkit still declares ParentEdge and its manifest decoder is
+	// strict (KnownFields(true), internal/domainkit/manifest.go), so an SDK that
+	// accepted `parent_edges` would let an author lint a manifest the installer
+	// then rejects outright — a worse experience than today, and the exact
+	// failure this package exists to prevent, inverted.
+	//
 	// Declare it whenever a record of this type references its parent in the
 	// external system. A page-by-id walk yields ARBITRARY order, so without
 	// this a child can be pushed before its parent and that push fails.
@@ -161,6 +172,14 @@ func (e *EgressSyncSpec) EffectiveBatchSize() int {
 }
 
 // EffectiveMaxInFlight returns the concurrency for entityType.
+//
+// SUPERSEDED by OGA-823: the platform will confine concurrency to a single
+// containment LEVEL rather than forbidding it for a hierarchical type, because a
+// level-n row's parent is at n-1 by construction. When that lands this must
+// return the configured value and the clamp below goes away. Kept as-is until
+// then so the helper matches the platform's actual behaviour rather than the
+// design's intended behaviour — a helper that promised the new semantics against
+// the old platform would over-parallelise a hierarchical push.
 //
 // It returns 1 unconditionally for a type declaring ParentEdge, whatever the
 // kit asked for. This is not a kit-authoring error worth failing an install
