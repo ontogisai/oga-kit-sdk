@@ -301,6 +301,117 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 	}
 }
 
+// parent_edge must ALREADY be a legal identifier, and a colon is fatal there —
+// the exact opposite of entity_types[].Name, where a colon is ordinary.
+//
+// The asymmetry is the point of this test. Both fields hold ontology names, but
+// Name is compared against the catalog as an opaque string while parent_edge is
+// composed into a type identifier. A declared `rec:hasPart` addresses
+// `{tenant}_rec:hasPart`, which has no edges, so the platform's level walk finds
+// no children and pushes ONLY THE ROOTS while reporting a complete run — a
+// partial push that looks like a successful one.
+//
+// The platform validates this only when the Day-1 walk reaches it
+// (egress.assertAddressableEdge), so without this check the failure is mid-run.
+func TestValidateEgressSyncs_RejectsUnaddressableParentEdge(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "rec:Space", ParentEdge: "rec:hasPart"},
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("a colon-bearing parent_edge was accepted; the level walk would silently push only roots")
+	}
+	// The message must name the form to declare instead — an author who is told
+	// only "invalid" has to go read the platform's sanitizer to find out what to
+	// write.
+	if !strings.Contains(err.Error(), `"rec_hasPart"`) {
+		t.Errorf("error must suggest the sanitized form rec_hasPart, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "entity_types[0]") {
+		t.Errorf("error must locate the offending entity type, got: %v", err)
+	}
+}
+
+// A trailing underscore is not addressable either, because the sanitizer TRIMS
+// trailing underscores rather than preserving them. This is the case the
+// platform's first attempt at the same guard missed: it enumerated ":" and "-"
+// and would have accepted both this and `has.location`.
+func TestValidateEgressSyncs_RejectsParentEdgeCasesACharacterDenylistWouldMiss(t *testing.T) {
+	for _, edge := range []string{"hasLocation_", "has.location", "has location", "has/location", "has-location"} {
+		e := EgressSyncSpec{
+			Name: "core-sync", ExternalSystem: "24k-core",
+			EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdge: edge}},
+			Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+		}
+		if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+			t.Errorf("parent_edge %q was accepted but is not what the sanitizer produces", edge)
+		}
+	}
+}
+
+// A parent_edge with no legal form at all is reported as such rather than with an
+// empty suggestion, which would read as "declare nothing".
+func TestValidateEgressSyncs_ParentEdgeWithNoLegalForm(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdge: ":::"}},
+		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal(`parent_edge ":::" was accepted`)
+	}
+	if !strings.Contains(err.Error(), "no legal identifier form") {
+		t.Errorf("error should say the name has no legal form, got: %v", err)
+	}
+	if strings.Contains(err.Error(), `declare ""`) {
+		t.Errorf("error must not suggest an empty replacement, got: %v", err)
+	}
+}
+
+// The legal forms stay legal: a bare predicate, an underscored one, and an absent
+// one (which means "no containment edge", not "invalid").
+func TestValidateEgressSyncs_AcceptsAddressableAndAbsentParentEdge(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "Location", ParentEdge: "hasLocation"},
+			{Name: "brick:AHU", ParentEdge: "rec_hasPart"},
+			{Name: "Point", ParentEdge: "feeds2"},
+			{Name: "Equipment"}, // no parent_edge at all
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("addressable / absent parent_edge rejected: %v", err)
+	}
+}
+
+// sanitizeEdgeName must agree with the platform's ingestion.sanitizeLocalName,
+// since the suggestion it produces is only actionable if it names the type the
+// platform actually materialized.
+func TestSanitizeEdgeName_MatchesPlatformSanitizer(t *testing.T) {
+	cases := map[string]string{
+		"hasLocation":  "hasLocation",
+		"rec:hasPart":  "rec_hasPart",
+		"has.location": "has_location",
+		"has location": "has_location",
+		"hasLocation_": "hasLocation",
+		"has__":        "has",
+		":::":          "",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := sanitizeEdgeName(in); got != want {
+			t.Errorf("sanitizeEdgeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // A digest-pinned image contains a colon too (`@sha256:`), so the image check must
 // not be confused by one. Guards against a future "reject colons" over-correction
 // landing on the wrong field.

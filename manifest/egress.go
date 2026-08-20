@@ -124,6 +124,18 @@ type EgressEntityTypeSpec struct {
 	//
 	// The platform treats this as an edge NAME and nothing more: it never
 	// interprets what containment means, only "shallower before deeper".
+	//
+	// It MUST already be a legal ArcadeDB local identifier — only [a-zA-Z0-9_],
+	// and no trailing underscore. Unlike Name above, this is NOT a catalog key
+	// compared as an opaque string: the platform composes it into a type
+	// identifier, and it materializes a predicate under a SANITIZED name (every
+	// other character becomes "_", trailing "_" trimmed). So a declared
+	// "rec:hasPart" addresses "{tenant}_rec:hasPart" — a type with no edges —
+	// and the level walk finds no children, pushing ONLY THE ROOTS while
+	// reporting a complete run. Declare the sanitized form ("rec_hasPart").
+	//
+	// That asymmetry is deliberate and easy to get backwards: a colon is
+	// ordinary in Name and fatal here.
 	ParentEdge string `yaml:"parent_edge,omitempty"`
 }
 
@@ -182,10 +194,16 @@ func (e *EgressSyncSpec) EntityTypeNames() []string {
 
 // validateEgressSyncs checks each kit-declared egress component
 // (spec.egress_syncs[]): unique name, external_system present, at least one
-// entity type, and a digest-pinned image. It mirrors the platform's
-// domainkit.validateEgressSpecStructure — the checks that need no external
-// state — so a kit author gets the same rejection locally that the installer
-// would raise as OGA-EGRS-VAL-1002.
+// entity type, a digest-pinned image, and an addressable parent_edge. It mirrors
+// the platform's domainkit.validateEgressSpecStructure — the checks that need no
+// external state — so a kit author gets the same rejection locally that the
+// installer would raise as OGA-EGRS-VAL-1002.
+//
+// The parent_edge check is the one addition the platform does NOT make at
+// install: it validates the name only when the Day-1 walk reaches it
+// (egress.assertAddressableEdge), so an unaddressable edge installs cleanly and
+// fails mid-run, having pushed only the roots. The predicate needs no tenant
+// state at all, so catching it here is strictly better than catching it there.
 //
 // It deliberately does NOT mirror the platform's ontology cross-check
 // (OGA-EGRS-VAL-1001: every declared entity type must resolve against the
@@ -231,6 +249,69 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 				i, image,
 			)
 		}
+		for j := range e.EntityTypes {
+			// Empty is legal and common: it means "this type has no
+			// self-referencing containment edge", so it is walked by id.
+			edge := e.EntityTypes[j].ParentEdge
+			if edge == "" || isAddressableEdgeName(edge) {
+				continue
+			}
+			if suggestion := sanitizeEdgeName(edge); suggestion != "" {
+				return fmt.Errorf(
+					"spec.egress_syncs[%d].entity_types[%d]: parent_edge = %q is not addressable by "+
+						"its declared name — the platform materializes a predicate under a sanitized "+
+						"identifier ([a-zA-Z0-9_] only, trailing underscores trimmed), so a level walk "+
+						"on this name would find no children and would push only the roots; declare %q",
+					i, j, edge, suggestion,
+				)
+			}
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].entity_types[%d]: parent_edge = %q has no legal identifier form "+
+					"(it sanitizes to the empty string), so it can never name an edge type",
+				i, j, edge,
+			)
+		}
 	}
 	return nil
+}
+
+// isAddressableEdgeName reports whether name is ALREADY what the platform's
+// identifier sanitizer would produce for it — only [a-zA-Z0-9_], and no trailing
+// underscore, which that sanitizer trims.
+//
+// Expressed as a validity predicate rather than as "sanitize and compare" on
+// purpose. The platform learned this the hard way: its first version of the same
+// guard enumerated the characters it thought were unsafe (":" and "-") and
+// silently let "has.location" through. Stating what is LEGAL cannot drift that
+// way, because any name the sanitizer would alter is by definition not already
+// legal.
+func isAddressableEdgeName(name string) bool {
+	if name == "" || strings.HasSuffix(name, "_") {
+		return false
+	}
+	for _, ch := range name {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9', ch == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// sanitizeEdgeName mirrors the platform's identifier sanitizer so a rejection can
+// name the exact form the author should declare instead. It returns "" when the
+// name has no legal form at all (every character replaced, then trimmed away).
+func sanitizeEdgeName(name string) string {
+	var sb strings.Builder
+	sb.Grow(len(name))
+	for _, ch := range name {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z', ch >= '0' && ch <= '9', ch == '_':
+			sb.WriteRune(ch)
+		default:
+			sb.WriteRune('_')
+		}
+	}
+	return strings.TrimRight(sb.String(), "_")
 }
