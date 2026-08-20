@@ -82,6 +82,37 @@ type Entity struct {
 	// instead of a second set of duplicate external records. A component that
 	// ignores it will duplicate records on every re-run.
 	Correlation *Correlation `json:"correlation,omitempty"`
+
+	// ParentRefs carries the entity's OWNER for each edge the kit declared under
+	// entity_types[].parent_edges, keyed by that edge name.
+	//
+	// This is the only way to populate an external foreign key. The entity as
+	// read carries no containment — containment is an edge, and an entity read
+	// projects columns — so without this a component has nothing identifying what
+	// contains the record it is about to create.
+	//
+	// Direction is the record's parent or container, never its children.
+	//
+	// The platform guarantees three things, so a component does not have to
+	// defend against them: each entry is SINGLE-VALUED (a declared edge
+	// resolving to several targets fails the batch rather than picking one); a
+	// present entry's ExternalRecordID is non-empty (a parent not yet pushed
+	// fails the batch, so a null foreign key is never sent); and the key set is
+	// exactly the declared parent_edges. An ABSENT entry means the entity is a
+	// root of that relation — omit the foreign key, do not treat it as an error.
+	ParentRefs map[string]ParentRef `json:"parent_refs,omitempty"`
+}
+
+// ParentRef identifies one resolved owner of a pushed entity.
+type ParentRef struct {
+	// EntityID is the owner's platform entity id. Useful for logging and for a
+	// component keeping its own map; it is NOT the external system's id.
+	EntityID string `json:"entity_id"`
+
+	// ExternalRecordID is the owner's id IN THE EXTERNAL SYSTEM — the value a
+	// foreign key needs. It is non-empty whenever the entry is present, because
+	// the platform pushes and correlates a parent before any of its children.
+	ExternalRecordID string `json:"external_record_id"`
 }
 
 // SyncRequest is the body of POST /egress/sync.

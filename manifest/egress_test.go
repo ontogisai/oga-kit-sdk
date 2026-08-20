@@ -25,9 +25,13 @@ spec:
       external_system: 24k-core
       entity_types:
         - name: rec_Site
+          include_descendants: true
         - name: rec_Building
-          parent_edge: hasPart
+          parent_edges: [hasPart]
+          hierarchical: true
+          include_descendants: true
         - name: brick_Equipment
+          parent_edges: [hasPart]
       credential_refs:
         - 24k-core-api-key
       batch_size: 100
@@ -70,8 +74,19 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 			t.Fatalf("entity types = %v, want %v (order is load-bearing)", got, want)
 		}
 	}
-	if e.EntityTypes[1].ParentEdge != "hasPart" {
-		t.Errorf("entity_types[1].parent_edge = %q, want hasPart", e.EntityTypes[1].ParentEdge)
+	if got := e.EntityTypes[1].ParentEdges; len(got) != 1 || got[0] != "hasPart" {
+		t.Errorf("entity_types[1].parent_edges = %v, want [hasPart]", got)
+	}
+	if !e.EntityTypes[1].Hierarchical {
+		t.Error("entity_types[1].hierarchical = false, want true")
+	}
+	if !e.EntityTypes[1].IncludeDescendants {
+		t.Error("entity_types[1].include_descendants = false, want true")
+	}
+	// A cross-type reference declares an edge WITHOUT hierarchical: it needs the
+	// owner resolved but no level walk.
+	if e.EntityTypes[2].Hierarchical {
+		t.Error("entity_types[2].hierarchical = true; a cross-type edge is not a hierarchy")
 	}
 	if len(e.CredentialRefs) != 1 || e.CredentialRefs[0] != "24k-core-api-key" {
 		t.Errorf("credential_refs = %v", e.CredentialRefs)
@@ -118,22 +133,20 @@ func TestEgress_EffectiveBatchSizeDefaults(t *testing.T) {
 // A hierarchical type is pushed sequentially whatever the kit declared:
 // concurrent batches within it would let a child be pushed before its parent,
 // which is exactly the ordering the level-by-level walk exists to guarantee.
-func TestEgress_EffectiveMaxInFlightClampedForHierarchy(t *testing.T) {
+func TestEgress_EffectiveMaxInFlight(t *testing.T) {
+	// No clamp and no entity-type argument. An earlier shape forced 1 for a
+	// hierarchical type; concurrency is unsafe only ACROSS levels, and confining
+	// batches to a level is the platform's scheduling job, not something a single
+	// number can express.
 	e := &EgressSyncSpec{MaxInFlight: 8}
-	if got := e.EffectiveMaxInFlight(&EgressEntityTypeSpec{Name: "rec_Building", ParentEdge: "hasPart"}); got != 1 {
-		t.Errorf("hierarchical max_in_flight = %d, want 1", got)
+	if got := e.EffectiveMaxInFlight(); got != 8 {
+		t.Errorf("EffectiveMaxInFlight = %d, want the declared 8", got)
 	}
-	if got := e.EffectiveMaxInFlight(&EgressEntityTypeSpec{Name: "brick_Equipment"}); got != 8 {
-		t.Errorf("flat max_in_flight = %d, want the declared 8", got)
+	if got := (&EgressSyncSpec{}).EffectiveMaxInFlight(); got != 1 {
+		t.Errorf("undeclared EffectiveMaxInFlight = %d, want 1", got)
 	}
-	if got := e.EffectiveMaxInFlight(nil); got != 8 {
-		t.Errorf("nil entity type max_in_flight = %d, want 8", got)
-	}
-	if got := (&EgressSyncSpec{}).EffectiveMaxInFlight(nil); got != 1 {
-		t.Errorf("undeclared max_in_flight = %d, want 1 (sequential)", got)
-	}
-	if got := (&EgressSyncSpec{MaxInFlight: -3}).EffectiveMaxInFlight(nil); got != 1 {
-		t.Errorf("negative max_in_flight = %d, want 1", got)
+	if got := (&EgressSyncSpec{MaxInFlight: -3}).EffectiveMaxInFlight(); got != 1 {
+		t.Errorf("negative EffectiveMaxInFlight = %d, want 1", got)
 	}
 }
 
@@ -282,7 +295,7 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 		Name:           "core-sync",
 		ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "rec:Space", ParentEdge: "hasLocation"},
+			{Name: "rec:Space", ParentEdges: []string{"hasLocation"}, Hierarchical: true},
 			{Name: "brick:Equipment"},
 			{Name: "Point"}, // colon-free is equally a class ID
 		},
@@ -301,11 +314,11 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 	}
 }
 
-// parent_edge must ALREADY be a legal identifier, and a colon is fatal there —
+// A parent_edges entry must ALREADY be a legal identifier, and a colon is fatal —
 // the exact opposite of entity_types[].Name, where a colon is ordinary.
 //
 // The asymmetry is the point of this test. Both fields hold ontology names, but
-// Name is compared against the catalog as an opaque string while parent_edge is
+// Name is compared against the catalog as an opaque string while a parent_edges entry is
 // composed into a type identifier. A declared `rec:hasPart` addresses
 // `{tenant}_rec:hasPart`, which has no edges, so the platform's level walk finds
 // no children and pushes ONLY THE ROOTS while reporting a complete run — a
@@ -313,17 +326,17 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 //
 // The platform validates this only when the Day-1 walk reaches it
 // (egress.assertAddressableEdge), so without this check the failure is mid-run.
-func TestValidateEgressSyncs_RejectsUnaddressableParentEdge(t *testing.T) {
+func TestValidateEgressSyncs_RejectsUnaddressableParentEdges(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "rec:Space", ParentEdge: "rec:hasPart"},
+			{Name: "rec:Space", ParentEdges: []string{"rec:hasPart"}},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	err := validateEgressSyncs([]EgressSyncSpec{e})
 	if err == nil {
-		t.Fatal("a colon-bearing parent_edge was accepted; the level walk would silently push only roots")
+		t.Fatal("a colon-bearing parent_edges entry was accepted; the level walk would silently push only roots")
 	}
 	// The message must name the form to declare instead — an author who is told
 	// only "invalid" has to go read the platform's sanitizer to find out what to
@@ -340,30 +353,30 @@ func TestValidateEgressSyncs_RejectsUnaddressableParentEdge(t *testing.T) {
 // trailing underscores rather than preserving them. This is the case the
 // platform's first attempt at the same guard missed: it enumerated ":" and "-"
 // and would have accepted both this and `has.location`.
-func TestValidateEgressSyncs_RejectsParentEdgeCasesACharacterDenylistWouldMiss(t *testing.T) {
+func TestValidateEgressSyncs_RejectsParentEdgesCasesACharacterDenylistWouldMiss(t *testing.T) {
 	for _, edge := range []string{"hasLocation_", "has.location", "has location", "has/location", "has-location"} {
 		e := EgressSyncSpec{
 			Name: "core-sync", ExternalSystem: "24k-core",
-			EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdge: edge}},
+			EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: []string{edge}}},
 			Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 		}
 		if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
-			t.Errorf("parent_edge %q was accepted but is not what the sanitizer produces", edge)
+			t.Errorf("parent_edges entry %q was accepted but is not what the sanitizer produces", edge)
 		}
 	}
 }
 
-// A parent_edge with no legal form at all is reported as such rather than with an
+// A parent_edges entry with no legal form at all is reported as such rather than with an
 // empty suggestion, which would read as "declare nothing".
-func TestValidateEgressSyncs_ParentEdgeWithNoLegalForm(t *testing.T) {
+func TestValidateEgressSyncs_ParentEdgesWithNoLegalForm(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdge: ":::"}},
+		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: []string{":::"}}},
 		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	err := validateEgressSyncs([]EgressSyncSpec{e})
 	if err == nil {
-		t.Fatal(`parent_edge ":::" was accepted`)
+		t.Fatal(`parent_edges entry ":::" was accepted`)
 	}
 	if !strings.Contains(err.Error(), "no legal identifier form") {
 		t.Errorf("error should say the name has no legal form, got: %v", err)
@@ -375,19 +388,19 @@ func TestValidateEgressSyncs_ParentEdgeWithNoLegalForm(t *testing.T) {
 
 // The legal forms stay legal: a bare predicate, an underscored one, and an absent
 // one (which means "no containment edge", not "invalid").
-func TestValidateEgressSyncs_AcceptsAddressableAndAbsentParentEdge(t *testing.T) {
+func TestValidateEgressSyncs_AcceptsAddressableAndAbsentParentEdges(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "Location", ParentEdge: "hasLocation"},
-			{Name: "brick:AHU", ParentEdge: "rec_hasPart"},
-			{Name: "Point", ParentEdge: "feeds2"},
-			{Name: "Equipment"}, // no parent_edge at all
+			{Name: "Location", ParentEdges: []string{"hasLocation"}, Hierarchical: true},
+			{Name: "brick:AHU", ParentEdges: []string{"rec_hasPart"}},
+			{Name: "Point", ParentEdges: []string{"feeds2", "isPointOf"}},
+			{Name: "Equipment"}, // no parent_edges at all
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
-		t.Fatalf("addressable / absent parent_edge rejected: %v", err)
+		t.Fatalf("addressable / absent parent_edges rejected: %v", err)
 	}
 }
 
@@ -409,6 +422,75 @@ func TestSanitizeEdgeName_MatchesPlatformSanitizer(t *testing.T) {
 		if got := sanitizeEdgeName(in); got != want {
 			t.Errorf("sanitizeEdgeName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// hierarchical with no parent_edges is incoherent, not a conservative default: a
+// level walk would look for roots via an edge that was never named.
+func TestValidateEgressSyncs_RejectsHierarchicalWithoutEdge(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", Hierarchical: true}},
+		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("hierarchical with no parent_edges was accepted; the walk has no edge to traverse")
+	}
+	if !strings.Contains(err.Error(), "parent_edges is empty") {
+		t.Errorf("error should name the missing edge, got: %v", err)
+	}
+}
+
+// A duplicate edge is not merely redundant. Each declared edge becomes one key in
+// the entity's parent_refs (see egress.Entity.ParentRefs), so listing it twice
+// names one key twice and leaves which resolution wins undefined.
+func TestValidateEgressSyncs_RejectsDuplicateParentEdge(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "Point", ParentEdges: []string{"isPointOf", "isPointOf"}},
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("a duplicated parent_edges entry was accepted; it is one parent_refs key twice")
+	}
+	if !strings.Contains(err.Error(), "twice") {
+		t.Errorf("error should say the edge is listed twice, got: %v", err)
+	}
+}
+
+// An empty list entry is rejected rather than skipped, unlike entity_types[].Name
+// where EntityTypeNames() skips blanks. A blank edge cannot resolve anything, so
+// silently dropping it would leave a component expecting a parent_refs key that
+// never arrives.
+func TestValidateEgressSyncs_RejectsEmptyParentEdgeEntry(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: []string{"isPointOf", "  "}}},
+		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+		t.Fatal("an empty parent_edges entry was accepted")
+	}
+}
+
+// include_descendants and hierarchical are INDEPENDENT: a type may select every
+// class under its physical type without being a hierarchy, and vice versa.
+// Guards against a future "one implies the other" simplification.
+func TestValidateEgressSyncs_IncludeDescendantsIsIndependentOfHierarchical(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "Equipment", IncludeDescendants: true, ParentEdges: []string{"hasLocation"}},
+			{Name: "Location", Hierarchical: true, ParentEdges: []string{"hasLocation"}},
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("independent include_descendants / hierarchical rejected: %v", err)
 	}
 }
 

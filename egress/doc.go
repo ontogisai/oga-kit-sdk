@@ -95,5 +95,7 @@
 //
 // The sidecar is declared in the kit manifest under spec.egress_syncs — see
 // manifest.EgressSyncSpec for the fields, notably the push ORDER of
-// entity_types and parent_edge for a hierarchical type.
+// entity_types, parent_edges (which owner references the platform resolves and
+// sends as [Entity.ParentRefs]), and hierarchical for a type whose owner edge is
+// self-referencing.
 package egress

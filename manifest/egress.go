@@ -72,10 +72,11 @@ type EgressSyncSpec struct {
 
 	// MaxInFlight is the number of concurrent batches for a type.
 	//
-	// IGNORED for any type declaring ParentEdge: concurrent batches within a
-	// hierarchical type would let a child be pushed before its parent, which is
-	// exactly the ordering the level-by-level walk exists to guarantee. Zero or
-	// less ⇒ 1 (sequential). Use EffectiveMaxInFlight to resolve.
+	// For a Hierarchical type it applies WITHIN a containment level only —
+	// batches never span levels. That is safe because a level-n row's parent is
+	// at level n-1 by construction, so intra-level concurrency cannot violate
+	// ancestor-before-descendant ordering. Zero or less ⇒ 1 (sequential). Use
+	// EffectiveMaxInFlight to resolve.
 	MaxInFlight int `yaml:"max_in_flight,omitempty"`
 
 	// Image is the container image reference (with digest). DEPRECATED as the
@@ -114,40 +115,70 @@ type EgressEntityTypeSpec struct {
 	// state no local lint can see.
 	Name string `yaml:"name"`
 
-	// ParentEdge names the SELF-REFERENCING containment edge of this type, when
-	// it has one. Its presence changes the platform's walk from "page by id" to
-	// "level by level, roots first".
+	// ParentEdges names the edges that identify a pushed record's OWNER — the
+	// single entity it is subordinate to in the external system.
 	//
-	// SUPERSEDED, not yet renamed. The design specifies `ParentEdges []string`
-	// plus an explicit `Hierarchical bool` — see
-	// .kiro/specs/kg-egress-sync/design.md v1.5 (EgressEntityTypeSpec, and C9 (b)
-	// for why Hierarchical cannot be inferred) and OGA-822, which renames both
-	// sides together. The rename is NOT made here first on purpose: the
-	// platform's domainkit still declares ParentEdge and its manifest decoder is
-	// strict (KnownFields(true), internal/domainkit/manifest.go), so an SDK that
-	// accepted `parent_edges` would let an author lint a manifest the installer
-	// then rejects outright — a worse experience than today, and the exact
-	// failure this package exists to prevent, inverted.
+	// Direction is outbound: the platform resolves out(edge), so this is the
+	// record's parent or container, never its children. Declaring the inverse
+	// predicate does not look like an error, it looks like fan-out — one level
+	// resolving to hundreds of targets — so the platform fails the batch rather
+	// than choosing one.
 	//
-	// Declare it whenever a record of this type references its parent in the
-	// external system. A page-by-id walk yields ARBITRARY order, so without
-	// this a child can be pushed before its parent and that push fails.
+	// The platform resolves each declared edge at read time and sends the result
+	// as parent_refs on every pushed entity (see the sibling egress package).
+	// That is the ONLY way a component can populate an external foreign key: the
+	// entity as read carries no containment, because containment is an edge and
+	// an entity read projects columns.
 	//
-	// The platform treats this as an edge NAME and nothing more: it never
-	// interprets what containment means, only "shallower before deeper".
+	// Declare it on every type whose external record references another. It is
+	// independent of Hierarchical: an edge to a DIFFERENT type (equipment to its
+	// containing location) needs a reference but no level walk.
 	//
-	// It MUST already be a legal ArcadeDB local identifier — only [a-zA-Z0-9_],
-	// and no trailing underscore. Unlike Name above, this is NOT a catalog key
-	// compared as an opaque string: the platform composes it into a type
-	// identifier, and it materializes a predicate under a SANITIZED name (every
-	// other character becomes "_", trailing "_" trimmed). So a declared
-	// "rec:hasPart" addresses "{tenant}_rec:hasPart" — a type with no edges —
-	// and the level walk finds no children, pushing ONLY THE ROOTS while
-	// reporting a complete run. Declare the sanitized form ("rec_hasPart").
+	// Each name MUST already be a legal ArcadeDB local identifier — only
+	// [a-zA-Z0-9_], and no trailing underscore. Unlike Name above, these are NOT
+	// catalog keys compared as opaque strings: the platform composes them into
+	// type identifiers, and it materializes a predicate under a SANITIZED name
+	// (every other character becomes "_", trailing "_" trimmed). So a declared
+	// "rec:hasPart" addresses "{tenant}_rec:hasPart" — a type with no edges — and
+	// the walk finds no children, pushing ONLY THE ROOTS while reporting a
+	// complete run. Declare the sanitized form ("rec_hasPart").
 	//
-	// That asymmetry is deliberate and easy to get backwards: a colon is
-	// ordinary in Name and fatal here.
-	ParentEdge string `yaml:"parent_edge,omitempty"`
+	// That asymmetry is deliberate and easy to get backwards: a colon is ordinary
+	// in Name and fatal here.
+	ParentEdges []string `yaml:"parent_edges,omitempty"`
+
+	// Hierarchical declares that this type's owner edge is SELF-REFERENCING, so
+	// the platform walks it level by level, roots first, instead of paging by id.
+	//
+	// It must be declared and CANNOT be inferred, which is the part worth
+	// understanding rather than accepting. The same predicate plays both roles: a
+	// campus kit's hasLocation is self-referencing for a location type (room to
+	// level) and cross-type for an equipment type (equipment to location). So
+	// hierarchical-ness is a property of the (declaring type, edge) PAIR, and no
+	// attribute of the edge itself could carry it. Nor can the ontology catalog
+	// answer it — such a predicate is typically declared with wildcard endpoints.
+	//
+	// Inferring it from stored data was considered and rejected: probing whether
+	// out(edge) lands in the same physical type is correct on a fully-loaded
+	// tenant and silently WRONG on a partially-loaded one, where no row has a
+	// parent yet, so the probe concludes "not hierarchical" and children are
+	// pushed before parents. Control flow must not be inferred from data that can
+	// legitimately be incomplete.
+	Hierarchical bool `yaml:"hierarchical,omitempty"`
+
+	// IncludeDescendants selects every entity type stored under the same physical
+	// type as Name, rather than only Name itself.
+	//
+	// It exists because a kit may store many fine-grained classes under a few
+	// coarse physical types, so "the declared entity type" is otherwise
+	// ambiguous. Declare the coarse type with this flag and a class added to the
+	// source later is picked up with NO manifest change — the property a
+	// continuously-authored twin needs.
+	//
+	// The platform composes one batch per (level, entity type) so each batch
+	// stays homogeneous, and it applies the same selection rule to change
+	// delivery as to the bulk push. Absent ⇒ Name selects exactly itself.
+	IncludeDescendants bool `yaml:"include_descendants,omitempty"`
 }
 
 // EffectiveImage returns the component's container image, preferring the
@@ -171,25 +202,16 @@ func (e *EgressSyncSpec) EffectiveBatchSize() int {
 	return DefaultEgressBatchSize
 }
 
-// EffectiveMaxInFlight returns the concurrency for entityType.
+// EffectiveMaxInFlight returns the declared batch concurrency, defaulted.
 //
-// SUPERSEDED by OGA-823: the platform will confine concurrency to a single
-// containment LEVEL rather than forbidding it for a hierarchical type, because a
-// level-n row's parent is at n-1 by construction. When that lands this must
-// return the configured value and the clamp below goes away. Kept as-is until
-// then so the helper matches the platform's actual behaviour rather than the
-// design's intended behaviour — a helper that promised the new semantics against
-// the old platform would over-parallelise a hierarchical push.
-//
-// It returns 1 unconditionally for a type declaring ParentEdge, whatever the
-// kit asked for. This is not a kit-authoring error worth failing an install
-// over — the declared concurrency is simply not applicable to a hierarchical
-// type — but honoring it would silently break ancestor-before-descendant
-// ordering, so it is clamped here rather than checked at every call site.
-func (e *EgressSyncSpec) EffectiveMaxInFlight(entityType *EgressEntityTypeSpec) int {
-	if entityType != nil && entityType.ParentEdge != "" {
-		return 1
-	}
+// It takes no entity type and applies no clamp. An earlier shape forced 1 for a
+// hierarchical type, on the reasoning that concurrent batches could push a child
+// before its parent. That is true only ACROSS levels: within one level every
+// row's parent sits at the level above, already pushed, so intra-level
+// concurrency is safe. Confining batches to a level is the platform's scheduling
+// job and cannot be expressed as a single number, so this helper reports what the
+// kit asked for and does not pretend to encode the constraint.
+func (e *EgressSyncSpec) EffectiveMaxInFlight() int {
 	if e.MaxInFlight > 1 {
 		return e.MaxInFlight
 	}
@@ -213,16 +235,17 @@ func (e *EgressSyncSpec) EntityTypeNames() []string {
 
 // validateEgressSyncs checks each kit-declared egress component
 // (spec.egress_syncs[]): unique name, external_system present, at least one
-// entity type, a digest-pinned image, and an addressable parent_edge. It mirrors
+// entity type, a digest-pinned image, and coherent per-type edge declarations. It mirrors
 // the platform's domainkit.validateEgressSpecStructure — the checks that need no
 // external state — so a kit author gets the same rejection locally that the
 // installer would raise as OGA-EGRS-VAL-1002.
 //
-// The parent_edge check is the one addition the platform does NOT make at
-// install: it validates the name only when the Day-1 walk reaches it
-// (egress.assertAddressableEdge), so an unaddressable edge installs cleanly and
-// fails mid-run, having pushed only the roots. The predicate needs no tenant
-// state at all, so catching it here is strictly better than catching it there.
+// The per-entity-type checks (validateEgressEntityType) are the one addition the
+// platform does NOT make at install: it validates an edge name only when the
+// Day-1 walk reaches it (egress.assertAddressableEdge), so an unaddressable edge
+// installs cleanly and fails mid-run, having pushed only the roots. None of it
+// needs tenant state, so catching it here is strictly better than catching it
+// there.
 //
 // It deliberately does NOT mirror the platform's ontology cross-check
 // (OGA-EGRS-VAL-1001: every declared entity type must resolve against the
@@ -269,27 +292,70 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 			)
 		}
 		for j := range e.EntityTypes {
-			// Empty is legal and common: it means "this type has no
-			// self-referencing containment edge", so it is walked by id.
-			edge := e.EntityTypes[j].ParentEdge
-			if edge == "" || isAddressableEdgeName(edge) {
-				continue
+			if err := validateEgressEntityType(i, j, &e.EntityTypes[j]); err != nil {
+				return err
 			}
-			if suggestion := sanitizeEdgeName(edge); suggestion != "" {
-				return fmt.Errorf(
-					"spec.egress_syncs[%d].entity_types[%d]: parent_edge = %q is not addressable by "+
-						"its declared name — the platform materializes a predicate under a sanitized "+
-						"identifier ([a-zA-Z0-9_] only, trailing underscores trimmed), so a level walk "+
-						"on this name would find no children and would push only the roots; declare %q",
-					i, j, edge, suggestion,
-				)
-			}
+		}
+	}
+	return nil
+}
+
+// validateEgressEntityType checks one entity_types[] entry: that Hierarchical is
+// coherent with ParentEdges, and that every declared edge name can actually
+// address an edge type.
+//
+// None of this needs tenant state, which is why it belongs here. The platform
+// validates edge addressability only when the Day-1 walk reaches it, so an
+// unaddressable edge otherwise installs cleanly and fails mid-run having pushed
+// only the roots.
+func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
+	// A level walk has to traverse something. Hierarchical with no edge is not a
+	// conservative default, it is incoherent: the platform would look for roots
+	// via an edge that was never named.
+	if et.Hierarchical && len(et.ParentEdges) == 0 {
+		return fmt.Errorf(
+			"spec.egress_syncs[%d].entity_types[%d]: hierarchical is set but parent_edges is empty — "+
+				"a level-by-level walk has no edge to traverse",
+			i, j,
+		)
+	}
+	seen := make(map[string]struct{}, len(et.ParentEdges))
+	for _, edge := range et.ParentEdges {
+		if strings.TrimSpace(edge) == "" {
 			return fmt.Errorf(
-				"spec.egress_syncs[%d].entity_types[%d]: parent_edge = %q has no legal identifier form "+
-					"(it sanitizes to the empty string), so it can never name an edge type",
+				"spec.egress_syncs[%d].entity_types[%d]: parent_edges contains an empty entry",
+				i, j,
+			)
+		}
+		// Each edge becomes a key in the entity's parent_refs, so a duplicate is
+		// not merely redundant — it names one key twice and leaves which
+		// resolution wins undefined.
+		if _, dup := seen[edge]; dup {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].entity_types[%d]: parent_edges lists %q twice; each edge is one "+
+					"parent_refs key",
 				i, j, edge,
 			)
 		}
+		seen[edge] = struct{}{}
+
+		if isAddressableEdgeName(edge) {
+			continue
+		}
+		if suggestion := sanitizeEdgeName(edge); suggestion != "" {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].entity_types[%d]: parent_edges entry %q is not addressable by "+
+					"its declared name — the platform materializes a predicate under a sanitized "+
+					"identifier ([a-zA-Z0-9_] only, trailing underscores trimmed), so a walk on this "+
+					"name would find no children and would push only the roots; declare %q",
+				i, j, edge, suggestion,
+			)
+		}
+		return fmt.Errorf(
+			"spec.egress_syncs[%d].entity_types[%d]: parent_edges entry %q has no legal identifier form "+
+				"(it sanitizes to the empty string), so it can never name an edge type",
+			i, j, edge,
+		)
 	}
 	return nil
 }
