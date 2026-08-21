@@ -98,4 +98,10 @@
 // entity_types, parent_edges (which owner references the platform resolves and
 // sends as [Entity.ParentRefs]), and hierarchical for a type whose owner edge is
 // self-referencing.
+//
+// Each parent_edges entry carries a traversal DIRECTION, defaulting to outbound.
+// The key under which an owner arrives in [Entity.ParentRefs] is the declared EDGE
+// name, not the semantic relation — so an owner reached inbound over hasPoint
+// arrives under "hasPoint", even though the relation reads naturally as
+// "isPointOf". See manifest.ParentEdgeSpec.
 package egress
