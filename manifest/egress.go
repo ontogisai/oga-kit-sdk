@@ -3,6 +3,8 @@ package manifest
 import (
 	"fmt"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Egress-sync manifest declarations (kg-egress-sync, OGA-775 / OGA-810).
@@ -31,6 +33,142 @@ const (
 	// when the kit declares none.
 	DefaultEgressBatchSize = 200
 )
+
+// ParentEdgeDirection is the direction in which an owner edge is traversed to
+// reach the owner.
+//
+// The values match ArcadeDB's own out() / in() traversal vocabulary rather than
+// spelling them "outbound" / "inbound", so a declaration reads directly onto the
+// traversal the platform generates for it.
+type ParentEdgeDirection string
+
+const (
+	// ParentEdgeOut resolves the owner as out(edge): the declaring entity holds
+	// the edge and it points AT its owner. This is the default, and it is correct
+	// whenever a containment edge is stored child to parent.
+	ParentEdgeOut ParentEdgeDirection = "out"
+
+	// ParentEdgeIn resolves the owner as in(edge): the OWNER holds the edge and it
+	// points at the declaring entity. Needed whenever a containment edge is stored
+	// parent to child, which is the usual convention for "has a part / has a
+	// point" style predicates.
+	ParentEdgeIn ParentEdgeDirection = "in"
+)
+
+// NormalizeDirection resolves an unset direction to the outbound default.
+//
+// Outbound is the default because it is both the more common storage convention
+// for containment and the behaviour every declaration had before direction
+// existed, so an omitted value means what it always meant.
+func NormalizeDirection(d ParentEdgeDirection) ParentEdgeDirection {
+	if d == "" {
+		return ParentEdgeOut
+	}
+	return d
+}
+
+// Valid reports whether d is a direction the platform can traverse. An empty
+// value is valid: it normalizes to the outbound default.
+func (d ParentEdgeDirection) Valid() bool {
+	switch NormalizeDirection(d) {
+	case ParentEdgeOut, ParentEdgeIn:
+		return true
+	default:
+		return false
+	}
+}
+
+// ParentEdgeSpec is one owner-edge declaration: an edge name plus the direction
+// in which the platform traverses it to reach the owner.
+//
+// YAML accepts two forms, and the scalar shorthand is what keeps the common case
+// unchanged:
+//
+//	parent_edges: [hasLocation]                        # shorthand ⇒ direction: out
+//	parent_edges:
+//	  - edge: hasPoint                                 # explicit
+//	    direction: in
+//
+// Direction is a property of the (declaring type, edge) PAIR, not of the edge, for
+// the same reason Hierarchical is: one predicate is oriented differently by
+// different declaring types. A campus kit's hasLocation runs child to parent while
+// its hasPoint runs parent to child, so no attribute of the edge alone could carry
+// it.
+//
+// Encoding direction as a sigil inside the edge string ("<hasPoint") was rejected:
+// isAddressableEdgeName permits [a-zA-Z0-9_] only, so every sigil form is already
+// rejected as unaddressable, and the sigil would leak into the parent_refs key the
+// component reads.
+type ParentEdgeSpec struct {
+	// Edge is the relationship type name. It must ALREADY be a legal ArcadeDB
+	// local identifier — see the note on EgressEntityTypeSpec.ParentEdges, where
+	// the colon asymmetry against Name is spelled out.
+	Edge string `yaml:"edge"`
+
+	// Direction is "out" (default) or "in". Empty means out; use
+	// EffectiveDirection to read it resolved.
+	Direction ParentEdgeDirection `yaml:"direction,omitempty"`
+}
+
+// EffectiveDirection returns the declared direction with the outbound default
+// applied, matching the Effective* convention used elsewhere in this file.
+func (p ParentEdgeSpec) EffectiveDirection() ParentEdgeDirection {
+	return NormalizeDirection(p.Direction)
+}
+
+// UnmarshalYAML accepts either a bare scalar (the edge name, direction defaulting
+// to outbound) or a mapping with explicit edge / direction keys.
+//
+// The mapping branch walks the node's keys by hand rather than calling
+// value.Decode into a shadow struct, and that is load-bearing rather than
+// stylistic: yaml.v3's Node.Decode does NOT inherit the parent decoder's
+// KnownFields setting, so an unknown key here would be silently dropped even
+// under the strict decoder the platform installer uses. A mistyped "directon:
+// in" would then leave Direction empty and default to OUTBOUND — reintroducing
+// the exact silent wrong-direction failure this field exists to prevent, and
+// reintroducing it in the one place an author was trying to be explicit.
+func (p *ParentEdgeSpec) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var edge string
+		if err := value.Decode(&edge); err != nil {
+			return fmt.Errorf("parent_edges entry: %w", err)
+		}
+		p.Edge = edge
+		p.Direction = ""
+		return nil
+
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			key, val := value.Content[i], value.Content[i+1]
+			switch key.Value {
+			case "edge":
+				if err := val.Decode(&p.Edge); err != nil {
+					return fmt.Errorf("parent_edges entry: edge: %w", err)
+				}
+			case "direction":
+				var dir string
+				if err := val.Decode(&dir); err != nil {
+					return fmt.Errorf("parent_edges entry: direction: %w", err)
+				}
+				p.Direction = ParentEdgeDirection(dir)
+			default:
+				return fmt.Errorf(
+					"parent_edges entry: unknown field %q (expected edge, direction); "+
+						"a mistyped direction key would silently default to %q",
+					key.Value, ParentEdgeOut,
+				)
+			}
+		}
+		return nil
+
+	default:
+		return fmt.Errorf(
+			"parent_edges entry must be an edge name or a mapping with edge/direction, got YAML kind %d",
+			value.Kind,
+		)
+	}
+}
 
 // EgressSyncSpec declares one egress-sync component the platform deploys as a
 // long-running sidecar at install time and then DRIVES: a resumable Day-1 bulk
@@ -118,11 +256,26 @@ type EgressEntityTypeSpec struct {
 	// ParentEdges names the edges that identify a pushed record's OWNER — the
 	// single entity it is subordinate to in the external system.
 	//
-	// Direction is outbound: the platform resolves out(edge), so this is the
-	// record's parent or container, never its children. Declaring the inverse
-	// predicate does not look like an error, it looks like fan-out — one level
-	// resolving to hundreds of targets — so the platform fails the batch rather
-	// than choosing one.
+	// Each entry is an edge plus a TRAVERSAL DIRECTION, and YAML accepts a bare
+	// edge name as shorthand for the outbound default (see ParentEdgeSpec):
+	//
+	//	parent_edges: [hasLocation]        # child holds the edge ⇒ out(hasLocation)
+	//	parent_edges:
+	//	  - edge: hasPoint                 # parent holds the edge ⇒ in(hasPoint)
+	//	    direction: in
+	//
+	// Get the direction RIGHT, because getting it wrong is silent rather than
+	// loud. Traversing the wrong way resolves to nothing, and "no owner" is a
+	// legal, common answer meaning "this record is a root" — so every affected
+	// record is pushed with no foreign key and the run reports complete success.
+	// Declaring the INVERSE predicate instead is the louder mistake: it presents
+	// as fan-out, one level resolving to hundreds of targets, and the platform
+	// fails the batch rather than choosing one.
+	//
+	// Which direction a kit needs is a fact about how its loader STORES the edge,
+	// not about how the source system words it. A loader that normalizes inverse
+	// predicates to one canonical edge decides the stored orientation, so read the
+	// loader rather than the source vocabulary.
 	//
 	// The platform resolves each declared edge at read time and sends the result
 	// as parent_refs on every pushed entity (see the sibling egress package).
@@ -145,7 +298,7 @@ type EgressEntityTypeSpec struct {
 	//
 	// That asymmetry is deliberate and easy to get backwards: a colon is ordinary
 	// in Name and fatal here.
-	ParentEdges []string `yaml:"parent_edges,omitempty"`
+	ParentEdges []ParentEdgeSpec `yaml:"parent_edges,omitempty"`
 
 	// Hierarchical declares that this type's owner edge is SELF-REFERENCING, so
 	// the platform walks it level by level, roots first, instead of paging by id.
@@ -164,6 +317,12 @@ type EgressEntityTypeSpec struct {
 	// parent yet, so the probe concludes "not hierarchical" and children are
 	// pushed before parents. Control flow must not be inferred from data that can
 	// legitimately be incomplete.
+	//
+	// The walk follows the edge's declared DIRECTION, so a self-referencing edge
+	// stored parent to child is walked inbound. Requires exactly one ParentEdges
+	// entry: "level" is hops along a SINGLE containment axis, so with two declared
+	// edges a row's depth is not well defined and there is no non-arbitrary way to
+	// pick the axis. Use HierarchyEdge to read the resolved pair.
 	Hierarchical bool `yaml:"hierarchical,omitempty"`
 
 	// IncludeDescendants selects every entity type stored under the same physical
@@ -231,6 +390,42 @@ func (e *EgressSyncSpec) EntityTypeNames() []string {
 		}
 	}
 	return out
+}
+
+// ParentEdgeNames returns the declared owner-edge names in declared order,
+// skipping empty entries.
+//
+// Direction-blind by construction, so use it only where the NAMES are what
+// matter — reporting, or matching against a component's known edge set. Anything
+// that resolves an owner must read EffectiveDirection too, or it will traverse a
+// parent-to-child edge the wrong way and silently find nothing.
+func (t *EgressEntityTypeSpec) ParentEdgeNames() []string {
+	if len(t.ParentEdges) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(t.ParentEdges))
+	for i := range t.ParentEdges {
+		if e := t.ParentEdges[i].Edge; e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// HierarchyEdge returns the edge the level-by-level walk traverses, with its
+// direction resolved, and whether this type is walked hierarchically at all.
+//
+// It is the single resolution point for "which edge orders the walk, and which
+// way", so a kit's own tooling and the platform cannot disagree about it.
+// Validation guarantees a hierarchical type declares exactly one edge, so the
+// answer is unambiguous by construction rather than by picking a winner.
+func (t *EgressEntityTypeSpec) HierarchyEdge() (ParentEdgeSpec, bool) {
+	if t == nil || !t.Hierarchical || len(t.ParentEdges) != 1 {
+		return ParentEdgeSpec{}, false
+	}
+	edge := t.ParentEdges[0]
+	edge.Direction = edge.EffectiveDirection()
+	return edge, true
 }
 
 // validateEgressSyncs checks each kit-declared egress component
@@ -301,8 +496,9 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 }
 
 // validateEgressEntityType checks one entity_types[] entry: that Hierarchical is
-// coherent with ParentEdges, and that every declared edge name can actually
-// address an edge type.
+// coherent with ParentEdges, that every declared direction is one the platform can
+// traverse and no edge is declared in both, and that every declared edge name can
+// actually address an edge type.
 //
 // None of this needs tenant state, which is why it belongs here. The platform
 // validates edge addressability only when the Day-1 walk reaches it, so an
@@ -319,25 +515,58 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
 			i, j,
 		)
 	}
-	seen := make(map[string]struct{}, len(et.ParentEdges))
-	for _, edge := range et.ParentEdges {
+	// A hierarchical type's "level" is hops along a SINGLE containment axis, so
+	// several declared edges leave a row's depth undefined. Silently taking the
+	// first was rejected: it yields a plausible-looking run ordered along whichever
+	// edge happens to be first, which is the silent wrongness the explicit
+	// hierarchical flag exists to prevent. A NON-hierarchical type may declare as
+	// many owner edges as it needs — it wants each owner referenced but no level
+	// walk, so there is no axis to disambiguate.
+	if et.Hierarchical && len(et.ParentEdges) > 1 {
+		return fmt.Errorf(
+			"spec.egress_syncs[%d].entity_types[%d]: hierarchical is set with %d parent_edges; "+
+				"exactly one is required because level is defined by hops along a single containment axis",
+			i, j, len(et.ParentEdges),
+		)
+	}
+	// Keyed by edge NAME, not by (name, direction): both directions of one edge
+	// resolve into the same parent_refs key, so they collide even though they are
+	// not literally the same declaration. The two cases get distinct messages
+	// because their remedies differ — drop a redundant line, versus decide which
+	// way the edge actually points.
+	seen := make(map[string]ParentEdgeDirection, len(et.ParentEdges))
+	for _, pe := range et.ParentEdges {
+		edge := pe.Edge
 		if strings.TrimSpace(edge) == "" {
 			return fmt.Errorf(
 				"spec.egress_syncs[%d].entity_types[%d]: parent_edges contains an empty entry",
 				i, j,
 			)
 		}
-		// Each edge becomes a key in the entity's parent_refs, so a duplicate is
-		// not merely redundant — it names one key twice and leaves which
-		// resolution wins undefined.
-		if _, dup := seen[edge]; dup {
+		if !pe.Direction.Valid() {
 			return fmt.Errorf(
-				"spec.egress_syncs[%d].entity_types[%d]: parent_edges lists %q twice; each edge is one "+
-					"parent_refs key",
-				i, j, edge,
+				"spec.egress_syncs[%d].entity_types[%d]: parent_edges entry %q declares direction %q; "+
+					"expected %q (the declaring entity holds the edge) or %q (the owner holds it)",
+				i, j, edge, pe.Direction, ParentEdgeOut, ParentEdgeIn,
 			)
 		}
-		seen[edge] = struct{}{}
+		dir := pe.EffectiveDirection()
+		if prev, dup := seen[edge]; dup {
+			if prev == dir {
+				return fmt.Errorf(
+					"spec.egress_syncs[%d].entity_types[%d]: parent_edges lists %q twice; each edge is one "+
+						"parent_refs key",
+					i, j, edge,
+				)
+			}
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].entity_types[%d]: parent_edges declares %q in both directions "+
+					"(%q and %q); both resolve into the one parent_refs key %q, so which owner wins is "+
+					"undefined — declare the direction the edge is actually stored in",
+				i, j, edge, prev, dir, edge,
+			)
+		}
+		seen[edge] = dir
 
 		if isAddressableEdgeName(edge) {
 			continue

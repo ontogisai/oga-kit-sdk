@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+// outEdges builds outbound owner-edge declarations — the shorthand form, and what
+// every entry in these tests meant before direction existed (OGA-836). Written as
+// a helper rather than inline literals so a test that cares about direction states
+// it explicitly, and the rest visibly do not.
+func outEdges(names ...string) []ParentEdgeSpec {
+	out := make([]ParentEdgeSpec, 0, len(names))
+	for _, n := range names {
+		out = append(out, ParentEdgeSpec{Edge: n})
+	}
+	return out
+}
+
 // egressManifestYAML is the block a kit author writes for an egress component.
 // Before OGA-810 this exact input was REJECTED at parse time — manifest.Parse
 // sets KnownFields(true), so an unknown spec.egress_syncs was a hard error and an
@@ -74,8 +86,17 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 			t.Fatalf("entity types = %v, want %v (order is load-bearing)", got, want)
 		}
 	}
-	if got := e.EntityTypes[1].ParentEdges; len(got) != 1 || got[0] != "hasPart" {
-		t.Errorf("entity_types[1].parent_edges = %v, want [hasPart]", got)
+	// The scalar shorthand parses to one entry defaulting to OUTBOUND — this is the
+	// behaviour-preservation check for OGA-836: the YAML above is byte-identical to
+	// what a kit wrote before direction existed, and it must still mean out(hasPart).
+	if got := e.EntityTypes[1].ParentEdges; len(got) != 1 || got[0].Edge != "hasPart" {
+		t.Errorf("entity_types[1].parent_edges = %v, want one entry for hasPart", got)
+	}
+	if got := e.EntityTypes[1].ParentEdges[0].EffectiveDirection(); got != ParentEdgeOut {
+		t.Errorf("scalar shorthand direction = %q, want %q", got, ParentEdgeOut)
+	}
+	if got := e.EntityTypes[1].ParentEdges[0].Direction; got != "" {
+		t.Errorf("scalar shorthand should leave Direction unset (got %q) so the default is one place", got)
 	}
 	if !e.EntityTypes[1].Hierarchical {
 		t.Error("entity_types[1].hierarchical = false, want true")
@@ -295,7 +316,7 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 		Name:           "core-sync",
 		ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "rec:Space", ParentEdges: []string{"hasLocation"}, Hierarchical: true},
+			{Name: "rec:Space", ParentEdges: outEdges("hasLocation"), Hierarchical: true},
 			{Name: "brick:Equipment"},
 			{Name: "Point"}, // colon-free is equally a class ID
 		},
@@ -330,7 +351,7 @@ func TestValidateEgressSyncs_RejectsUnaddressableParentEdges(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "rec:Space", ParentEdges: []string{"rec:hasPart"}},
+			{Name: "rec:Space", ParentEdges: outEdges("rec:hasPart")},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
@@ -357,7 +378,7 @@ func TestValidateEgressSyncs_RejectsParentEdgesCasesACharacterDenylistWouldMiss(
 	for _, edge := range []string{"hasLocation_", "has.location", "has location", "has/location", "has-location"} {
 		e := EgressSyncSpec{
 			Name: "core-sync", ExternalSystem: "24k-core",
-			EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: []string{edge}}},
+			EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(edge)}},
 			Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 		}
 		if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
@@ -371,7 +392,7 @@ func TestValidateEgressSyncs_RejectsParentEdgesCasesACharacterDenylistWouldMiss(
 func TestValidateEgressSyncs_ParentEdgesWithNoLegalForm(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: []string{":::"}}},
+		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(":::")}},
 		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	err := validateEgressSyncs([]EgressSyncSpec{e})
@@ -392,9 +413,9 @@ func TestValidateEgressSyncs_AcceptsAddressableAndAbsentParentEdges(t *testing.T
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "Location", ParentEdges: []string{"hasLocation"}, Hierarchical: true},
-			{Name: "brick:AHU", ParentEdges: []string{"rec_hasPart"}},
-			{Name: "Point", ParentEdges: []string{"feeds2", "isPointOf"}},
+			{Name: "Location", ParentEdges: outEdges("hasLocation"), Hierarchical: true},
+			{Name: "brick:AHU", ParentEdges: outEdges("rec_hasPart")},
+			{Name: "Point", ParentEdges: outEdges("feeds2", "isPointOf")},
 			{Name: "Equipment"}, // no parent_edges at all
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
@@ -449,7 +470,7 @@ func TestValidateEgressSyncs_RejectsDuplicateParentEdge(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "Point", ParentEdges: []string{"isPointOf", "isPointOf"}},
+			{Name: "Point", ParentEdges: outEdges("isPointOf", "isPointOf")},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
@@ -469,7 +490,7 @@ func TestValidateEgressSyncs_RejectsDuplicateParentEdge(t *testing.T) {
 func TestValidateEgressSyncs_RejectsEmptyParentEdgeEntry(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: []string{"isPointOf", "  "}}},
+		EntityTypes: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: outEdges("isPointOf", "  ")}},
 		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
@@ -484,8 +505,8 @@ func TestValidateEgressSyncs_IncludeDescendantsIsIndependentOfHierarchical(t *te
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
 		EntityTypes: []EgressEntityTypeSpec{
-			{Name: "Equipment", IncludeDescendants: true, ParentEdges: []string{"hasLocation"}},
-			{Name: "Location", Hierarchical: true, ParentEdges: []string{"hasLocation"}},
+			{Name: "Equipment", IncludeDescendants: true, ParentEdges: outEdges("hasLocation")},
+			{Name: "Location", Hierarchical: true, ParentEdges: outEdges("hasLocation")},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
@@ -506,4 +527,314 @@ func TestValidateEgressSyncs_DigestColonIsNotAClassIDColon(t *testing.T) {
 	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
 		t.Fatalf("digest-pinned image with a namespaced type rejected: %v", err)
 	}
+}
+
+// ─── Owner-edge direction (OGA-836) ─────────────────────────────────────────
+//
+// Direction exists because an owner edge is not always stored child-to-parent. A
+// loader that normalizes inverse predicates to one canonical edge decides the
+// stored orientation, and for "has a point / has a part" style predicates that
+// orientation is parent-to-child — so the owner sits on the in() side. Before this
+// field such a relation could not be declared at all: naming the inverse predicate
+// fails install (no such relationship type) and naming the stored edge resolves
+// zero owners, which reads as "root" and pushes every record unowned while
+// reporting success.
+
+// egressManifestWithEntityTypes wraps an entity_types block in an otherwise valid
+// manifest, so a direction test states only the part it is about.
+func egressManifestWithEntityTypes(entityTypes string) string {
+	return `api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: sj24k
+  version: 1.0.0
+  display_name:
+    en-US: SJ 24K
+  description:
+    en-US: 24K Core integration
+spec:
+  platform_version: ">=1.0.0"
+  egress_syncs:
+    - name: core-egress-sync
+      external_system: 24k-core
+      entity_types:
+` + entityTypes + `      container:
+        image: ghcr.io/ontogisai/oga-kit-sj24k/core-egress@sha256:abc123
+`
+}
+
+// The mapping form parses, and a list may MIX shorthand and mapping entries — the
+// realistic shape, since a kit typically has one inbound edge among several
+// outbound ones and should not have to convert the others.
+func TestParse_ParentEdgesMappingFormAndMixedList(t *testing.T) {
+	y := egressManifestWithEntityTypes(`        - name: Location
+          parent_edges: [hasLocation]
+          hierarchical: true
+        - name: Point
+          parent_edges:
+            - hasLocation
+            - edge: hasPoint
+              direction: in
+`)
+	m, err := Parse(strings.NewReader(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	types := m.Spec.EgressSyncs[0].EntityTypes
+
+	if got := types[0].ParentEdges[0].EffectiveDirection(); got != ParentEdgeOut {
+		t.Errorf("shorthand entry direction = %q, want %q", got, ParentEdgeOut)
+	}
+
+	mixed := types[1].ParentEdges
+	if len(mixed) != 2 {
+		t.Fatalf("mixed list parsed to %d entries, want 2", len(mixed))
+	}
+	if mixed[0].Edge != "hasLocation" || mixed[0].EffectiveDirection() != ParentEdgeOut {
+		t.Errorf("mixed[0] = %+v, want hasLocation/out", mixed[0])
+	}
+	if mixed[1].Edge != "hasPoint" || mixed[1].EffectiveDirection() != ParentEdgeIn {
+		t.Errorf("mixed[1] = %+v, want hasPoint/in", mixed[1])
+	}
+}
+
+// A mistyped direction key must be REJECTED, not ignored.
+//
+// This is the sharpest test in the file, because the failure it guards is one the
+// obvious implementation reintroduces. yaml.v3's Node.Decode does not inherit the
+// parent decoder's KnownFields setting, so a ParentEdgeSpec that unmarshalled via a
+// shadow struct would silently drop "directon" — leaving Direction empty, defaulting
+// to OUTBOUND, and producing the exact silent wrong-direction push the field exists
+// to prevent. Worse, it would do so in the one place the author was being explicit.
+func TestParse_ParentEdgesRejectsUnknownFieldInMapping(t *testing.T) {
+	y := egressManifestWithEntityTypes(`        - name: Point
+          parent_edges:
+            - edge: hasPoint
+              directon: in
+`)
+	_, err := Parse(strings.NewReader(y))
+	if err == nil {
+		t.Fatal("a mistyped direction key was accepted; it would silently default to outbound")
+	}
+	if !strings.Contains(err.Error(), "directon") {
+		t.Errorf("error must name the unknown field, got: %v", err)
+	}
+}
+
+// Anything that is neither an edge name nor an edge/direction mapping is rejected
+// with a message that says what the two legal shapes are.
+func TestParse_ParentEdgesRejectsUnsupportedNodeShape(t *testing.T) {
+	y := egressManifestWithEntityTypes(`        - name: Point
+          parent_edges:
+            - [hasPoint, in]
+`)
+	_, err := Parse(strings.NewReader(y))
+	if err == nil {
+		t.Fatal("a sequence parent_edges entry was accepted")
+	}
+	if !strings.Contains(err.Error(), "edge/direction") {
+		t.Errorf("error should name the legal shapes, got: %v", err)
+	}
+}
+
+// An unrecognized direction is rejected rather than normalized. "inbound" is the
+// plausible wrong guess, and silently treating it as outbound would invert the
+// author's stated intent.
+func TestValidateEgressSyncs_RejectsUnknownDirection(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "Point", ParentEdges: []ParentEdgeSpec{{Edge: "hasPoint", Direction: "inbound"}}},
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal(`direction "inbound" was accepted; it is not a traversal the platform emits`)
+	}
+	for _, want := range []string{`"inbound"`, `"out"`, `"in"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %s, got: %v", want, err)
+		}
+	}
+}
+
+// The same edge in both directions collides: both resolve into the ONE parent_refs
+// key named by the edge, so which owner wins is undefined. It is a distinct failure
+// from the plain duplicate because the remedy differs — decide which way the edge
+// is stored, rather than delete a redundant line.
+func TestValidateEgressSyncs_RejectsSameEdgeInBothDirections(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "Point", ParentEdges: []ParentEdgeSpec{
+				{Edge: "hasPoint"},
+				{Edge: "hasPoint", Direction: ParentEdgeIn},
+			}},
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("the same edge in both directions was accepted; both are one parent_refs key")
+	}
+	if !strings.Contains(err.Error(), "both directions") {
+		t.Errorf("error should name the collision, got: %v", err)
+	}
+	// It must NOT be reported as a plain duplicate: that would send the author to
+	// delete a line rather than to establish the stored orientation.
+	if strings.Contains(err.Error(), "twice") {
+		t.Errorf("both-directions must not be reported as a plain duplicate, got: %v", err)
+	}
+}
+
+// An inbound declaration is otherwise ordinary: it is accepted, and the edge-name
+// addressability rule still applies to it. Direction changes how the platform
+// traverses the edge, not what a legal edge name looks like.
+func TestValidateEgressSyncs_InboundDirection(t *testing.T) {
+	base := func(edges []ParentEdgeSpec) []EgressSyncSpec {
+		return []EgressSyncSpec{{
+			Name: "core-sync", ExternalSystem: "24k-core",
+			EntityTypes: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: edges}},
+			Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+		}}
+	}
+	if err := validateEgressSyncs(base([]ParentEdgeSpec{
+		{Edge: "hasPoint", Direction: ParentEdgeIn},
+	})); err != nil {
+		t.Fatalf("an inbound owner edge was rejected: %v", err)
+	}
+	err := validateEgressSyncs(base([]ParentEdgeSpec{
+		{Edge: "rec:hasPoint", Direction: ParentEdgeIn},
+	}))
+	if err == nil {
+		t.Fatal("an unaddressable edge was accepted under direction: in")
+	}
+	if !strings.Contains(err.Error(), `"rec_hasPoint"`) {
+		t.Errorf("error should still suggest the sanitized form, got: %v", err)
+	}
+}
+
+// A hierarchical type must declare EXACTLY one edge. "Level" is hops along a single
+// containment axis, so two declared edges leave a row's depth undefined and there
+// is no non-arbitrary way to pick the axis. The platform's installer already
+// rejected this; the SDK did not, so a kit author got a local pass and an install
+// failure (parity fix found while implementing OGA-836).
+func TestValidateEgressSyncs_RejectsHierarchicalWithSeveralEdges(t *testing.T) {
+	e := EgressSyncSpec{
+		Name: "core-sync", ExternalSystem: "24k-core",
+		EntityTypes: []EgressEntityTypeSpec{
+			{Name: "Location", Hierarchical: true, ParentEdges: outEdges("managedBy", "hasLocation")},
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+	}
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("hierarchical with two parent_edges was accepted; the hierarchy axis is ambiguous")
+	}
+	if !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("error should say exactly one edge is required, got: %v", err)
+	}
+	// A NON-hierarchical type may still declare several: it wants each owner
+	// referenced but no level walk, so there is no axis to disambiguate.
+	e.EntityTypes[0].Hierarchical = false
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("several edges without hierarchical were rejected: %v", err)
+	}
+}
+
+// HierarchyEdge is the single resolution point for "which edge orders the walk, and
+// which way". It reports the direction RESOLVED, so a caller cannot accidentally
+// walk an inbound hierarchy outbound by reading the raw zero value.
+func TestHierarchyEdge(t *testing.T) {
+	t.Run("resolves the declared direction", func(t *testing.T) {
+		et := &EgressEntityTypeSpec{
+			Name: "Assembly", Hierarchical: true,
+			ParentEdges: []ParentEdgeSpec{{Edge: "hasPart", Direction: ParentEdgeIn}},
+		}
+		got, ok := et.HierarchyEdge()
+		if !ok {
+			t.Fatal("HierarchyEdge reported no hierarchy for a hierarchical type")
+		}
+		if got.Edge != "hasPart" || got.Direction != ParentEdgeIn {
+			t.Errorf("HierarchyEdge = %+v, want hasPart/in", got)
+		}
+	})
+
+	t.Run("defaults an unset direction rather than returning the zero value", func(t *testing.T) {
+		et := &EgressEntityTypeSpec{
+			Name: "Location", Hierarchical: true, ParentEdges: outEdges("hasLocation"),
+		}
+		got, ok := et.HierarchyEdge()
+		if !ok {
+			t.Fatal("HierarchyEdge reported no hierarchy")
+		}
+		if got.Direction != ParentEdgeOut {
+			t.Errorf("direction = %q, want it resolved to %q", got.Direction, ParentEdgeOut)
+		}
+	})
+
+	t.Run("no hierarchy when not declared or ambiguous", func(t *testing.T) {
+		flat := &EgressEntityTypeSpec{Name: "Equipment", ParentEdges: outEdges("hasLocation")}
+		if _, ok := flat.HierarchyEdge(); ok {
+			t.Error("a non-hierarchical type reported a hierarchy edge")
+		}
+		ambiguous := &EgressEntityTypeSpec{
+			Name: "Location", Hierarchical: true, ParentEdges: outEdges("a", "b"),
+		}
+		if _, ok := ambiguous.HierarchyEdge(); ok {
+			t.Error("an ambiguous multi-edge hierarchy reported one edge; validation rejects this shape")
+		}
+		var nilType *EgressEntityTypeSpec
+		if _, ok := nilType.HierarchyEdge(); ok {
+			t.Error("a nil type reported a hierarchy edge")
+		}
+	})
+}
+
+func TestNormalizeDirectionAndValid(t *testing.T) {
+	if got := NormalizeDirection(""); got != ParentEdgeOut {
+		t.Errorf("NormalizeDirection(\"\") = %q, want %q — an omitted direction must mean what it always meant", got, ParentEdgeOut)
+	}
+	if got := NormalizeDirection(ParentEdgeIn); got != ParentEdgeIn {
+		t.Errorf("NormalizeDirection(in) = %q", got)
+	}
+	for _, d := range []ParentEdgeDirection{"", ParentEdgeOut, ParentEdgeIn} {
+		if !d.Valid() {
+			t.Errorf("direction %q should be valid", d)
+		}
+	}
+	for _, d := range []ParentEdgeDirection{"inbound", "outbound", "IN", "both"} {
+		if d.Valid() {
+			t.Errorf("direction %q should be invalid", d)
+		}
+	}
+}
+
+// ParentEdgeNames is direction-blind on purpose, for callers that only need the
+// names. It skips blanks, matching EntityTypeNames.
+func TestParentEdgeNames(t *testing.T) {
+	et := &EgressEntityTypeSpec{ParentEdges: []ParentEdgeSpec{
+		{Edge: "hasLocation"},
+		{Edge: "hasPoint", Direction: ParentEdgeIn},
+		{Edge: ""},
+	}}
+	got := et.ParentEdgeNames()
+	want := []string{"hasLocation", "hasPoint"}
+	if len(got) != len(want) {
+		t.Fatalf("ParentEdgeNames = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ParentEdgeNames = %v, want %v in declared order", got, want)
+		}
+	}
+	var empty *EgressEntityTypeSpec
+	if got := (&EgressEntityTypeSpec{}).ParentEdgeNames(); got != nil {
+		t.Errorf("no edges should yield nil, got %v", got)
+	}
+	_ = empty
 }
