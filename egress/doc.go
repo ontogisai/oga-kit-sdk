@@ -100,11 +100,11 @@
 // self-referencing.
 //
 // A component may also declare an ontology_sync lane, which pushes the tenant's
-// ontology TYPES — the external system's type catalogue — in full before any
-// instance in the same run. It needs NO second handler: the catalogue arrives as
+// ontology TYPES — the external system's type catalog — in full before any
+// instance in the same run. It needs NO second handler: the catalog arrives as
 // ordinary batches over this same [Syncer] contract, with owner references under
 // the same [Entity.ParentRefs] shape, so a component implements one path. What the
-// lane replaces is the kit-side habit of seeding a catalogue lazily from the entity
+// lane replaces is the kit-side habit of seeding a catalog lazily from the entity
 // payload and relying on the external system to reject a duplicate name; the
 // platform correlates each type record instead, which does not depend on the
 // external system having a unique constraint. See manifest.EgressOntologySyncSpec.

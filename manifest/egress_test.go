@@ -87,7 +87,7 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 		}
 	}
 	// The scalar shorthand parses to one entry defaulting to OUTBOUND — this is the
-	// behaviour-preservation check for OGA-836: the YAML above is byte-identical to
+	// behavior-preservation check for OGA-836: the YAML above is byte-identical to
 	// what a kit wrote before direction existed, and it must still mean out(hasPart).
 	if got := e.EntitiesSync[1].ParentEdges; len(got) != 1 || got[0].Edge != "hasPart" {
 		t.Errorf("entities_sync[1].parent_edges = %v, want one entry for hasPart", got)
@@ -839,12 +839,12 @@ func TestParentEdgeNames(t *testing.T) {
 	_ = empty
 }
 
-// --- Ontology-type catalogue lane (OGA-845) ---
+// --- Ontology-type catalog lane (OGA-845) ---
 
 // ontologyLaneManifestYAML is what a kit author writes for a component with BOTH
 // lanes. It is the worked shape from the design: one anchor whose external target
 // has a parent foreign key (so the selection closes over parents) and one flat
-// anchor, plus entity types that reference the catalogue via type_ref.
+// anchor, plus entity types that reference the catalog via type_ref.
 const ontologyLaneManifestYAML = `api_version: ontogis.ai/v1
 kind: DomainKitManifest
 metadata:
@@ -1019,7 +1019,7 @@ func TestValidateEgressSyncs_OntologySyncAcceptsSeveralAnchors(t *testing.T) {
 }
 
 // type_ref with no ontology lane at all is rejected locally, because that verdict
-// needs no tenant state: with no catalogue pushed there is nothing to reference
+// needs no tenant state: with no catalog pushed there is nothing to reference
 // whichever anchor the type turns out to live under.
 //
 // The per-anchor half of the guard is deliberately NOT here — resolving which

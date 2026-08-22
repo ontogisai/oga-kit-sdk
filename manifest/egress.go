@@ -27,8 +27,8 @@ import (
 //
 // A component declares TWO lanes, and which of them a field belongs to is the first
 // thing to get right when reading this file. OntologySync pushes the tenant's
-// ontology TYPES (the external system's type catalogue); EntitiesSync pushes
-// INSTANCES. The ontology lane always runs first, structurally, so a catalogue row
+// ontology TYPES (the external system's type catalog); EntitiesSync pushes
+// INSTANCES. The ontology lane always runs first, structurally, so a catalog row
 // can never reference an instance.
 
 // Default batching knobs, mirroring the platform's domainkit defaults. Modest
@@ -64,7 +64,7 @@ const (
 // NormalizeDirection resolves an unset direction to the outbound default.
 //
 // Outbound is the default because it is both the more common storage convention
-// for containment and the behaviour every declaration had before direction
+// for containment and the behavior every declaration had before direction
 // existed, so an omitted value means what it always meant.
 func NormalizeDirection(d ParentEdgeDirection) ParentEdgeDirection {
 	if d == "" {
@@ -192,24 +192,24 @@ type EgressSyncSpec struct {
 	// never defaultable.
 	ExternalSystem string `yaml:"external_system"`
 
-	// OntologySync declares the ontology-type catalogue lane: the tenant's own
+	// OntologySync declares the ontology-type catalog lane: the tenant's own
 	// ontology types, pushed in their entirety AND correlated before any entity in
 	// the same run.
 	//
 	// It exists because an external system of record commonly models types as data
 	// and requires a reference to one — 24K Core's asset_classification is a table
 	// and Asset.asset_classification_id is a required foreign key. The entity lane
-	// could not express that, because a type catalogue is not an entity type.
+	// could not express that, because a type catalog is not an entity type.
 	//
 	// ONE ENTRY PER PHYSICAL ANCHOR. That is what keeps each batch homogeneous:
 	// types stored under different anchors are different external targets
 	// (classifications versus datapoint names), so they cannot share a push.
 	//
 	// Ordering here is STRUCTURAL, not declared. This lane always precedes
-	// EntitiesSync, so a catalogue row can never reference an instance and an
+	// EntitiesSync, so a catalog row can never reference an instance and an
 	// author cannot break the reference chain by listing the two the wrong way
 	// round. That is the reason these are two blocks rather than one list in which
-	// some magic type name means "the catalogue".
+	// some magic type name means "the catalog".
 	OntologySync []EgressOntologySyncSpec `yaml:"ontology_sync,omitempty"`
 
 	// EntitiesSync are the entity types to push, in the order they must be pushed.
@@ -373,16 +373,16 @@ type EgressEntityTypeSpec struct {
 	IncludeDescendants bool `yaml:"include_descendants,omitempty"`
 
 	// TypeRef makes the platform resolve this entity's OWN type record in the
-	// ontology-type catalogue and emit that record's correlation alongside the
+	// ontology-type catalog and emit that record's correlation alongside the
 	// owner references.
 	//
 	// No second declaration is needed to find it: an entity's entity_type column
-	// already IS the catalogue row's key, so this flag supplies the instruction to
+	// already IS the catalog row's key, so this flag supplies the instruction to
 	// look, not the join. For 24K Core the resolved value is exactly
 	// Asset.asset_classification_id.
 	//
 	// It requires the entity's anchor to be declared in OntologySync — without a
-	// pushed, correlated catalogue there is nothing to reference and every batch
+	// pushed, correlated catalog there is nothing to reference and every batch
 	// fails at run time. The PLATFORM rejects that pairing at install, where it can
 	// resolve which anchor a type is stored under. This package rejects only the
 	// part it can decide without tenant state: TypeRef set while NO ontology lane
@@ -392,11 +392,11 @@ type EgressEntityTypeSpec struct {
 	TypeRef bool `yaml:"type_ref,omitempty"`
 }
 
-// EgressOntologySyncSpec is one ontology-type catalogue lane entry: the physical
+// EgressOntologySyncSpec is one ontology-type catalog lane entry: the physical
 // anchor whose ontology types get pushed, and whether to close that selection
 // over their parents.
 //
-// TWO FIELDS, AND NO MORE, deliberately. Where the catalogue is stored, which
+// TWO FIELDS, AND NO MORE, deliberately. Where the catalog is stored, which
 // attribute is its key (`name`), which attribute names a record's owner
 // (`parent_type`), and the fact that its hierarchy is self-referencing are all
 // PLATFORM facts. A kit given the ability to restate them could only restate them
@@ -407,8 +407,8 @@ type EgressEntityTypeSpec struct {
 // Here it does know, because the adjacency is a column on a type it owns.
 //
 // The population is a platform fact too, and the most surprising one: the lane
-// pushes only the types that actually have instances, never the whole catalogue.
-// It is not a knob for the same reason — a catalogue row standing for no instance
+// pushes only the types that actually have instances, never the whole catalog.
+// It is not a knob for the same reason — a catalog row standing for no instance
 // is noise in the customer's register.
 type EgressOntologySyncSpec struct {
 	// Anchor is the physical type whose ontology types this entry pushes.
@@ -593,7 +593,7 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 			return fmt.Errorf("spec.egress_syncs[%d]: external_system is required", i)
 		}
 		// The ENTITIES lane is still required, and an ontology lane does not
-		// substitute for it. A catalogue exists to be referenced by instances, so a
+		// substitute for it. A catalog exists to be referenced by instances, so a
 		// component that pushes types and nothing else is almost certainly a
 		// half-written declaration rather than a deliberate one — and the platform
 		// applies the same rule, so accepting it here would break the local/install
@@ -626,7 +626,7 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 	return nil
 }
 
-// validateEgressOntologySync checks the ontology-type catalogue lane
+// validateEgressOntologySync checks the ontology-type catalog lane
 // (spec.egress_syncs[].ontology_sync[]): every entry names an anchor, and no
 // anchor is declared twice.
 //
@@ -670,7 +670,7 @@ func validateEgressOntologySync(i int, e *EgressSyncSpec) error {
 }
 
 // validateEgressEntityType checks one entities_sync[] entry: that TypeRef has a
-// catalogue lane to reference, that Hierarchical is coherent with ParentEdges, that
+// catalog lane to reference, that Hierarchical is coherent with ParentEdges, that
 // every declared direction is one the platform can traverse and no edge is declared
 // in both, and that every declared edge name can actually address an edge type.
 //
@@ -684,7 +684,7 @@ func validateEgressOntologySync(i int, e *EgressSyncSpec) error {
 // cross-lane fact this check needs, and taking the whole spec would invite reading
 // more of it than a local lint can soundly judge.
 func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec, hasOntologyLane bool) error {
-	// TypeRef resolves the entity's type record out of the catalogue the ontology
+	// TypeRef resolves the entity's type record out of the catalog the ontology
 	// lane pushes, so with NO such lane there is nothing to resolve and every batch
 	// would fail at run time on an uncorrelated reference.
 	//
