@@ -21,9 +21,15 @@ import (
 // contract (see the sibling egress package).
 //
 // These types mirror the platform's internal/domainkit.EgressSyncSpec /
-// EgressEntityTypeSpec field-for-field so YAML authored against either parses
-// identically under both, and a kit author gets the platform installer's
-// field-level errors locally instead of at install time.
+// EgressEntityTypeSpec / EgressOntologySyncSpec field-for-field so YAML authored
+// against either parses identically under both, and a kit author gets the platform
+// installer's field-level errors locally instead of at install time.
+//
+// A component declares TWO lanes, and which of them a field belongs to is the first
+// thing to get right when reading this file. OntologySync pushes the tenant's
+// ontology TYPES (the external system's type catalogue); EntitiesSync pushes
+// INSTANCES. The ontology lane always runs first, structurally, so a catalogue row
+// can never reference an instance.
 
 // Default batching knobs, mirroring the platform's domainkit defaults. Modest
 // on purpose: the scarce resource in an egress run is the EXTERNAL system, not
@@ -186,14 +192,41 @@ type EgressSyncSpec struct {
 	// never defaultable.
 	ExternalSystem string `yaml:"external_system"`
 
-	// EntityTypes are the types to push, in the order they must be pushed.
+	// OntologySync declares the ontology-type catalogue lane: the tenant's own
+	// ontology types, pushed in their entirety AND correlated before any entity in
+	// the same run.
+	//
+	// It exists because an external system of record commonly models types as data
+	// and requires a reference to one — 24K Core's asset_classification is a table
+	// and Asset.asset_classification_id is a required foreign key. The entity lane
+	// could not express that, because a type catalogue is not an entity type.
+	//
+	// ONE ENTRY PER PHYSICAL ANCHOR. That is what keeps each batch homogeneous:
+	// types stored under different anchors are different external targets
+	// (classifications versus datapoint names), so they cannot share a push.
+	//
+	// Ordering here is STRUCTURAL, not declared. This lane always precedes
+	// EntitiesSync, so a catalogue row can never reference an instance and an
+	// author cannot break the reference chain by listing the two the wrong way
+	// round. That is the reason these are two blocks rather than one list in which
+	// some magic type name means "the catalogue".
+	OntologySync []EgressOntologySyncSpec `yaml:"ontology_sync,omitempty"`
+
+	// EntitiesSync are the entity types to push, in the order they must be pushed.
+	//
+	// RENAMED from EntityTypes (`entity_types` → `entities_sync`) so the two lanes
+	// read as a pair; the singular/plural asymmetry is deliberate, since there is
+	// one ontology and many entities. The strict decoder REJECTS the old key rather
+	// than dropping it, which is the point of taking the break rather than
+	// accepting both: a silently ignored `entity_types` block would push nothing
+	// and report a clean run.
 	//
 	// The order is load-bearing and the platform honors it without interpreting
 	// it: a type is fully pushed and correlated before the next begins, so a
 	// later type may reference an earlier one in the external system. The
 	// platform does not know WHY the order matters — only that the kit declared
 	// it.
-	EntityTypes []EgressEntityTypeSpec `yaml:"entity_types"`
+	EntitiesSync []EgressEntityTypeSpec `yaml:"entities_sync"`
 
 	// CredentialRefs lists SecretStore secret names the platform delivers to
 	// the component so it can authenticate to the external system. Resolved per
@@ -338,6 +371,74 @@ type EgressEntityTypeSpec struct {
 	// stays homogeneous, and it applies the same selection rule to change
 	// delivery as to the bulk push. Absent ⇒ Name selects exactly itself.
 	IncludeDescendants bool `yaml:"include_descendants,omitempty"`
+
+	// TypeRef makes the platform resolve this entity's OWN type record in the
+	// ontology-type catalogue and emit that record's correlation alongside the
+	// owner references.
+	//
+	// No second declaration is needed to find it: an entity's entity_type column
+	// already IS the catalogue row's key, so this flag supplies the instruction to
+	// look, not the join. For 24K Core the resolved value is exactly
+	// Asset.asset_classification_id.
+	//
+	// It requires the entity's anchor to be declared in OntologySync — without a
+	// pushed, correlated catalogue there is nothing to reference and every batch
+	// fails at run time. The PLATFORM rejects that pairing at install, where it can
+	// resolve which anchor a type is stored under. This package rejects only the
+	// part it can decide without tenant state: TypeRef set while NO ontology lane
+	// is declared at all. A per-anchor local check would need the tenant's
+	// ontology to know where the type lives, and guessing would reject valid
+	// manifests.
+	TypeRef bool `yaml:"type_ref,omitempty"`
+}
+
+// EgressOntologySyncSpec is one ontology-type catalogue lane entry: the physical
+// anchor whose ontology types get pushed, and whether to close that selection
+// over their parents.
+//
+// TWO FIELDS, AND NO MORE, deliberately. Where the catalogue is stored, which
+// attribute is its key (`name`), which attribute names a record's owner
+// (`parent_type`), and the fact that its hierarchy is self-referencing are all
+// PLATFORM facts. A kit given the ability to restate them could only restate them
+// wrongly, and the platform would have to decide which of the two to believe.
+//
+// Contrast EgressEntityTypeSpec, where ParentEdges MUST be declared: there the
+// platform genuinely cannot know which of a kit's predicates means containment.
+// Here it does know, because the adjacency is a column on a type it owns.
+//
+// The population is a platform fact too, and the most surprising one: the lane
+// pushes only the types that actually have instances, never the whole catalogue.
+// It is not a knob for the same reason — a catalogue row standing for no instance
+// is noise in the customer's register.
+type EgressOntologySyncSpec struct {
+	// Anchor is the physical type whose ontology types this entry pushes.
+	//
+	// REQUIRED, with no default: it both selects the population and identifies the
+	// external target the batch is homogeneous for, so there is nothing sensible to
+	// infer from its absence.
+	//
+	// It must be a physical type in the tenant's active ontology, and it may be
+	// declared only once per component. The platform enforces the first at install
+	// time and this package deliberately does not, because it needs per-tenant
+	// state no local lint can see. The second needs no such state, so it IS
+	// enforced here.
+	Anchor string `yaml:"anchor"`
+
+	// IncludeParents closes the selected set over each type's parent attribute, so
+	// a hierarchical external target's parent reference resolves.
+	//
+	// Set it when the external target has a parent foreign key; leave it off when
+	// the target is flat. Both mistakes are visible rather than silent, which is
+	// why a plain bool is enough: omitted where the target is hierarchical, a
+	// selected leaf's owner reference points at a row that was never pushed and the
+	// batch fails; set where the target is flat, the external system receives rows
+	// that stand for nothing.
+	//
+	// It is explicit rather than always-on-and-let-the-component-skip-what-it-does-
+	// not-want, because a skipped row carries NO correlation. Those parents would
+	// then be re-selected and re-skipped on every run, and appear in the run report
+	// as permanently uncorrelated — indistinguishable from a real failure.
+	IncludeParents bool `yaml:"include_parents,omitempty"`
 }
 
 // EffectiveImage returns the component's container image, preferring the
@@ -379,14 +480,34 @@ func (e *EgressSyncSpec) EffectiveMaxInFlight() int {
 
 // EntityTypeNames returns the declared entity type names in push order,
 // skipping empty entries.
+//
+// It reports the ENTITIES lane only. The ontology lane is addressed by anchor, not
+// by type name — its population is resolved by the platform from stored data — so
+// there is no name list for it to contribute here. Read OntologyAnchors for that
+// lane.
 func (e *EgressSyncSpec) EntityTypeNames() []string {
-	if len(e.EntityTypes) == 0 {
+	if len(e.EntitiesSync) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(e.EntityTypes))
-	for i := range e.EntityTypes {
-		if n := e.EntityTypes[i].Name; n != "" {
+	out := make([]string, 0, len(e.EntitiesSync))
+	for i := range e.EntitiesSync {
+		if n := e.EntitiesSync[i].Name; n != "" {
 			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// OntologyAnchors returns the declared ontology-lane anchors in declared order,
+// skipping empty entries. The peer of EntityTypeNames, one per lane.
+func (e *EgressSyncSpec) OntologyAnchors() []string {
+	if len(e.OntologySync) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(e.OntologySync))
+	for i := range e.OntologySync {
+		if a := e.OntologySync[i].Anchor; a != "" {
+			out = append(out, a)
 		}
 	}
 	return out
@@ -430,7 +551,8 @@ func (t *EgressEntityTypeSpec) HierarchyEdge() (ParentEdgeSpec, bool) {
 
 // validateEgressSyncs checks each kit-declared egress component
 // (spec.egress_syncs[]): unique name, external_system present, at least one
-// entity type, a digest-pinned image, and coherent per-type edge declarations. It mirrors
+// entity type, a digest-pinned image, a coherent ontology lane, and coherent
+// per-type edge declarations. It mirrors
 // the platform's domainkit.validateEgressSpecStructure — the checks that need no
 // external state — so a kit author gets the same rejection locally that the
 // installer would raise as OGA-EGRS-VAL-1002.
@@ -470,8 +592,14 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 		if strings.TrimSpace(e.ExternalSystem) == "" {
 			return fmt.Errorf("spec.egress_syncs[%d]: external_system is required", i)
 		}
+		// The ENTITIES lane is still required, and an ontology lane does not
+		// substitute for it. A catalogue exists to be referenced by instances, so a
+		// component that pushes types and nothing else is almost certainly a
+		// half-written declaration rather than a deliberate one — and the platform
+		// applies the same rule, so accepting it here would break the local/install
+		// parity this validation exists for.
 		if len(e.EntityTypeNames()) == 0 {
-			return fmt.Errorf("spec.egress_syncs[%d]: at least one entity type is required", i)
+			return fmt.Errorf("spec.egress_syncs[%d]: at least one entities_sync entry is required", i)
 		}
 		image := e.EffectiveImage()
 		if image == "" {
@@ -486,8 +614,11 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 				i, image,
 			)
 		}
-		for j := range e.EntityTypes {
-			if err := validateEgressEntityType(i, j, &e.EntityTypes[j]); err != nil {
+		if err := validateEgressOntologySync(i, e); err != nil {
+			return err
+		}
+		for j := range e.EntitiesSync {
+			if err := validateEgressEntityType(i, j, &e.EntitiesSync[j], len(e.OntologySync) > 0); err != nil {
 				return err
 			}
 		}
@@ -495,22 +626,86 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 	return nil
 }
 
-// validateEgressEntityType checks one entity_types[] entry: that Hierarchical is
-// coherent with ParentEdges, that every declared direction is one the platform can
-// traverse and no edge is declared in both, and that every declared edge name can
-// actually address an edge type.
+// validateEgressOntologySync checks the ontology-type catalogue lane
+// (spec.egress_syncs[].ontology_sync[]): every entry names an anchor, and no
+// anchor is declared twice.
+//
+// Both checks need no external state, which is why they belong here. What is
+// deliberately NOT checked is that the anchor is a physical type in the tenant's
+// active ontology — that needs per-tenant state the SDK cannot see, so it stays
+// install-time, exactly like the entity-lane ontology cross-check.
+func validateEgressOntologySync(i int, e *EgressSyncSpec) error {
+	if len(e.OntologySync) == 0 {
+		return nil
+	}
+	seen := make(map[string]int, len(e.OntologySync))
+	for j := range e.OntologySync {
+		anchor := strings.TrimSpace(e.OntologySync[j].Anchor)
+		// No default is possible: the anchor is what selects the population AND
+		// identifies the external target, so an entry without one describes no push
+		// at all rather than a smaller one.
+		if anchor == "" {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].ontology_sync[%d]: anchor is required — it selects which "+
+					"ontology types are pushed and which external target they are pushed to",
+				i, j,
+			)
+		}
+		// A repeated anchor is not a bigger push, it is the SAME push twice: the
+		// population is resolved from the anchor, so the second entry selects an
+		// identical set and every row is pushed and correlated a second time. If the
+		// two entries disagree on include_parents it is worse — which closure applies
+		// is then decided by evaluation order, not by the declaration.
+		if prev, dup := seen[anchor]; dup {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].ontology_sync[%d]: anchor = %q duplicates "+
+					"spec.egress_syncs[%d].ontology_sync[%d]; one entry per anchor, since the anchor "+
+					"resolves the whole population",
+				i, j, anchor, i, prev,
+			)
+		}
+		seen[anchor] = j
+	}
+	return nil
+}
+
+// validateEgressEntityType checks one entities_sync[] entry: that TypeRef has a
+// catalogue lane to reference, that Hierarchical is coherent with ParentEdges, that
+// every declared direction is one the platform can traverse and no edge is declared
+// in both, and that every declared edge name can actually address an edge type.
 //
 // None of this needs tenant state, which is why it belongs here. The platform
 // validates edge addressability only when the Day-1 walk reaches it, so an
 // unaddressable edge otherwise installs cleanly and fails mid-run having pushed
 // only the roots.
-func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
+//
+// hasOntologyLane says whether the component declares any ontology_sync entry. It
+// is passed in rather than read from a parent pointer because that is the only
+// cross-lane fact this check needs, and taking the whole spec would invite reading
+// more of it than a local lint can soundly judge.
+func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec, hasOntologyLane bool) error {
+	// TypeRef resolves the entity's type record out of the catalogue the ontology
+	// lane pushes, so with NO such lane there is nothing to resolve and every batch
+	// would fail at run time on an uncorrelated reference.
+	//
+	// This is the sound half of the guard. Whether the entity's own anchor is among
+	// the DECLARED anchors needs the tenant's ontology to know where the type is
+	// stored, so the platform makes that call at install; deciding it here would
+	// mean guessing, and a guess that rejects is worse than one that defers.
+	if et.TypeRef && !hasOntologyLane {
+		return fmt.Errorf(
+			"spec.egress_syncs[%d].entities_sync[%d]: type_ref is set on %q but the component "+
+				"declares no ontology_sync lane — the type records would never be pushed or "+
+				"correlated, so every batch would fail on an unresolvable type reference",
+			i, j, et.Name,
+		)
+	}
 	// A level walk has to traverse something. Hierarchical with no edge is not a
 	// conservative default, it is incoherent: the platform would look for roots
 	// via an edge that was never named.
 	if et.Hierarchical && len(et.ParentEdges) == 0 {
 		return fmt.Errorf(
-			"spec.egress_syncs[%d].entity_types[%d]: hierarchical is set but parent_edges is empty — "+
+			"spec.egress_syncs[%d].entities_sync[%d]: hierarchical is set but parent_edges is empty — "+
 				"a level-by-level walk has no edge to traverse",
 			i, j,
 		)
@@ -524,7 +719,7 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
 	// walk, so there is no axis to disambiguate.
 	if et.Hierarchical && len(et.ParentEdges) > 1 {
 		return fmt.Errorf(
-			"spec.egress_syncs[%d].entity_types[%d]: hierarchical is set with %d parent_edges; "+
+			"spec.egress_syncs[%d].entities_sync[%d]: hierarchical is set with %d parent_edges; "+
 				"exactly one is required because level is defined by hops along a single containment axis",
 			i, j, len(et.ParentEdges),
 		)
@@ -539,13 +734,13 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
 		edge := pe.Edge
 		if strings.TrimSpace(edge) == "" {
 			return fmt.Errorf(
-				"spec.egress_syncs[%d].entity_types[%d]: parent_edges contains an empty entry",
+				"spec.egress_syncs[%d].entities_sync[%d]: parent_edges contains an empty entry",
 				i, j,
 			)
 		}
 		if !pe.Direction.Valid() {
 			return fmt.Errorf(
-				"spec.egress_syncs[%d].entity_types[%d]: parent_edges entry %q declares direction %q; "+
+				"spec.egress_syncs[%d].entities_sync[%d]: parent_edges entry %q declares direction %q; "+
 					"expected %q (the declaring entity holds the edge) or %q (the owner holds it)",
 				i, j, edge, pe.Direction, ParentEdgeOut, ParentEdgeIn,
 			)
@@ -554,13 +749,13 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
 		if prev, dup := seen[edge]; dup {
 			if prev == dir {
 				return fmt.Errorf(
-					"spec.egress_syncs[%d].entity_types[%d]: parent_edges lists %q twice; each edge is one "+
+					"spec.egress_syncs[%d].entities_sync[%d]: parent_edges lists %q twice; each edge is one "+
 						"parent_refs key",
 					i, j, edge,
 				)
 			}
 			return fmt.Errorf(
-				"spec.egress_syncs[%d].entity_types[%d]: parent_edges declares %q in both directions "+
+				"spec.egress_syncs[%d].entities_sync[%d]: parent_edges declares %q in both directions "+
 					"(%q and %q); both resolve into the one parent_refs key %q, so which owner wins is "+
 					"undefined — declare the direction the edge is actually stored in",
 				i, j, edge, prev, dir, edge,
@@ -573,7 +768,7 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
 		}
 		if suggestion := sanitizeEdgeName(edge); suggestion != "" {
 			return fmt.Errorf(
-				"spec.egress_syncs[%d].entity_types[%d]: parent_edges entry %q is not addressable by "+
+				"spec.egress_syncs[%d].entities_sync[%d]: parent_edges entry %q is not addressable by "+
 					"its declared name — the platform materializes a predicate under a sanitized "+
 					"identifier ([a-zA-Z0-9_] only, trailing underscores trimmed), so a walk on this "+
 					"name would find no children and would push only the roots; declare %q",
@@ -581,7 +776,7 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec) error {
 			)
 		}
 		return fmt.Errorf(
-			"spec.egress_syncs[%d].entity_types[%d]: parent_edges entry %q has no legal identifier form "+
+			"spec.egress_syncs[%d].entities_sync[%d]: parent_edges entry %q has no legal identifier form "+
 				"(it sanitizes to the empty string), so it can never name an edge type",
 			i, j, edge,
 		)
