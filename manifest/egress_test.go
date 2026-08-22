@@ -35,7 +35,7 @@ spec:
   egress_syncs:
     - name: 24k-core-egress
       external_system: 24k-core
-      entity_types:
+      entities_sync:
         - name: rec_Site
           include_descendants: true
         - name: rec_Building
@@ -87,27 +87,27 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 		}
 	}
 	// The scalar shorthand parses to one entry defaulting to OUTBOUND — this is the
-	// behaviour-preservation check for OGA-836: the YAML above is byte-identical to
+	// behavior-preservation check for OGA-836: the YAML above is byte-identical to
 	// what a kit wrote before direction existed, and it must still mean out(hasPart).
-	if got := e.EntityTypes[1].ParentEdges; len(got) != 1 || got[0].Edge != "hasPart" {
-		t.Errorf("entity_types[1].parent_edges = %v, want one entry for hasPart", got)
+	if got := e.EntitiesSync[1].ParentEdges; len(got) != 1 || got[0].Edge != "hasPart" {
+		t.Errorf("entities_sync[1].parent_edges = %v, want one entry for hasPart", got)
 	}
-	if got := e.EntityTypes[1].ParentEdges[0].EffectiveDirection(); got != ParentEdgeOut {
+	if got := e.EntitiesSync[1].ParentEdges[0].EffectiveDirection(); got != ParentEdgeOut {
 		t.Errorf("scalar shorthand direction = %q, want %q", got, ParentEdgeOut)
 	}
-	if got := e.EntityTypes[1].ParentEdges[0].Direction; got != "" {
+	if got := e.EntitiesSync[1].ParentEdges[0].Direction; got != "" {
 		t.Errorf("scalar shorthand should leave Direction unset (got %q) so the default is one place", got)
 	}
-	if !e.EntityTypes[1].Hierarchical {
-		t.Error("entity_types[1].hierarchical = false, want true")
+	if !e.EntitiesSync[1].Hierarchical {
+		t.Error("entities_sync[1].hierarchical = false, want true")
 	}
-	if !e.EntityTypes[1].IncludeDescendants {
-		t.Error("entity_types[1].include_descendants = false, want true")
+	if !e.EntitiesSync[1].IncludeDescendants {
+		t.Error("entities_sync[1].include_descendants = false, want true")
 	}
 	// A cross-type reference declares an edge WITHOUT hierarchical: it needs the
 	// owner resolved but no level walk.
-	if e.EntityTypes[2].Hierarchical {
-		t.Error("entity_types[2].hierarchical = true; a cross-type edge is not a hierarchy")
+	if e.EntitiesSync[2].Hierarchical {
+		t.Error("entities_sync[2].hierarchical = true; a cross-type edge is not a hierarchy")
 	}
 	if len(e.CredentialRefs) != 1 || e.CredentialRefs[0] != "24k-core-api-key" {
 		t.Errorf("credential_refs = %v", e.CredentialRefs)
@@ -172,7 +172,7 @@ func TestEgress_EffectiveMaxInFlight(t *testing.T) {
 }
 
 func TestEgress_EntityTypeNamesSkipsEmpty(t *testing.T) {
-	e := &EgressSyncSpec{EntityTypes: []EgressEntityTypeSpec{{Name: "A"}, {Name: ""}, {Name: "B"}}}
+	e := &EgressSyncSpec{EntitiesSync: []EgressEntityTypeSpec{{Name: "A"}, {Name: ""}, {Name: "B"}}}
 	got := e.EntityTypeNames()
 	if len(got) != 2 || got[0] != "A" || got[1] != "B" {
 		t.Errorf("EntityTypeNames = %v", got)
@@ -191,7 +191,7 @@ func TestValidateEgressSyncs(t *testing.T) {
 		return EgressSyncSpec{
 			Name:           "e1",
 			ExternalSystem: "24k-core",
-			EntityTypes:    []EgressEntityTypeSpec{{Name: "Equipment"}},
+			EntitiesSync:   []EgressEntityTypeSpec{{Name: "Equipment"}},
 			Container:      pinned,
 		}
 	}
@@ -218,11 +218,11 @@ func TestValidateEgressSyncs(t *testing.T) {
 			"external_system is required",
 		},
 		{"blank external_system", func(e *EgressSyncSpec) { e.ExternalSystem = "  " }, "external_system is required"},
-		{"no entity types", func(e *EgressSyncSpec) { e.EntityTypes = nil }, "at least one entity type"},
+		{"no entity types", func(e *EgressSyncSpec) { e.EntitiesSync = nil }, "at least one entities_sync entry"},
 		{
 			"entity types all unnamed",
-			func(e *EgressSyncSpec) { e.EntityTypes = []EgressEntityTypeSpec{{}, {}} },
-			"at least one entity type",
+			func(e *EgressSyncSpec) { e.EntitiesSync = []EgressEntityTypeSpec{{}, {}} },
+			"at least one entities_sync entry",
 		},
 		{"missing image", func(e *EgressSyncSpec) { e.Container.Image = "" }, "image is required"},
 		{
@@ -295,7 +295,7 @@ func TestValidateEgressSyncs_DoesNotCheckOntology(t *testing.T) {
 	e := EgressSyncSpec{
 		Name:           "e1",
 		ExternalSystem: "24k-core",
-		EntityTypes:    []EgressEntityTypeSpec{{Name: "NoSuchTypeAnywhere"}},
+		EntitiesSync:   []EgressEntityTypeSpec{{Name: "NoSuchTypeAnywhere"}},
 		Container:      SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
@@ -306,7 +306,7 @@ func TestValidateEgressSyncs_DoesNotCheckOntology(t *testing.T) {
 // A namespaced class ID is a legal entity type, and validation must not sanitize
 // or reject it.
 //
-// entity_types[] entries are source-native class IDs compared exactly against the
+// entities_sync[] entries are source-native class IDs compared exactly against the
 // tenant's ontology catalog key, so `brick:AHU` and `rec:Space` are ordinary
 // values here. The wire half of this invariant is asserted in
 // egress.TestClassID_ColonSurvivesTheWire; if the two disagree a kit could declare
@@ -315,7 +315,7 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 	e := EgressSyncSpec{
 		Name:           "core-sync",
 		ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "rec:Space", ParentEdges: outEdges("hasLocation"), Hierarchical: true},
 			{Name: "brick:Equipment"},
 			{Name: "Point"}, // colon-free is equally a class ID
@@ -336,7 +336,7 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 }
 
 // A parent_edges entry must ALREADY be a legal identifier, and a colon is fatal —
-// the exact opposite of entity_types[].Name, where a colon is ordinary.
+// the exact opposite of entities_sync[].Name, where a colon is ordinary.
 //
 // The asymmetry is the point of this test. Both fields hold ontology names, but
 // Name is compared against the catalog as an opaque string while a parent_edges entry is
@@ -350,7 +350,7 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 func TestValidateEgressSyncs_RejectsUnaddressableParentEdges(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "rec:Space", ParentEdges: outEdges("rec:hasPart")},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
@@ -365,7 +365,7 @@ func TestValidateEgressSyncs_RejectsUnaddressableParentEdges(t *testing.T) {
 	if !strings.Contains(err.Error(), `"rec_hasPart"`) {
 		t.Errorf("error must suggest the sanitized form rec_hasPart, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "entity_types[0]") {
+	if !strings.Contains(err.Error(), "entities_sync[0]") {
 		t.Errorf("error must locate the offending entity type, got: %v", err)
 	}
 }
@@ -378,8 +378,8 @@ func TestValidateEgressSyncs_RejectsParentEdgesCasesACharacterDenylistWouldMiss(
 	for _, edge := range []string{"hasLocation_", "has.location", "has location", "has/location", "has-location"} {
 		e := EgressSyncSpec{
 			Name: "core-sync", ExternalSystem: "24k-core",
-			EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(edge)}},
-			Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+			EntitiesSync: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(edge)}},
+			Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 		}
 		if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
 			t.Errorf("parent_edges entry %q was accepted but is not what the sanitizer produces", edge)
@@ -392,8 +392,8 @@ func TestValidateEgressSyncs_RejectsParentEdgesCasesACharacterDenylistWouldMiss(
 func TestValidateEgressSyncs_ParentEdgesWithNoLegalForm(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(":::")}},
-		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+		EntitiesSync: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(":::")}},
+		Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	err := validateEgressSyncs([]EgressSyncSpec{e})
 	if err == nil {
@@ -412,7 +412,7 @@ func TestValidateEgressSyncs_ParentEdgesWithNoLegalForm(t *testing.T) {
 func TestValidateEgressSyncs_AcceptsAddressableAndAbsentParentEdges(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Location", ParentEdges: outEdges("hasLocation"), Hierarchical: true},
 			{Name: "brick:AHU", ParentEdges: outEdges("rec_hasPart")},
 			{Name: "Point", ParentEdges: outEdges("feeds2", "isPointOf")},
@@ -451,8 +451,8 @@ func TestSanitizeEdgeName_MatchesPlatformSanitizer(t *testing.T) {
 func TestValidateEgressSyncs_RejectsHierarchicalWithoutEdge(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{{Name: "Location", Hierarchical: true}},
-		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+		EntitiesSync: []EgressEntityTypeSpec{{Name: "Location", Hierarchical: true}},
+		Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	err := validateEgressSyncs([]EgressSyncSpec{e})
 	if err == nil {
@@ -469,7 +469,7 @@ func TestValidateEgressSyncs_RejectsHierarchicalWithoutEdge(t *testing.T) {
 func TestValidateEgressSyncs_RejectsDuplicateParentEdge(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Point", ParentEdges: outEdges("isPointOf", "isPointOf")},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
@@ -483,15 +483,15 @@ func TestValidateEgressSyncs_RejectsDuplicateParentEdge(t *testing.T) {
 	}
 }
 
-// An empty list entry is rejected rather than skipped, unlike entity_types[].Name
+// An empty list entry is rejected rather than skipped, unlike entities_sync[].Name
 // where EntityTypeNames() skips blanks. A blank edge cannot resolve anything, so
 // silently dropping it would leave a component expecting a parent_refs key that
 // never arrives.
 func TestValidateEgressSyncs_RejectsEmptyParentEdgeEntry(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: outEdges("isPointOf", "  ")}},
-		Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+		EntitiesSync: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: outEdges("isPointOf", "  ")}},
+		Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
 	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
 		t.Fatal("an empty parent_edges entry was accepted")
@@ -504,7 +504,7 @@ func TestValidateEgressSyncs_RejectsEmptyParentEdgeEntry(t *testing.T) {
 func TestValidateEgressSyncs_IncludeDescendantsIsIndependentOfHierarchical(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Equipment", IncludeDescendants: true, ParentEdges: outEdges("hasLocation")},
 			{Name: "Location", Hierarchical: true, ParentEdges: outEdges("hasLocation")},
 		},
@@ -521,8 +521,8 @@ func TestValidateEgressSyncs_IncludeDescendantsIsIndependentOfHierarchical(t *te
 func TestValidateEgressSyncs_DigestColonIsNotAClassIDColon(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{{Name: "brick:AHU"}},
-		Container:   SidecarContainerSpec{Image: "ghcr.io/ontogisai/x@sha256:deadbeef"},
+		EntitiesSync: []EgressEntityTypeSpec{{Name: "brick:AHU"}},
+		Container:    SidecarContainerSpec{Image: "ghcr.io/ontogisai/x@sha256:deadbeef"},
 	}
 	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
 		t.Fatalf("digest-pinned image with a namespaced type rejected: %v", err)
@@ -540,9 +540,9 @@ func TestValidateEgressSyncs_DigestColonIsNotAClassIDColon(t *testing.T) {
 // zero owners, which reads as "root" and pushes every record unowned while
 // reporting success.
 
-// egressManifestWithEntityTypes wraps an entity_types block in an otherwise valid
+// egressManifestWithEntitiesSync wraps an entities_sync block in an otherwise valid
 // manifest, so a direction test states only the part it is about.
-func egressManifestWithEntityTypes(entityTypes string) string {
+func egressManifestWithEntitiesSync(entityTypes string) string {
 	return `api_version: ontogis.ai/v1
 kind: DomainKitManifest
 metadata:
@@ -557,7 +557,7 @@ spec:
   egress_syncs:
     - name: core-egress-sync
       external_system: 24k-core
-      entity_types:
+      entities_sync:
 ` + entityTypes + `      container:
         image: ghcr.io/ontogisai/oga-kit-sj24k/core-egress@sha256:abc123
 `
@@ -567,7 +567,7 @@ spec:
 // realistic shape, since a kit typically has one inbound edge among several
 // outbound ones and should not have to convert the others.
 func TestParse_ParentEdgesMappingFormAndMixedList(t *testing.T) {
-	y := egressManifestWithEntityTypes(`        - name: Location
+	y := egressManifestWithEntitiesSync(`        - name: Location
           parent_edges: [hasLocation]
           hierarchical: true
         - name: Point
@@ -583,7 +583,7 @@ func TestParse_ParentEdgesMappingFormAndMixedList(t *testing.T) {
 	if err := Validate(m); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	types := m.Spec.EgressSyncs[0].EntityTypes
+	types := m.Spec.EgressSyncs[0].EntitiesSync
 
 	if got := types[0].ParentEdges[0].EffectiveDirection(); got != ParentEdgeOut {
 		t.Errorf("shorthand entry direction = %q, want %q", got, ParentEdgeOut)
@@ -610,7 +610,7 @@ func TestParse_ParentEdgesMappingFormAndMixedList(t *testing.T) {
 // to OUTBOUND, and producing the exact silent wrong-direction push the field exists
 // to prevent. Worse, it would do so in the one place the author was being explicit.
 func TestParse_ParentEdgesRejectsUnknownFieldInMapping(t *testing.T) {
-	y := egressManifestWithEntityTypes(`        - name: Point
+	y := egressManifestWithEntitiesSync(`        - name: Point
           parent_edges:
             - edge: hasPoint
               directon: in
@@ -627,7 +627,7 @@ func TestParse_ParentEdgesRejectsUnknownFieldInMapping(t *testing.T) {
 // Anything that is neither an edge name nor an edge/direction mapping is rejected
 // with a message that says what the two legal shapes are.
 func TestParse_ParentEdgesRejectsUnsupportedNodeShape(t *testing.T) {
-	y := egressManifestWithEntityTypes(`        - name: Point
+	y := egressManifestWithEntitiesSync(`        - name: Point
           parent_edges:
             - [hasPoint, in]
 `)
@@ -646,7 +646,7 @@ func TestParse_ParentEdgesRejectsUnsupportedNodeShape(t *testing.T) {
 func TestValidateEgressSyncs_RejectsUnknownDirection(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Point", ParentEdges: []ParentEdgeSpec{{Edge: "hasPoint", Direction: "inbound"}}},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
@@ -669,7 +669,7 @@ func TestValidateEgressSyncs_RejectsUnknownDirection(t *testing.T) {
 func TestValidateEgressSyncs_RejectsSameEdgeInBothDirections(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Point", ParentEdges: []ParentEdgeSpec{
 				{Edge: "hasPoint"},
 				{Edge: "hasPoint", Direction: ParentEdgeIn},
@@ -698,8 +698,8 @@ func TestValidateEgressSyncs_InboundDirection(t *testing.T) {
 	base := func(edges []ParentEdgeSpec) []EgressSyncSpec {
 		return []EgressSyncSpec{{
 			Name: "core-sync", ExternalSystem: "24k-core",
-			EntityTypes: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: edges}},
-			Container:   SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
+			EntitiesSync: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: edges}},
+			Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 		}}
 	}
 	if err := validateEgressSyncs(base([]ParentEdgeSpec{
@@ -726,7 +726,7 @@ func TestValidateEgressSyncs_InboundDirection(t *testing.T) {
 func TestValidateEgressSyncs_RejectsHierarchicalWithSeveralEdges(t *testing.T) {
 	e := EgressSyncSpec{
 		Name: "core-sync", ExternalSystem: "24k-core",
-		EntityTypes: []EgressEntityTypeSpec{
+		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Location", Hierarchical: true, ParentEdges: outEdges("managedBy", "hasLocation")},
 		},
 		Container: SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
@@ -740,7 +740,7 @@ func TestValidateEgressSyncs_RejectsHierarchicalWithSeveralEdges(t *testing.T) {
 	}
 	// A NON-hierarchical type may still declare several: it wants each owner
 	// referenced but no level walk, so there is no axis to disambiguate.
-	e.EntityTypes[0].Hierarchical = false
+	e.EntitiesSync[0].Hierarchical = false
 	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
 		t.Fatalf("several edges without hierarchical were rejected: %v", err)
 	}
@@ -837,4 +837,268 @@ func TestParentEdgeNames(t *testing.T) {
 		t.Errorf("no edges should yield nil, got %v", got)
 	}
 	_ = empty
+}
+
+// --- Ontology-type catalog lane (OGA-845) ---
+
+// ontologyLaneManifestYAML is what a kit author writes for a component with BOTH
+// lanes. It is the worked shape from the design: one anchor whose external target
+// has a parent foreign key (so the selection closes over parents) and one flat
+// anchor, plus entity types that reference the catalog via type_ref.
+const ontologyLaneManifestYAML = `api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: sj24k
+  version: 1.0.0
+  display_name:
+    en-US: SJ 24K
+  description:
+    en-US: 24K Core integration
+spec:
+  platform_version: ">=1.0.0"
+  egress_syncs:
+    - name: core-egress-sync
+      external_system: 24k-core
+      ontology_sync:
+        - anchor: Equipment
+          include_parents: true
+        - anchor: Point
+          include_parents: false
+      entities_sync:
+        - name: Equipment
+          parent_edges: [hasLocation]
+          include_descendants: true
+          type_ref: true
+        - name: Point
+          parent_edges:
+            - edge: hasPoint
+              direction: in
+          include_descendants: true
+          type_ref: true
+      container:
+        image: ghcr.io/ontogisai/oga-kit-sj24k/core-egress@sha256:abc123
+`
+
+// The lane parses through the STRICT decoder — which is the check that matters,
+// since manifest.Parse sets KnownFields(true), so before this field existed the
+// same input was a hard parse error and a kit author could not lint it at all.
+func TestParse_OntologySyncLane(t *testing.T) {
+	m, err := Parse(strings.NewReader(ontologyLaneManifestYAML))
+	if err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("validate manifest: %v", err)
+	}
+	e := &m.Spec.EgressSyncs[0]
+
+	// Declared order is preserved. It is not the push order WITHIN the lane — the
+	// platform resolves each anchor's population and walks it by containment depth —
+	// but the lane as a whole precedes the entities lane, and an author reading the
+	// parsed spec back should see what they wrote.
+	if got, want := e.OntologyAnchors(), []string{"Equipment", "Point"}; len(got) != len(want) {
+		t.Fatalf("OntologyAnchors = %v, want %v", got, want)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("OntologyAnchors = %v, want %v in declared order", got, want)
+			}
+		}
+	}
+	if !e.OntologySync[0].IncludeParents {
+		t.Error("ontology_sync[0].include_parents = false, want true (the target has a parent FK)")
+	}
+	// An explicit `false` and an omitted key must both mean "flat". Asserted because
+	// the omitempty tag makes the two indistinguishable once parsed, so a future
+	// change to a tri-state would silently alter what `false` means.
+	if e.OntologySync[1].IncludeParents {
+		t.Error("ontology_sync[1].include_parents = true, want false (the target is flat)")
+	}
+	if !e.EntitiesSync[0].TypeRef || !e.EntitiesSync[1].TypeRef {
+		t.Error("type_ref did not parse on the entities lane")
+	}
+}
+
+// The two lanes are INDEPENDENT: a component may declare entities only, which is
+// every pre-OGA-845 kit, and must keep working unchanged.
+func TestParse_EntitiesLaneWithoutOntologyLane(t *testing.T) {
+	m, err := Parse(strings.NewReader(egressManifestYAML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if got := m.Spec.EgressSyncs[0].OntologyAnchors(); got != nil {
+		t.Errorf("OntologyAnchors = %v, want nil when no lane is declared", got)
+	}
+}
+
+// The RENAME is the reason this work item is breaking, and this is the test that
+// proves the break is loud.
+//
+// A kit that keeps writing `entity_types` must be REJECTED at parse time, not
+// silently decoded into an empty EntitiesSync. Silent would be the worst outcome
+// available: the component would deploy, push nothing, and report a clean run —
+// which is indistinguishable from a tenant with no data.
+func TestParse_LegacyEntityTypesKeyIsRejected(t *testing.T) {
+	legacy := strings.Replace(ontologyLaneManifestYAML, "entities_sync:", "entity_types:", 1)
+	if legacy == ontologyLaneManifestYAML {
+		t.Fatal("test setup: the entities_sync key was not found, so nothing was renamed")
+	}
+	_, err := Parse(strings.NewReader(legacy))
+	if err == nil {
+		t.Fatal("the legacy entity_types key was accepted; the strict decoder must reject it, " +
+			"because a silently dropped block pushes nothing and reports success")
+	}
+	// The message must name the offending key — that is what turns the rejection
+	// into a migration instruction rather than a puzzle.
+	if !strings.Contains(err.Error(), "entity_types") {
+		t.Errorf("rejection should name the unknown field, got: %v", err)
+	}
+}
+
+// anchor is required, and the error names the exact path so an author can find it
+// in a manifest with several components and several anchors.
+func TestValidateEgressSyncs_OntologySyncRequiresAnchor(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.OntologySync = []EgressOntologySyncSpec{{Anchor: "Equipment"}, {IncludeParents: true}}
+
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("an ontology_sync entry with no anchor was accepted")
+	}
+	if !strings.Contains(err.Error(), "ontology_sync[1]") || !strings.Contains(err.Error(), "anchor is required") {
+		t.Errorf("error should name ontology_sync[1] and the missing field, got: %v", err)
+	}
+}
+
+// Whitespace is not an anchor. Checked separately because TrimSpace is the kind of
+// thing an equivalent implementation omits, and " " would then pass validation and
+// select nothing at run time.
+func TestValidateEgressSyncs_OntologySyncBlankAnchorIsNotAnAnchor(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.OntologySync = []EgressOntologySyncSpec{{Anchor: "   "}}
+
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+		t.Fatal("a whitespace-only anchor was accepted")
+	}
+}
+
+// A repeated anchor is the SAME push twice, not a bigger one: the population is
+// resolved from the anchor, so every row would be pushed and correlated again. When
+// the two entries disagree on include_parents it is worse still — which closure
+// applies would be decided by evaluation order rather than by the declaration.
+func TestValidateEgressSyncs_OntologySyncRejectsDuplicateAnchor(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.OntologySync = []EgressOntologySyncSpec{
+		{Anchor: "Equipment", IncludeParents: true},
+		{Anchor: "Equipment"},
+	}
+
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("a duplicate anchor was accepted")
+	}
+	if !strings.Contains(err.Error(), "duplicates") {
+		t.Errorf("error should say the anchor duplicates an earlier entry, got: %v", err)
+	}
+}
+
+// Two anchors are the normal case — that is the whole reason the lane is a list.
+func TestValidateEgressSyncs_OntologySyncAcceptsSeveralAnchors(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.OntologySync = []EgressOntologySyncSpec{
+		{Anchor: "Equipment", IncludeParents: true},
+		{Anchor: "Point"},
+	}
+
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("two distinct anchors should be valid: %v", err)
+	}
+}
+
+// type_ref with no ontology lane at all is rejected locally, because that verdict
+// needs no tenant state: with no catalog pushed there is nothing to reference
+// whichever anchor the type turns out to live under.
+//
+// The per-anchor half of the guard is deliberately NOT here — resolving which
+// anchor stores a given type needs the tenant's ontology, so the platform makes
+// that call at install. Guessing locally would reject valid manifests.
+func TestValidateEgressSyncs_TypeRefRequiresAnOntologyLane(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.OntologySync = nil
+	e.EntitiesSync = []EgressEntityTypeSpec{{Name: "Equipment", TypeRef: true}}
+
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("type_ref with no ontology_sync lane was accepted; every batch would fail at run time")
+	}
+	if !strings.Contains(err.Error(), "type_ref") || !strings.Contains(err.Error(), "ontology_sync") {
+		t.Errorf("error should name both type_ref and the missing lane, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "entities_sync[0]") {
+		t.Errorf("error should name the offending entities_sync entry, got: %v", err)
+	}
+}
+
+// The mirror image: type_ref is fine once a lane exists. Asserted so the guard
+// above cannot be over-tightened into "type_ref is never allowed".
+func TestValidateEgressSyncs_TypeRefWithALaneIsAccepted(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.OntologySync = []EgressOntologySyncSpec{{Anchor: "Equipment", IncludeParents: true}}
+	e.EntitiesSync = []EgressEntityTypeSpec{{Name: "Equipment", TypeRef: true}}
+
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("type_ref alongside a declared lane should be valid: %v", err)
+	}
+}
+
+// An ontology lane does not substitute for the entities lane. Kept explicit
+// because it is the one place where adding a lane could plausibly have relaxed an
+// existing rule, and the platform applies the same rule — so accepting it here
+// would break the local/install parity this validation exists for.
+func TestValidateEgressSyncs_OntologyLaneDoesNotSatisfyTheEntitiesRequirement(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.OntologySync = []EgressOntologySyncSpec{{Anchor: "Equipment"}}
+	e.EntitiesSync = nil
+
+	err := validateEgressSyncs([]EgressSyncSpec{e})
+	if err == nil {
+		t.Fatal("a component with only an ontology lane was accepted")
+	}
+	if !strings.Contains(err.Error(), "entities_sync") {
+		t.Errorf("error should name the missing lane, got: %v", err)
+	}
+}
+
+// OntologyAnchors skips empty entries, matching EntityTypeNames. Validation rejects
+// those entries anyway, so this only pins the two helpers to the same convention.
+func TestOntologyAnchors_SkipsEmptyAndPreservesOrder(t *testing.T) {
+	e := &EgressSyncSpec{OntologySync: []EgressOntologySyncSpec{
+		{Anchor: "Equipment"}, {Anchor: ""}, {Anchor: "Point"},
+	}}
+	got, want := e.OntologyAnchors(), []string{"Equipment", "Point"}
+	if len(got) != len(want) {
+		t.Fatalf("OntologyAnchors = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("OntologyAnchors = %v, want %v in declared order", got, want)
+		}
+	}
+	if got := (&EgressSyncSpec{}).OntologyAnchors(); got != nil {
+		t.Errorf("no lane should yield nil, got %v", got)
+	}
+}
+
+// validEgressSpecForOntologyLane is a component that passes every check, so each
+// test above mutates exactly the field it is about.
+func validEgressSpecForOntologyLane() EgressSyncSpec {
+	return EgressSyncSpec{
+		Name:           "core-egress-sync",
+		ExternalSystem: "24k-core",
+		EntitiesSync:   []EgressEntityTypeSpec{{Name: "Equipment"}},
+		Container:      SidecarContainerSpec{Image: "ghcr.io/x/egress@sha256:abc123"},
+	}
 }

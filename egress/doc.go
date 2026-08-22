@@ -73,7 +73,7 @@
 // # Entity types are source-native class IDs
 //
 // Every entity_type on this contract — the batch's, each entity's, the manifest's
-// entity_types[], and the optional entity-types introspection reply — is the
+// entities_sync[], and the optional entity-types introspection reply — is the
 // SOURCE-NATIVE CLASS ID, verbatim. It may contain a colon (`brick:AHU`,
 // `rec:Zone`) or be colon-free (`Equipment`, `WorkOrder`), and both forms are
 // class IDs naming different catalog entries; a colon-free name is not a plainer
@@ -95,9 +95,20 @@
 //
 // The sidecar is declared in the kit manifest under spec.egress_syncs — see
 // manifest.EgressSyncSpec for the fields, notably the push ORDER of
-// entity_types, parent_edges (which owner references the platform resolves and
+// entities_sync, parent_edges (which owner references the platform resolves and
 // sends as [Entity.ParentRefs]), and hierarchical for a type whose owner edge is
 // self-referencing.
+//
+// A component may also declare an ontology_sync lane, which pushes the tenant's
+// ontology TYPES — the external system's type catalog — in full before any
+// instance in the same run. It needs NO second handler: the catalog arrives as
+// ordinary batches over this same [Syncer] contract, with owner references under
+// the same [Entity.ParentRefs] shape, so a component implements one path. What the
+// lane replaces is the kit-side habit of seeding a catalog lazily from the entity
+// payload and relying on the external system to reject a duplicate name; the
+// platform correlates each type record instead, which does not depend on the
+// external system having a unique constraint. See manifest.EgressOntologySyncSpec.
+// The platform side of this lane is not built yet (OGA-846).
 //
 // Each parent_edges entry carries a traversal DIRECTION, defaulting to outbound.
 // The key under which an owner arrives in [Entity.ParentRefs] is the declared EDGE
