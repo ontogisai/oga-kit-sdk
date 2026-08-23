@@ -32,9 +32,25 @@ import (
 // OGA-846's ontology_sync lane made it wrong as well as unused: it reported
 // entity types only, so it could not describe a component's catalog anchors. If
 // something needs "what does this component support", read the manifest.
+// There is one path PER RECORD KIND, and that is the whole point rather than a
+// convenience: the two lanes' batch labels legitimately collide (a kit declares
+// the same anchor in both lanes), so before the split a component had to infer the
+// kind from the payload. See [OntologyTypeSyncer].
 const (
-	PathSync    = "/egress/sync"
-	PathHealthz = "/healthz"
+	PathSync         = "/egress/sync"
+	PathOntologySync = "/egress/ontology-sync"
+	PathHealthz      = "/healthz"
+)
+
+// Lane labels for LOGS ONLY.
+//
+// Unexported deliberately. The lane is carried by the route and by which method
+// the server calls — putting a lane vocabulary back into the exported surface
+// would invite a component to branch on it, which is the coupling this split
+// removes. These exist so a log line says which lane a batch belonged to.
+const (
+	laneLabelEntities      = "entities"
+	laneLabelOntologyTypes = "ontology_types"
 )
 
 // DefaultMaxRequestBytes caps a decoded push body. A batch is bounded by the
@@ -194,11 +210,55 @@ type server struct {
 func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+PathSync, s.handleSync)
+	mux.HandleFunc("POST "+PathOntologySync, s.handleOntologySync)
 	mux.HandleFunc("GET "+PathHealthz, s.handleHealth)
 	return mux
 }
 
+// pushFunc is the per-lane call. Everything around it — decode, the body cap, the
+// Batch, verdict normalization, the response and the error mapping — is
+// payload-agnostic and lives in servePush, so the two lanes cannot drift in how
+// they treat a throttle, an empty batch or a malformed verdict.
+type pushFunc func(ctx context.Context, req *SyncRequest, b *Batch) error
+
 func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
+	s.servePush(w, r, laneLabelEntities, s.impl.Sync)
+}
+
+// handleOntologySync serves the ontology lane, or reports that this component does
+// not implement it.
+func (s *server) handleOntologySync(w http.ResponseWriter, r *http.Request) {
+	syncer, ok := s.impl.(OntologyTypeSyncer)
+	if !ok {
+		// Checked BEFORE decoding: the answer cannot depend on the body, and a
+		// malformed body on a lane this component does not serve should report the
+		// more fundamental problem rather than a decode error.
+		//
+		// 501 rather than 404, deliberately. A 404 is indistinguishable from a
+		// wrong base URL, a stale gateway route or a path typo, which makes it
+		// useless as a capability signal — the platform could not tell "this
+		// component does not serve the lane" from "I am talking to the wrong
+		// thing". 501 says the route exists and the behavior does not.
+		//
+		// Reaching here at all is a DEPLOYMENT MISMATCH, not a platform bug: the
+		// platform pushes this lane only because the kit's manifest declared an
+		// ontology_sync block, so the running image is out of step with the
+		// manifest it was installed with. Hence ERROR, and hence naming the
+		// interface and the compile-time assertion in the response.
+		const msg = "this component does not serve the ontology lane: it does not implement " +
+			"egress.OntologyTypeSyncer. The manifest declares an ontology_sync block, so the " +
+			"running image is out of step with it — implement SyncOntologyTypes, and pin the " +
+			"signature with `var _ egress.OntologyTypeSyncer = (*yourComponent)(nil)`"
+		s.cfg.Logger.Error("egress ontology push rejected: component does not implement OntologyTypeSyncer",
+			"path", PathOntologySync, "lane", laneLabelOntologyTypes)
+		http.Error(w, "egress: "+msg, http.StatusNotImplemented)
+		return
+	}
+	s.servePush(w, r, laneLabelOntologyTypes, syncer.SyncOntologyTypes)
+}
+
+// servePush is one push, whichever lane it belongs to.
+func (s *server) servePush(w http.ResponseWriter, r *http.Request, lane string, push pushFunc) {
 	req, err := s.decodeSync(w, r)
 	if err != nil {
 		// 400: the platform treats a non-429 4xx as PERMANENT and surfaces it
@@ -214,8 +274,8 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := newBatch(req.Entities)
-	if syncErr := s.impl.Sync(r.Context(), req, b); syncErr != nil {
-		s.writeSyncError(w, req, syncErr)
+	if syncErr := push(r.Context(), req, b); syncErr != nil {
+		s.writeSyncError(w, req, lane, syncErr)
 		return
 	}
 
@@ -224,7 +284,7 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		// ERROR, not Warn: each of these is a bug in this component that would
 		// have cost the platform the whole batch had the SDK forwarded it.
 		s.cfg.Logger.Error("egress component returned a malformed verdict; normalized to a per-entity failure",
-			"batch_id", req.BatchID, "entity_type", req.EntityType, "defect", d)
+			"batch_id", req.BatchID, "lane", lane, "entity_type", req.EntityType, "defect", d)
 	}
 	s.writeJSON(w, http.StatusOK, SyncResponse{Results: results})
 }
@@ -270,13 +330,15 @@ func (s *server) decodeSync(w http.ResponseWriter, r *http.Request) (*SyncReques
 	return &req, nil
 }
 
-// writeSyncError maps a batch-wide Sync failure onto the status the platform's
-// retry classifier expects.
-func (s *server) writeSyncError(w http.ResponseWriter, req *SyncRequest, err error) {
+// writeSyncError maps a batch-wide push failure onto the status the platform's
+// retry classifier expects. Shared by both lanes: an external system's
+// backpressure and a batch-wide fault mean the same thing whichever kind of record
+// was being pushed.
+func (s *server) writeSyncError(w http.ResponseWriter, req *SyncRequest, lane string, err error) {
 	var te *ThrottleError
 	if errors.As(err, &te) && te.After > 0 {
 		s.cfg.Logger.Warn("egress batch throttled by external system",
-			"batch_id", req.BatchID, "entity_type", req.EntityType,
+			"batch_id", req.BatchID, "lane", lane, "entity_type", req.EntityType,
 			"retry_after", te.After.String(), "error", err)
 		// Seconds form: the platform accepts either permitted Retry-After form,
 		// and a delay in seconds cannot be misread across a clock skew the way an
@@ -286,7 +348,7 @@ func (s *server) writeSyncError(w http.ResponseWriter, req *SyncRequest, err err
 		return
 	}
 	s.cfg.Logger.Error("egress batch failed",
-		"batch_id", req.BatchID, "entity_type", req.EntityType,
+		"batch_id", req.BatchID, "lane", lane, "entity_type", req.EntityType,
 		"mode", string(req.Mode), "entities", len(req.Entities), "error", err)
 	// 500: a batch-wide fault is transient as far as the platform is concerned,
 	// so it retries the batch with the SAME batch_id. Per-entity failures must
