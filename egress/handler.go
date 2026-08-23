@@ -40,18 +40,6 @@ type Component interface {
 	Health(ctx context.Context) Health
 }
 
-// EntityTypeLister is an OPTIONAL interface a component implements to serve
-// GET /egress/entity-types.
-//
-// Advisory only — the kit MANIFEST is authoritative for what the platform
-// pushes, and the platform never reconciles a disagreement by pushing a
-// different set than was declared. Implement it so an operator can see what the
-// component believes it supports; when it is not implemented the endpoint
-// answers 404 and nothing on the platform's push path is affected.
-type EntityTypeLister interface {
-	EntityTypes(ctx context.Context) []string
-}
-
 // Health is a component's health report, served as the JSON body of
 // GET /healthz. The platform's monitor keys on the HTTP status only, so the
 // fields are for the operator reading the response.

@@ -19,7 +19,6 @@ type stubComponent struct {
 	sync    func(ctx context.Context, req *SyncRequest, b *Batch) error
 	health  Health
 	connect error
-	types   []string // non-nil ⇒ also implements EntityTypeLister via listerComponent
 }
 
 func (s *stubComponent) Connect(context.Context) error { return s.connect }
@@ -30,13 +29,6 @@ func (s *stubComponent) Sync(ctx context.Context, req *SyncRequest, b *Batch) er
 	}
 	return s.sync(ctx, req, b)
 }
-
-// listerComponent adds the optional introspection interface.
-type listerComponent struct {
-	*stubComponent
-}
-
-func (l listerComponent) EntityTypes(context.Context) []string { return l.types }
 
 // quietServer builds a server whose logger discards output, so a test that
 // deliberately triggers a defect log does not spam the run.
@@ -354,33 +346,6 @@ func TestHealthz_ReflectsComponentHealth(t *testing.T) {
 	}
 }
 
-func TestEntityTypes_OptionalInterface(t *testing.T) {
-	// Not implemented ⇒ 404, never an empty list (which would read as "supports
-	// nothing" rather than "does not answer").
-	w := httptest.NewRecorder()
-	quietServer(&stubComponent{}).mux().
-		ServeHTTP(w, httptest.NewRequest(http.MethodGet, PathEntityTypes, nil))
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", w.Code)
-	}
-
-	// Implemented ⇒ the declared list.
-	lister := listerComponent{&stubComponent{types: []string{"Equipment", "Location"}}}
-	w = httptest.NewRecorder()
-	quietServer(lister).mux().
-		ServeHTTP(w, httptest.NewRequest(http.MethodGet, PathEntityTypes, nil))
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
-	}
-	var body EntityTypesResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(body.EntityTypes) != 2 || body.EntityTypes[0] != "Equipment" {
-		t.Errorf("entity_types = %v", body.EntityTypes)
-	}
-}
-
 func TestListenAndServe_Validation(t *testing.T) {
 	ctx := t.Context()
 	if err := ListenAndServe(ctx, nil, &stubComponent{}); err == nil {
@@ -443,5 +408,44 @@ func TestBatch_FailedWithoutReasonStillCarriesOne(t *testing.T) {
 	r2, _ := b2.Results()
 	if r2[0].Error == "" {
 		t.Error("FailedErr(nil) left an empty reason")
+	}
+}
+
+// The retired introspection endpoint is not served, and the component still
+// serves the two routes that are the contract (SJ24K-8).
+//
+// Worth locking precisely BECAUSE the observable behavior did not change: the
+// endpoint previously answered 404 whenever a component did not implement the
+// optional lister, and an unrouted path answers 404 too. So nothing external can
+// tell the removal happened — which is the ideal outcome for a removal, and also
+// exactly why a silent re-add would go unnoticed without this.
+//
+// It went because its own contract note said the MANIFEST is authoritative for
+// what gets pushed, which is the argument against serving a second partial
+// description of the same thing. OGA-846's ontology_sync lane then made it wrong
+// as well as unused: it reported entity types only, so it could not describe a
+// component's catalog anchors.
+func TestEntityTypesEndpoint_IsNotServed(t *testing.T) {
+	srv := quietServer(&stubComponent{health: Health{OK: true}}).mux()
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/egress/entity-types", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("GET /egress/entity-types = %d, want 404 — the endpoint is retired", w.Code)
+	}
+
+	// The surviving routes are unaffected. A removal that also broke /healthz would
+	// take the component out of routing, so this half is not decoration.
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodGet, PathHealthz, nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("GET %s = %d, want 200", PathHealthz, w.Code)
+	}
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest(http.MethodPost, PathSync,
+		strings.NewReader(`{"tenant_id":"t","component":"c","entity_type":"Equipment",`+
+			`"mode":"bulk","batch_id":"b1","entities":[]}`)))
+	if w.Code != http.StatusOK {
+		t.Errorf("POST %s = %d, want 200; body=%s", PathSync, w.Code, w.Body.String())
 	}
 }

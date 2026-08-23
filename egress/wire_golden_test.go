@@ -228,9 +228,6 @@ func TestPaths_MatchPlatformContract(t *testing.T) {
 	if PathSync != "/egress/sync" {
 		t.Errorf("PathSync = %q", PathSync)
 	}
-	if PathEntityTypes != "/egress/entity-types" {
-		t.Errorf("PathEntityTypes = %q", PathEntityTypes)
-	}
 	// Unprefixed on purpose: the platform-wide sidecar health convention.
 	if PathHealthz != "/healthz" {
 		t.Errorf("PathHealthz = %q", PathHealthz)
@@ -264,14 +261,6 @@ func TestClassID_ColonSurvivesTheWire(t *testing.T) {
 		t.Errorf("entity entity_type = %+v, want %q verbatim", req.Entities, classID)
 	}
 
-	// And back out: the introspection reply must not normalize it either.
-	out, err := json.Marshal(EntityTypesResponse{EntityTypes: []string{classID, "Equipment"}})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if got, want := string(out), `{"entity_types":["brick:AHU","Equipment"]}`; got != want {
-		t.Errorf("entity-types reply = %s, want %s", got, want)
-	}
 }
 
 // The homogeneity check compares class IDs as OPAQUE strings.

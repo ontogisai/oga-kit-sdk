@@ -6,7 +6,7 @@ import (
 )
 
 // parent_refs is the resolved owner of each pushed entity, keyed by the edge name
-// the kit declared under entity_types[].parent_edges.
+// the kit declared under entities_sync[].parent_edges.
 //
 // It is the only way a component can populate an external foreign key: the entity
 // as read carries no containment, because containment is an edge and an entity
