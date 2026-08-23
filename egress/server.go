@@ -25,10 +25,16 @@ import (
 //
 // /healthz is deliberately UNPREFIXED: it is the platform-wide sidecar
 // convention the health monitor probes and must not be role-specific.
+// NOTE: there is no entity-types introspection path. GET /egress/entity-types
+// was removed in SJ24K-8 (platform half: OGA-855) — its own contract note said
+// the MANIFEST is authoritative, which is the argument against serving a second,
+// partial description of the same thing. It had no production consumer, and
+// OGA-846's ontology_sync lane made it wrong as well as unused: it reported
+// entity types only, so it could not describe a component's catalog anchors. If
+// something needs "what does this component support", read the manifest.
 const (
-	PathSync        = "/egress/sync"
-	PathEntityTypes = "/egress/entity-types"
-	PathHealthz     = "/healthz"
+	PathSync    = "/egress/sync"
+	PathHealthz = "/healthz"
 )
 
 // DefaultMaxRequestBytes caps a decoded push body. A batch is bounded by the
@@ -110,9 +116,9 @@ func (e *ThrottleError) Error() string {
 // Unwrap exposes the underlying cause.
 func (e *ThrottleError) Unwrap() error { return e.Err }
 
-// ListenAndServe runs an egress component: it calls Connect, serves the sync,
-// entity-types and health routes, and blocks until ctx is cancelled or
-// SIGTERM/SIGINT arrives, then shuts the HTTP server down gracefully.
+// ListenAndServe runs an egress component: it calls Connect, serves the sync and
+// health routes, and blocks until ctx is cancelled or SIGTERM/SIGINT arrives,
+// then shuts the HTTP server down gracefully.
 func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 	if cfg == nil {
 		return errors.New("egress.ListenAndServe: nil config")
@@ -188,7 +194,6 @@ type server struct {
 func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+PathSync, s.handleSync)
-	mux.HandleFunc("GET "+PathEntityTypes, s.handleEntityTypes)
 	mux.HandleFunc("GET "+PathHealthz, s.handleHealth)
 	return mux
 }
@@ -288,22 +293,6 @@ func (s *server) writeSyncError(w http.ResponseWriter, req *SyncRequest, err err
 	// NOT come through here — they belong on the Batch, so the rest of the batch
 	// keeps its correlations.
 	http.Error(w, err.Error(), http.StatusInternalServerError)
-}
-
-func (s *server) handleEntityTypes(w http.ResponseWriter, r *http.Request) {
-	lister, ok := s.impl.(EntityTypeLister)
-	if !ok {
-		// 404 rather than an empty list: the endpoint is advisory and an empty
-		// list would read as "this component supports nothing", which is a
-		// different and misleading claim from "this component does not answer".
-		http.Error(w, "entity-types introspection not implemented", http.StatusNotFound)
-		return
-	}
-	types := lister.EntityTypes(r.Context())
-	if types == nil {
-		types = []string{}
-	}
-	s.writeJSON(w, http.StatusOK, EntityTypesResponse{EntityTypes: types})
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {

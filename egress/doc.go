@@ -17,9 +17,8 @@
 //	cfg := &egress.Config{Port: "8600"}
 //	egress.ListenAndServe(ctx, cfg, c)
 //
-// The server serves POST /egress/sync, the optional GET /egress/entity-types,
-// and GET /healthz, decodes each push, and builds a response the platform will
-// accept. A minimal Sync:
+// The server serves POST /egress/sync and GET /healthz, decodes each push, and
+// builds a response the platform will accept. A minimal Sync:
 //
 //	func (c *myComponent) Sync(ctx context.Context, req *egress.SyncRequest, b *egress.Batch) error {
 //	    for _, e := range req.Entities {
@@ -72,9 +71,8 @@
 //
 // # Entity types are source-native class IDs
 //
-// Every entity_type on this contract — the batch's, each entity's, the manifest's
-// entities_sync[], and the optional entity-types introspection reply — is the
-// SOURCE-NATIVE CLASS ID, verbatim. It may contain a colon (`brick:AHU`,
+// Every entity_type on this contract — the batch's, each entity's, and the
+// manifest's entities_sync[] — is the SOURCE-NATIVE CLASS ID, verbatim. It may contain a colon (`brick:AHU`,
 // `rec:Zone`) or be colon-free (`Equipment`, `WorkOrder`), and both forms are
 // class IDs naming different catalog entries; a colon-free name is not a plainer
 // spelling of a namespaced one.

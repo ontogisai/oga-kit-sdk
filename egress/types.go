@@ -84,7 +84,7 @@ type Entity struct {
 	Correlation *Correlation `json:"correlation,omitempty"`
 
 	// ParentRefs carries the entity's OWNER for each edge the kit declared under
-	// entity_types[].parent_edges, keyed by that edge name.
+	// entities_sync[].parent_edges, keyed by that edge name.
 	//
 	// This is the only way to populate an external foreign key. The entity as
 	// read carries no containment — containment is an edge, and an entity read
@@ -143,7 +143,7 @@ type SyncRequest struct {
 	// whole string. Do not sanitize it, normalize the case, split on the colon, or
 	// map it to some tidier internal name: the platform performs no translation
 	// outbound, so this value is already the customer-facing identifier, and the
-	// manifest's entity_types[] entry it corresponds to is the same string.
+	// manifest's entities_sync[] entry it corresponds to is the same string.
 	//
 	// It is NEVER the platform's internal storage identifier. Where rows physically
 	// live is a platform concern the contract does not expose.
@@ -194,15 +194,4 @@ type SyncResult struct {
 // not have to track this by hand.
 type SyncResponse struct {
 	Results []SyncResult `json:"results"`
-}
-
-// EntityTypesResponse is the body of the optional GET /egress/entity-types
-// introspection endpoint.
-//
-// Advisory only — the MANIFEST is authoritative for what gets pushed. This
-// exists so an operator can see what a component believes it supports; a
-// disagreement is a kit-authoring bug to surface, never something the platform
-// silently reconciles.
-type EntityTypesResponse struct {
-	EntityTypes []string `json:"entity_types"`
 }
