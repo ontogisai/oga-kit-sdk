@@ -173,7 +173,11 @@ type ParentRef struct {
 	ExternalRecordID string `json:"external_record_id"`
 }
 
-// SyncRequest is the body of POST /egress/sync.
+// SyncRequest is the body of a push — POST /egress/sync for entities, and
+// POST /egress/ontology-sync for ontology type records. One type serves both
+// because the two carry the same fields; what differs is the KIND of record in
+// Entities, and that is carried by the ROUTE, never by a field here. See
+// [OntologyTypeSyncer].
 //
 // A batch is HOMOGENEOUS: one (tenant, entity_type, mode) per call, never a
 // mixture. A component may therefore map one target shape per call, and its
@@ -240,7 +244,7 @@ type SyncResult struct {
 	Error string `json:"error,omitempty"`
 }
 
-// SyncResponse is the body of a POST /egress/sync reply.
+// SyncResponse is the body of a push reply, on either lane.
 //
 // It MUST carry exactly one result per requested entity id. The platform
 // validates this and, on any mismatch — a missing id, an unrequested id, a

@@ -40,6 +40,55 @@ type Component interface {
 	Health(ctx context.Context) Health
 }
 
+// OntologyTypeSyncer is implemented by a component that also serves the ONTOLOGY
+// lane — pushing the tenant's ontology TYPE records into the external system's
+// reference tables, so an entity's own type has an external identifier to
+// reference before the entity is pushed.
+//
+// It is OPTIONAL and separate from [Component] on purpose. A kit whose manifest
+// declares no ontology_sync block has no catalogue to push, and forcing every
+// component to implement a method it will never serve — returning an error, or
+// worse, silently doing nothing — is a weaker statement than not implementing it.
+// Implementing this interface IS the statement "this component serves that lane".
+//
+// # The record kind is the ENDPOINT, never an inference
+//
+// Type records arrive at POST /egress/ontology-sync and entities at
+// POST /egress/sync. The two payloads are otherwise the same shape, and their
+// batch labels legitimately COLLIDE: a kit that declares the anchor Equipment in
+// both lanes sends both under entity_type "Equipment", which is the intended
+// declaration (a kit pushes the Equipment catalogue and the Equipment instances).
+// Before this split a component had to recover the kind from the batch's content,
+// and misreading it writes into the customer's system of record — type records
+// into the asset register, or instances into the classification table. Routing
+// answers the question instead, which also makes a MIXED batch unrepresentable:
+// the kind cannot vary per entity when it is a property of the URL.
+//
+// # Pin the method signature at compile time
+//
+// This is a runtime type assertion, so a typo in the signature does not fail to
+// compile — it silently means "not implemented", and the server answers 501. Add
+// the standard assertion next to the implementation so the compiler catches it:
+//
+//	var _ egress.OntologyTypeSyncer = (*myComponent)(nil)
+type OntologyTypeSyncer interface {
+	// SyncOntologyTypes pushes one homogeneous batch of ontology type records and
+	// records a verdict per record on b.
+	//
+	// The verdict rules are [Component.Sync]'s, unchanged: nil when the batch was
+	// PROCESSED (per-record failures belong on b), an error only for a batch-wide
+	// fault, and a [ThrottleError] to pass an external system's backpressure
+	// through. The platform persists each returned identifier onto the type
+	// record itself, which is what makes a re-run an update rather than a
+	// duplicate create.
+	//
+	// req.EntityType is the batch's ANCHOR — the storage type whose catalogue
+	// this batch belongs to — not the record's own name. A record's own name is
+	// its business key for the external system and travels as a property, because
+	// that is the value the external system stores and matches on.
+	SyncOntologyTypes(ctx context.Context, req *SyncRequest, b *Batch) error
+}
+
 // Health is a component's health report, served as the JSON body of
 // GET /healthz. The platform's monitor keys on the HTTP status only, so the
 // fields are for the operator reading the response.

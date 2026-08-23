@@ -17,8 +17,9 @@
 //	cfg := &egress.Config{Port: "8600"}
 //	egress.ListenAndServe(ctx, cfg, c)
 //
-// The server serves POST /egress/sync and GET /healthz, decodes each push, and
-// builds a response the platform will accept. A minimal Sync:
+// The server serves POST /egress/sync, POST /egress/ontology-sync and
+// GET /healthz, decodes each push, and builds a response the platform will
+// accept. A minimal Sync:
 //
 //	func (c *myComponent) Sync(ctx context.Context, req *egress.SyncRequest, b *egress.Batch) error {
 //	    for _, e := range req.Entities {
@@ -98,15 +99,21 @@
 // self-referencing.
 //
 // A component may also declare an ontology_sync lane, which pushes the tenant's
-// ontology TYPES — the external system's type catalog — in full before any
-// instance in the same run. It needs NO second handler: the catalog arrives as
-// ordinary batches over this same [Syncer] contract, with owner references under
-// the same [Entity.ParentRefs] shape, so a component implements one path. What the
-// lane replaces is the kit-side habit of seeding a catalog lazily from the entity
-// payload and relying on the external system to reject a duplicate name; the
-// platform correlates each type record instead, which does not depend on the
-// external system having a unique constraint. See manifest.EgressOntologySyncSpec.
-// The platform side of this lane is not built yet (OGA-846).
+// ontology TYPES — the external system's type catalog — in full, and correlated,
+// before any instance in the same run. What the lane replaces is the kit-side
+// habit of seeding a catalog lazily from the entity payload and relying on the
+// external system to reject a duplicate name; the platform correlates each type
+// record instead, which does not depend on the external system having a unique
+// constraint. See manifest.EgressOntologySyncSpec.
+//
+// That lane is served by a SECOND handler — implement [OntologyTypeSyncer] and it
+// arrives at POST /egress/ontology-sync. The split is the contract, not an
+// implementation detail: the two lanes' batch labels legitimately collide, because
+// a kit declares the same anchor in both (it pushes the Equipment catalog and the
+// Equipment instances), so a single endpoint would leave the component to recover
+// the record kind from the payload. Routing answers it instead, and a batch mixing
+// the two kinds becomes unrepresentable. A component that declares no
+// ontology_sync block implements nothing extra.
 //
 // Each parent_edges entry carries a traversal DIRECTION, defaulting to outbound.
 // The key under which an owner arrives in [Entity.ParentRefs] is the declared EDGE
