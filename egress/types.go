@@ -83,25 +83,83 @@ type Entity struct {
 	// ignores it will duplicate records on every re-run.
 	Correlation *Correlation `json:"correlation,omitempty"`
 
-	// ParentRefs carries the entity's OWNER for each edge the kit declared under
-	// entities_sync[].parent_edges, keyed by that edge name.
+	// ParentRefs carries the entity's resolved OWNERS, keyed by how each was
+	// reached.
 	//
 	// This is the only way to populate an external foreign key. The entity as
 	// read carries no containment — containment is an edge, and an entity read
 	// projects columns — so without this a component has nothing identifying what
 	// contains the record it is about to create.
 	//
-	// Direction is the record's parent or container, never its children.
+	// THREE KINDS OF KEY can appear, and a component reads all three the same way
+	// (one map, one value shape):
 	//
-	// The platform guarantees three things, so a component does not have to
-	// defend against them: each entry is SINGLE-VALUED (a declared edge
-	// resolving to several targets fails the batch rather than picking one); a
-	// present entry's ExternalRecordID is non-empty (a parent not yet pushed
-	// fails the batch, so a null foreign key is never sent); and the key set is
-	// exactly the declared parent_edges. An ABSENT entry means the entity is a
-	// root of that relation — omit the foreign key, do not treat it as an error.
+	//   - An EDGE NAME, for each edge the kit declared under
+	//     entities_sync[].parent_edges. Direction is the record's parent or
+	//     container, never its children.
+	//   - [TypeRefKey], when the entity's type sets entities_sync[].type_ref —
+	//     the entity's own ontology TYPE record, correlated. Not an edge.
+	//   - [OntologyParentRefKey], on an ontology_sync batch — the PARENT TYPE of
+	//     the type record being pushed. Not an edge either.
+	//
+	// The platform guarantees two things, so a component does not have to defend
+	// against them: each entry is SINGLE-VALUED (a declared edge resolving to
+	// several targets fails the batch rather than picking one), and a present
+	// entry's ExternalRecordID is non-empty (an owner not yet pushed and
+	// correlated fails the batch, so a null foreign key is never sent). An ABSENT
+	// entry means the entity is a root of that relation — omit the foreign key, do
+	// not treat it as an error.
+	//
+	// The key set is NOT simply the declared parent_edges. Earlier revisions of
+	// this comment said it was, which stopped being true when type_ref and the
+	// ontology lane landed; a component written against that sentence would
+	// conclude a type reference cannot be in this map.
 	ParentRefs map[string]ParentRef `json:"parent_refs,omitempty"`
 }
+
+// Reserved [Entity.ParentRefs] keys. Neither is an edge name: they name how the
+// owner was reached rather than a predicate traversed to reach it, which is why
+// they can share one map with the edge-keyed entries without a direction
+// qualifier.
+//
+// They are declared HERE, in the contract package, because a component has to
+// match them byte-for-byte to read the reference — and a wire literal that a kit
+// retypes from prose is a literal that drifts. The platform holds the same two
+// constants on its side.
+const (
+	// TypeRefKey is the key an entity's own correlated ontology TYPE arrives
+	// under, when the kit sets entities_sync[].type_ref on that entity type.
+	//
+	// For 24K Core the entry's ExternalRecordID IS Asset.asset_classification_id
+	// (or AssetDataPoint.asset_datapoint_name_id) — indistinguishable in handling
+	// from the space_id an edge-resolved owner supplies.
+	//
+	// Setting type_ref makes the entry MANDATORY, not optional: if the type was
+	// never pushed and correlated, the platform fails the batch rather than
+	// sending an entity with a null reference. So a component may read it
+	// directly; an absent entry here is a platform-side failure the component
+	// never sees.
+	//
+	// ⚠ RESERVED. A kit that declares an owner edge literally named "type_ref" on
+	// a type that also sets type_ref collides on this key, and nothing currently
+	// rejects that — the two values are written by different code paths, so the
+	// collision presents as a silently overwritten reference rather than an error.
+	// Do not name an edge this.
+	TypeRefKey = "type_ref"
+
+	// OntologyParentRefKey is the key a type record's PARENT TYPE arrives under,
+	// on a batch produced by an ontology_sync anchor with include_parents: true.
+	//
+	// For 24K Core the entry's ExternalRecordID becomes
+	// asset_classification.parent_id. With include_parents: false the anchor's
+	// types are pushed as roots and this key is simply absent — the flat-catalog
+	// case, not an error.
+	//
+	// It cannot collide with an entity-lane edge key even though "parent_type" is
+	// a legal identifier a kit could name an edge: the two lanes never share a
+	// batch, so the two key spaces never meet inside one payload.
+	OntologyParentRefKey = "parent_type"
+)
 
 // ParentRef identifies one resolved owner of a pushed entity.
 type ParentRef struct {

@@ -293,3 +293,55 @@ func TestClassID_HomogeneityIsExactNotPrefixInsensitive(t *testing.T) {
 // manifest.TestValidateEgressSyncs_AcceptsNamespacedClassID — the two must agree
 // about what a legal entity type is, or a kit could declare a type it can never
 // receive.
+
+// The two reserved parent_refs keys are WIRE LITERALS, pinned here.
+//
+// A component matches them byte-for-byte to read a type reference or an ontology
+// parent, and the platform holds its own copy of both constants. Two repos with
+// the same literal is exactly the shape that drifts, and the drift would be
+// silent: a renamed key means the lookup misses, the reference reads as absent,
+// and "absent" is a LEGAL answer meaning "this record is a root" — so every
+// affected record would be pushed with a null foreign key and the run would
+// report success.
+//
+// If this test ever needs changing, the platform's internal/egress constants have
+// to change in the same breath, and every published kit needs a re-release.
+func TestParentRefKeys_AreWireLiterals(t *testing.T) {
+	if TypeRefKey != "type_ref" {
+		t.Errorf("TypeRefKey = %q, want %q", TypeRefKey, "type_ref")
+	}
+	if OntologyParentRefKey != "parent_type" {
+		t.Errorf("OntologyParentRefKey = %q, want %q", OntologyParentRefKey, "parent_type")
+	}
+	// And they must stay distinct from each other: they can appear in the same map
+	// type, and collapsing them would make a type reference indistinguishable from
+	// an ontology parent.
+	if TypeRefKey == OntologyParentRefKey {
+		t.Fatal("the two reserved keys are equal; a type reference would be indistinguishable " +
+			"from an ontology parent")
+	}
+}
+
+// A reserved key round-trips through parent_refs like any edge-keyed entry, which
+// is the property that lets a component read ONE map with one value shape.
+func TestParentRefs_ReservedKeysDecodeLikeEdgeKeys(t *testing.T) {
+	const body = `{
+	  "id": "e1",
+	  "entity_type": "brick:AHU",
+	  "parent_refs": {
+	    "hasLocation": {"entity_id": "loc-1", "external_record_id": "SPACE-9"},
+	    "type_ref":    {"entity_id": "brick:AHU", "external_record_id": "CLASS-4"}
+	  }
+	}`
+	var e Entity
+	if err := json.Unmarshal([]byte(body), &e); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := e.ParentRefs["hasLocation"].ExternalRecordID; got != "SPACE-9" {
+		t.Errorf("edge-keyed ref = %q, want SPACE-9", got)
+	}
+	if got := e.ParentRefs[TypeRefKey].ExternalRecordID; got != "CLASS-4" {
+		t.Errorf("type_ref ref = %q, want CLASS-4 — a reserved key must decode from the "+
+			"same map as an edge key, with the same value shape", got)
+	}
+}
