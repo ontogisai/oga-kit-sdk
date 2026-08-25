@@ -84,6 +84,69 @@ const (
     }
   ]
 }`
+
+	// The two PLATFORM-RESOLVED fields, which the fixtures above predate:
+	// parent_refs (OGA-822) and type_ancestry (OGA-865). Generated the same way, by
+	// marshalling the platform's own internal/egress.SyncRequest and pasting the
+	// output verbatim — not written from the design document, which would only prove
+	// the SDK agrees with prose.
+	//
+	// Unlike the fixtures above, this literal is RECONCILED: the platform holds the
+	// same bytes in its own internal/egress/wire_golden_test.go and asserts that
+	// marshalling produces them. That is what makes it a cross-repo guard instead of
+	// each repo agreeing with itself — the fixture is the shared artifact, and a
+	// rename or a reorder on EITHER side fails on that side. Keep the two copies
+	// identical; changing one alone is the drift this exists to catch.
+	//
+	// Both fields are resolved server-side and neither is derivable from the entity's
+	// own properties, so a tag rename is a silent routing break rather than a decode
+	// error: parent_refs going missing sends a null foreign key, and type_ancestry
+	// going missing sends a component back to the unreliable class_hierarchy property.
+	//
+	// The three entities cover the three shapes a component must handle: a leaf with
+	// a full chain and an owner, a ROOT whose chain is one element (indistinguishable
+	// on the wire from a leaf that resolved nothing, which is why absence is a
+	// separate case), and an entity whose class the ontology does not define, where
+	// the field is OMITTED rather than flattened.
+	platformResolvedRefsRequestJSON = `{
+  "tenant_id": "sjcs1",
+  "external_system": "24k-core",
+  "entity_type": "Location",
+  "mode": "bulk",
+  "batch_id": "sjcs1:core-egress-sync:Location:bulk:1:abc",
+  "entities": [
+    {
+      "id": "019e38e3-room",
+      "entity_type": "rec:Room",
+      "properties": {
+        "rdfs_label": "SAN 36A-L4-312"
+      },
+      "parent_refs": {
+        "hasLocation": {
+          "entity_id": "019e38e3-level",
+          "external_record_id": "8f2c1d04-core-uuid"
+        }
+      },
+      "type_ancestry": [
+        "rec:Room",
+        "rec:Space",
+        "rec:Building",
+        "rec:Site"
+      ]
+    },
+    {
+      "id": "019e38e3-site",
+      "entity_type": "rec:Site",
+      "type_ancestry": [
+        "rec:Site"
+      ]
+    },
+    {
+      "id": "019e38e3-stale",
+      "entity_type": "sjcs:Unregistered"
+    }
+  ]
+}`
 )
 
 // A platform-marshalled request must decode into the SDK structs with every
@@ -319,6 +382,92 @@ func TestParentRefKeys_AreWireLiterals(t *testing.T) {
 	if TypeRefKey == OntologyParentRefKey {
 		t.Fatal("the two reserved keys are equal; a type reference would be indistinguishable " +
 			"from an ontology parent")
+	}
+}
+
+// The platform-resolved fields decode with every element populated, IN ORDER.
+//
+// Order is the contract for type_ancestry, not a formatting detail: it is
+// most-specific-first, so a component matching against its declared roots walks
+// from index 0 outward. A reversed chain would decode without error and route every
+// entity to the wrong target.
+func TestSyncRequest_DecodesPlatformResolvedFields(t *testing.T) {
+	var req SyncRequest
+	if err := json.Unmarshal([]byte(platformResolvedRefsRequestJSON), &req); err != nil {
+		t.Fatalf("decode platform request: %v", err)
+	}
+	if len(req.Entities) != 3 {
+		t.Fatalf("entities = %d, want 3", len(req.Entities))
+	}
+
+	leaf := req.Entities[0]
+	wantChain := []string{"rec:Room", "rec:Space", "rec:Building", "rec:Site"}
+	if !reflect.DeepEqual(leaf.TypeAncestry, wantChain) {
+		t.Errorf("type_ancestry = %v, want %v (leaf first, in order)", leaf.TypeAncestry, wantChain)
+	}
+	if got := leaf.ParentRefs["hasLocation"].ExternalRecordID; got != "8f2c1d04-core-uuid" {
+		t.Errorf("parent_refs[hasLocation].external_record_id = %q", got)
+	}
+
+	// A ROOT arrives as a ONE-ELEMENT chain naming itself, never as an empty one.
+	// That is what lets a component treat "my declared root is in this chain" as one
+	// rule for every entity instead of special-casing the top of the hierarchy —
+	// which is precisely where the class_hierarchy property failed.
+	if root := req.Entities[1]; !reflect.DeepEqual(root.TypeAncestry, []string{"rec:Site"}) {
+		t.Errorf("root type_ancestry = %v, want [rec:Site]", root.TypeAncestry)
+	}
+
+	// A class the ontology does not define carries NO chain. Absence means "the
+	// platform has no ancestry to state" and must not be read as a root: the platform
+	// deliberately does not flatten it to a one-element chain, because that would be
+	// byte-identical to entities[1] above.
+	if stale := req.Entities[2]; stale.TypeAncestry != nil {
+		t.Errorf("undefined class carried type_ancestry = %v, want none", stale.TypeAncestry)
+	}
+}
+
+// And the reverse direction, byte-for-byte.
+//
+// Decoding alone would only catch a rename on a field the assertions above happen to
+// read; re-marshalling also pins FIELD ORDER. This half holds the SDK to the shared
+// fixture; the platform's TestSyncRequest_MarshalsToTheSharedWireFixture holds the
+// platform to the same bytes. Neither test alone proves the two structs agree — the
+// pair does, provided the literal stays identical in both repos.
+func TestSyncRequest_RoundTripsPlatformResolvedFields(t *testing.T) {
+	var req SyncRequest
+	if err := json.Unmarshal([]byte(platformResolvedRefsRequestJSON), &req); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(got) != platformResolvedRefsRequestJSON {
+		t.Errorf("round-tripped request differs from the platform's wire:\n got: %s\nwant: %s",
+			got, platformResolvedRefsRequestJSON)
+	}
+}
+
+// The JSON TAGS on the platform-resolved fields are pinned as wire literals.
+//
+// Read off the struct by reflection rather than inferred from a decode, so a rename
+// fails HERE with the old and new names in the message instead of surfacing as a
+// field that silently decodes to nil. Both are omitempty, which is what keeps the
+// older fixtures in this file valid byte-for-byte.
+func TestPlatformResolvedFieldTags_AreWireLiterals(t *testing.T) {
+	for field, want := range map[string]string{
+		"ParentRefs":   "parent_refs,omitempty",
+		"TypeAncestry": "type_ancestry,omitempty",
+	} {
+		f, ok := reflect.TypeOf(Entity{}).FieldByName(field)
+		if !ok {
+			t.Errorf("Entity has no field %s", field)
+			continue
+		}
+		if got := f.Tag.Get("json"); got != want {
+			t.Errorf("Entity.%s json tag = %q, want %q — the platform serializes the latter",
+				field, got, want)
+		}
 	}
 }
 
