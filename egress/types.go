@@ -115,6 +115,47 @@ type Entity struct {
 	// ontology lane landed; a component written against that sentence would
 	// conclude a type reference cannot be in this map.
 	ParentRefs map[string]ParentRef `json:"parent_refs,omitempty"`
+
+	// TypeAncestry is this entity's type chain as the tenant's LIVE ontology
+	// defines it, most-specific FIRST: the entity's own class ID, then its parent,
+	// then its grandparent, up to the root.
+	//
+	// SELF-INCLUSIVE, which the name alone does not settle: a rec:Building whose
+	// only ancestor is rec:Space arrives as ["rec:Building", "rec:Space"], not
+	// ["rec:Space"]. So a component matching "is this one of the roots I declared"
+	// needs no special case for an entity that IS a root.
+	//
+	// ⚠ READ THIS INSTEAD OF Properties["class_hierarchy"]. The two look
+	// interchangeable and are not. This field is resolved by the platform from the
+	// ontology of record. `class_hierarchy` is a domain PROPERTY written by the data
+	// loader from the source export's own class block — a different source — so when
+	// that block is absent the loader falls back to a chain naming only the leaf,
+	// and a synthesized vertex may carry no such property at all. A router walking
+	// the property therefore finds no declared root for exactly the entities at the
+	// top of the hierarchy, which is the failure this field was added to remove.
+	//
+	// ABSENT (omitted) means the platform has no ancestry to state: the entity's
+	// class ID is not in the tenant's active ontology, which a stale row left by a
+	// re-labeling import can produce. It is deliberately NOT flattened to a
+	// one-element chain naming the leaf, because that is byte-identical to a genuine
+	// root. Treat absence as unknown and fail the entity if you need the ancestry —
+	// do not infer one.
+	//
+	// ⚠ A PRESENT chain is complete only as far as the tenant's ontology is. It ends
+	// at the first ancestor the ontology does not define — which a RETIRED type
+	// produces — and such a chain is indistinguishable from one that ended at a real
+	// root. So "my declared root is not in this chain" can mean the entity is outside
+	// your hierarchy OR that an ancestor was retired from the ontology. Both are real
+	// gaps in the ontology rather than in the payload: fail the entity and report the
+	// chain you received, do not widen the match or fall back to class_hierarchy.
+	//
+	// ENTITY LANE ONLY. On an ontology_sync batch the EntityType is the anchor
+	// rather than the type record's own name, so a chain resolved from it would
+	// describe the anchor; that lane expresses hierarchy through
+	// ParentRefs[OntologyParentRefKey].
+	//
+	// Mirrors the platform's internal/egress.Entity.TypeAncestry.
+	TypeAncestry []string `json:"type_ancestry,omitempty"`
 }
 
 // Reserved [Entity.ParentRefs] keys. Neither is an edge name: they name how the
