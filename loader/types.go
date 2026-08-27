@@ -174,6 +174,32 @@ type LoadStats struct {
 	// EdgesUpdated is the number of existing relationship edges updated.
 	EdgesUpdated int `json:"edges_updated,omitempty"`
 
+	// EdgesCorrected is the number of existing relationship edges that were
+	// found disconnected from their intended endpoints (e.g. a dangling or
+	// mis-pointed row left by a prior purge+reimport) and were repaired so a
+	// traversal from the intended source now reaches the intended target.
+	// Distinct from EdgesUpdated: a correction repairs topology, not just
+	// properties, so a loader that tracks this separately should report it
+	// here rather than folding it into EdgesUpdated.
+	EdgesCorrected int `json:"edges_corrected,omitempty"`
+
+	// EdgesRetired is the number of previously-live relationship edges that
+	// were closed (soft-deleted, never hard-deleted) because a newly created
+	// edge for the same source and predicate superseded them with a
+	// different target — a re-parent under a cardinality-capped predicate
+	// (e.g. a relocated sensor's hasLocation edge moving from Room A to Room
+	// B). Distinct from EdgesCorrected: a retirement closes a DIFFERENT edge
+	// than the one just created, not the same row.
+	EdgesRetired int `json:"edges_retired,omitempty"`
+
+	// EdgesRevived is the number of relationship edges that matched an
+	// existing (but currently retired) row and were reactivated — a
+	// re-parent that cycled back to a target the source held before.
+	// Distinct from both EdgesCreated (no new row was written) and
+	// EdgesUpdated (the row's retirement state needed clearing, not just its
+	// properties).
+	EdgesRevived int `json:"edges_revived,omitempty"`
+
 	// RecordsRead is the total number of source records processed.
 	RecordsRead int `json:"records_read,omitempty"`
 
