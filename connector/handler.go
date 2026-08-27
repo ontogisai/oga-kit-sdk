@@ -16,8 +16,18 @@ type SourceConnector interface {
 	Bindings(ctx context.Context) []Binding
 
 	// Connect establishes credentials and verifies connectivity to the
-	// external system(s). Called once before any Sync/HandleWebhook. Returning
-	// an error aborts startup.
+	// external system(s). Called once, AFTER the HTTP server (including
+	// /livez and /healthz) has already started listening and Bindings() has
+	// been read.
+	//
+	// Returning an error no longer aborts the process (OGA-874) — it marks the
+	// connector's initial health state as degraded, and the HTTP server keeps
+	// serving (webhook routes stay registered, poll loops still start)
+	// regardless. A connector that returns an error here MUST ensure its
+	// Health(ctx) method reflects that failure (or a subsequent recovery) so
+	// the platform's monitor and the console can observe it. An external
+	// system being unreachable at boot is an expected, transient condition —
+	// not a reason to crash-loop the container.
 	Connect(ctx context.Context) error
 
 	// Sync runs one poll batch for a binding. The connector fetches changes
@@ -47,4 +57,18 @@ type ValidationHandler interface {
 	// ValidateWebhook handles the provider's challenge for a binding and
 	// returns the body to echo back (e.g. the challenge token).
 	ValidateWebhook(ctx context.Context, b Binding, query map[string][]string) ([]byte, error)
+}
+
+// Prober is implemented by a connector whose Health(ctx) may serve a cached
+// verdict. TestConnection forces a fresh check against every binding's
+// external system, bypassing any cache/throttle, and returns the resulting
+// per-binding Health map.
+//
+// Optional (OGA-874): a connector that does not implement this is probed via
+// a plain Health(ctx) call instead by the server's
+// POST /connector/test-connection handler — best-effort, since the SDK
+// cannot force a cache bypass it was never told how to perform. Symmetric
+// with egress.Prober.
+type Prober interface {
+	TestConnection(ctx context.Context) map[string]Health
 }

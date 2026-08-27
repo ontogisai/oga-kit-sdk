@@ -13,10 +13,18 @@ import "context"
 // keeps shared state must serialize access to it.
 type Component interface {
 	// Connect establishes credentials and verifies connectivity to the external
-	// system. Called ONCE at startup, before any Sync. Returning an error aborts
-	// startup, which is deliberate: a component that cannot reach its external
-	// system should fail its readiness rather than accept batches it will fail
-	// one entity at a time.
+	// system. Called ONCE at startup, AFTER the HTTP server (including
+	// /livez and /healthz) has already started listening.
+	//
+	// Returning an error no longer aborts the process (OGA-874) — it marks the
+	// component's initial health state as degraded, and the HTTP server keeps
+	// serving regardless. A component that returns an error here MUST ensure
+	// its Health(ctx) method reflects that failure (or a subsequent recovery)
+	// so the platform's monitor and the console can observe it; the SDK does
+	// not synthesize a health state on the component's behalf beyond serving
+	// whatever Health(ctx) last reported. An external system being
+	// unreachable at boot is an expected, transient condition — not a reason
+	// to crash-loop the container.
 	Connect(ctx context.Context) error
 
 	// Sync pushes one homogeneous batch to the external system and records a
@@ -87,6 +95,21 @@ type OntologyTypeSyncer interface {
 	// its business key for the external system and travels as a property, because
 	// that is the value the external system stores and matches on.
 	SyncOntologyTypes(ctx context.Context, req *SyncRequest, b *Batch) error
+}
+
+// Prober is implemented by a Component whose Health(ctx) may serve a cached
+// verdict. TestConnection forces a fresh check against the external system,
+// bypassing any cache/throttle, and returns the resulting Health.
+//
+// Optional (OGA-874): a Component that does not implement this is probed via
+// a plain Health(ctx) call instead by the server's POST /egress/test-connection
+// handler — best-effort, since the SDK cannot force a cache bypass it was
+// never told how to perform. A component with a throttled re-probe pattern
+// (cache a verdict, re-probe on a timer) should implement this so an
+// operator's explicit "Test Connection" click is never answered with a stale
+// cached failure.
+type Prober interface {
+	TestConnection(ctx context.Context) Health
 }
 
 // Health is a component's health report, served as the JSON body of

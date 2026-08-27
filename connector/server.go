@@ -78,10 +78,20 @@ func (c *Config) defaults() {
 	}
 }
 
-// ListenAndServe runs a Source Connector: it calls Connect, starts one poll
-// loop per poll-enabled binding, serves the internal webhook + health
-// endpoints, and blocks until ctx is cancelled or SIGTERM/SIGINT arrives, then
-// drains poll loops and shuts the HTTP server down gracefully.
+// ListenAndServe runs a Source Connector: it binds the HTTP listener, calls
+// Connect, starts one poll loop per poll-enabled binding, serves the internal
+// webhook + health + livez endpoints, and blocks until ctx is cancelled or
+// SIGTERM/SIGINT arrives, then drains poll loops and shuts the HTTP server
+// down gracefully.
+//
+// Connect is called AFTER the listener is up (OGA-874). A Connect failure is
+// logged and left for the connector's own Health(ctx) to reflect — it no
+// longer aborts startup. Bindings() is read regardless of Connect's outcome:
+// a connector's binding declaration is static kit metadata and does not
+// depend on connectivity, so the connector still registers its webhook routes
+// and poll-loop scaffolding while its external system is down. See the
+// [SourceConnector] doc comment for the full contract; the rationale is
+// recorded in .kiro/specs/sidecar-external-dependency-health/design.md.
 func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) error {
 	if cfg == nil {
 		return errors.New("connector.ListenAndServe: nil config")
@@ -106,10 +116,6 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if err := impl.Connect(runCtx); err != nil {
-		return fmt.Errorf("connector connect: %w", err)
-	}
-
 	bindings := impl.Bindings(runCtx)
 	if len(bindings) == 0 {
 		return errors.New("connector.ListenAndServe: connector declares no bindings")
@@ -119,15 +125,6 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 		return berr
 	}
 	s.bindings = byID
-
-	// Poll loops (one per poll-enabled binding).
-	var wg sync.WaitGroup
-	for _, b := range bindings {
-		if !b.Mode.pollEnabled() {
-			continue
-		}
-		wg.Go(func() { s.pollBinding(runCtx, b) })
-	}
 
 	server := &http.Server{
 		Addr:              ":" + strings.TrimPrefix(cfg.Port, ":"),
@@ -147,6 +144,27 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 		}
 		serveErr <- nil
 	}()
+
+	// Connect AFTER the listener is up and bindings are registered. A failure
+	// here is a recorded health fact, not a startup abort — /livez already
+	// answers 200, and /healthz reflects whatever the connector's own
+	// Health(ctx) reports. The per-binding poll loops still start below: a
+	// struggling Sync just keeps failing and retrying on its own cadence,
+	// which is already-existing, already-correct behavior.
+	if err := impl.Connect(runCtx); err != nil {
+		cfg.Logger.Error("source connector: initial connect failed; serving in a degraded state",
+			"error", err)
+		// No return — the process keeps running and serving /livez + /healthz.
+	}
+
+	// Poll loops (one per poll-enabled binding).
+	var wg sync.WaitGroup
+	for _, b := range bindings {
+		if !b.Mode.pollEnabled() {
+			continue
+		}
+		wg.Go(func() { s.pollBinding(runCtx, b) })
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -247,11 +265,22 @@ func (c *countingWriter) WriteHierarchy(ctx context.Context, h transfer.Hierarch
 	return nil
 }
 
+// PathLivez and PathTestConnection are unprefixed (livez, platform-wide
+// convention) and connector-namespaced (test-connection, mirroring the egress
+// contract's /egress/test-connection) respectively. See handleLivez and
+// handleTestConnection (OGA-874).
+const (
+	PathLivez          = "/livez"
+	PathTestConnection = "/connector/test-connection"
+)
+
 func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/{binding}", s.handleWebhook)
 	mux.HandleFunc("GET /webhook/{binding}", s.handleWebhookValidate)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET "+PathLivez, s.handleLivez)
+	mux.HandleFunc("POST "+PathTestConnection, s.handleTestConnection)
 	return mux
 }
 
@@ -382,7 +411,43 @@ func (s *server) handleWebhookValidate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	health := s.impl.Health(r.Context())
+	s.writeHealthMap(w, s.impl.Health(r.Context()))
+}
+
+// handleLivez answers 200 as soon as the process is up — it has no dependency
+// on Connect, Bindings, or Health(ctx) at all. This is the endpoint the
+// platform's K8s readiness/liveness probes target for this role (OGA-874): a
+// container that can answer this is doing its job of being a process,
+// regardless of whether its external system is currently reachable.
+func (s *server) handleLivez(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleTestConnection forces a fresh connectivity check against every
+// binding's external system, bypassing any cache/throttle the connector
+// applies to Health, and returns the resulting per-binding map. It introduces
+// no other side effect — no Sync, no webhook processing (Correctness Property
+// P3 in the design doc, symmetric with the egress contract).
+//
+// A connector implementing the optional [Prober] interface is asked to force
+// a fresh probe of ALL bindings (a connector's Connect typically covers every
+// binding's shared credential/session in one call); otherwise the server
+// falls back to a plain Health(ctx) call, which may return a cached verdict.
+func (s *server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
+	var health map[string]Health
+	if p, ok := s.impl.(Prober); ok {
+		health = p.TestConnection(r.Context())
+	} else {
+		health = s.impl.Health(r.Context())
+	}
+	s.writeHealthMap(w, health)
+}
+
+// writeHealthMap is the shared response-writer for both /healthz and
+// /connector/test-connection: the "is every declared binding OK" verdict
+// plus the per-binding detail, so the two endpoints cannot disagree on how a
+// health map maps to an HTTP status.
+func (s *server) writeHealthMap(w http.ResponseWriter, health map[string]Health) {
 	allOK := len(health) > 0
 	for _, b := range s.bindings {
 		h, ok := health[b.ID]

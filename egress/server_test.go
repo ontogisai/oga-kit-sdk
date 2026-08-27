@@ -357,11 +357,97 @@ func TestListenAndServe_Validation(t *testing.T) {
 	if err := ListenAndServe(ctx, &Config{Port: "0"}, nil); err == nil {
 		t.Error("nil impl accepted")
 	}
-	// A component that cannot reach its external system must fail startup rather
-	// than accept batches it would fail one entity at a time.
-	err := ListenAndServe(ctx, &Config{Port: "0"}, &stubComponent{connect: errBoom})
-	if err == nil || !errors.Is(err, errBoom) {
-		t.Errorf("connect failure = %v, want it to abort startup", err)
+}
+
+// OGA-874: a component that cannot reach its external system at startup must
+// NOT abort the process — the HTTP server (including /livez and /healthz)
+// must still come up, so the container is never crash-looped over a transient
+// third-party outage. Property P1 in the design doc.
+func TestListenAndServe_ConnectFailureDoesNotAbortStartup(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	impl := &stubComponent{connect: errBoom, health: Health{OK: false, Message: "not connected"}}
+	cfg := &Config{Port: "0", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	done := make(chan error, 1)
+	go func() { done <- ListenAndServe(ctx, cfg, impl) }()
+
+	// ListenAndServe must not return promptly with the connect error — it
+	// should be running (serving), not exited. Give it a moment, then cancel
+	// to unblock a genuinely-running server.
+	select {
+	case err := <-done:
+		t.Fatalf("ListenAndServe returned early (err=%v); a Connect failure must not abort startup", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("ListenAndServe error after cancel = %v, want nil", err)
+	}
+}
+
+// /livez never depends on Health; /healthz does — both are exercised directly
+// against the mux, independent of the ListenAndServe timing test above.
+func TestLivez_AlwaysOKRegardlessOfHealth(t *testing.T) {
+	impl := &stubComponent{health: Health{OK: false, Message: "external system down"}}
+	w := httptest.NewRecorder()
+	quietServer(impl).mux().ServeHTTP(w, httptest.NewRequest(http.MethodGet, PathLivez, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200 even when Health reports unhealthy", PathLivez, w.Code)
+	}
+}
+
+// probeComponent implements Prober so TestConnection can be exercised
+// independent of Health.
+type probeComponent struct {
+	stubComponent
+	probe func(ctx context.Context) Health
+}
+
+func (p *probeComponent) TestConnection(ctx context.Context) Health {
+	return p.probe(ctx)
+}
+
+var _ Prober = (*probeComponent)(nil)
+
+func TestTestConnection_UsesProberWhenImplemented(t *testing.T) {
+	called := false
+	impl := &probeComponent{
+		stubComponent: stubComponent{health: Health{OK: false, Message: "stale cache"}},
+		probe: func(context.Context) Health {
+			called = true
+			return Health{OK: true, Message: "fresh probe succeeded"}
+		},
+	}
+	w := httptest.NewRecorder()
+	quietServer(impl).mux().ServeHTTP(w, httptest.NewRequest(http.MethodPost, PathTestConnection, nil))
+	if !called {
+		t.Fatal("TestConnection was not invoked; the server fell back to Health despite Prober being implemented")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var got Health
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.OK != true || got.Message != "fresh probe succeeded" {
+		t.Errorf("body = %+v, want the fresh probe result, not the cached Health", got)
+	}
+}
+
+func TestTestConnection_FallsBackToHealthWhenNoProber(t *testing.T) {
+	impl := &stubComponent{health: Health{OK: false, Message: "auth expired"}}
+	w := httptest.NewRecorder()
+	quietServer(impl).mux().ServeHTTP(w, httptest.NewRequest(http.MethodPost, PathTestConnection, nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+	var got Health
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.OK || got.Message != "auth expired" {
+		t.Errorf("body = %+v, want the component's plain Health() result", got)
 	}
 }
 
