@@ -23,8 +23,16 @@ import (
 // role, and an unprefixed /sync would make it ambiguous which contract a request
 // belongs to.
 //
-// /healthz is deliberately UNPREFIXED: it is the platform-wide sidecar
-// convention the health monitor probes and must not be role-specific.
+// /healthz and /livez are deliberately UNPREFIXED: they are platform-wide
+// sidecar conventions and must not be role-specific.
+//
+// /livez answers 200 as soon as the process is up and serving — it has no
+// dependency on Connect or Health, and is what the platform's readiness and
+// liveness probes target for this role (OGA-874). /healthz stays the
+// external-dependency signal, backed by Component.Health; it is informational
+// to the platform now, never the target of a probe that can kill the
+// container. See the [Component] doc comment for the full contract.
+//
 // NOTE: there is no entity-types introspection path. GET /egress/entity-types
 // was removed in SJ24K-8 (platform half: OGA-855) — its own contract note said
 // the MANIFEST is authoritative, which is the argument against serving a second,
@@ -37,9 +45,11 @@ import (
 // the same anchor in both lanes), so before the split a component had to infer the
 // kind from the payload. See [OntologyTypeSyncer].
 const (
-	PathSync         = "/egress/sync"
-	PathOntologySync = "/egress/ontology-sync"
-	PathHealthz      = "/healthz"
+	PathSync           = "/egress/sync"
+	PathOntologySync   = "/egress/ontology-sync"
+	PathHealthz        = "/healthz"
+	PathLivez          = "/livez"
+	PathTestConnection = "/egress/test-connection"
 )
 
 // Lane labels for LOGS ONLY.
@@ -132,9 +142,17 @@ func (e *ThrottleError) Error() string {
 // Unwrap exposes the underlying cause.
 func (e *ThrottleError) Unwrap() error { return e.Err }
 
-// ListenAndServe runs an egress component: it calls Connect, serves the sync and
-// health routes, and blocks until ctx is cancelled or SIGTERM/SIGINT arrives,
-// then shuts the HTTP server down gracefully.
+// ListenAndServe runs an egress component: it binds the HTTP listener, calls
+// Connect, serves the sync/health/livez routes, and blocks until ctx is
+// cancelled or SIGTERM/SIGINT arrives, then shuts the HTTP server down
+// gracefully.
+//
+// Connect is called AFTER the listener is up (OGA-874). A Connect failure is
+// logged and left for the component's own Health(ctx) to reflect — it no
+// longer aborts startup. See the [Component] doc comment for the full
+// contract; the rationale (container readiness must never depend on
+// external-system reachability) is recorded in
+// .kiro/specs/sidecar-external-dependency-health/design.md.
 func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 	if cfg == nil {
 		return errors.New("egress.ListenAndServe: nil config")
@@ -149,14 +167,6 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	// Connect before listening. A component that cannot reach its external
-	// system should fail startup rather than accept batches it would fail one
-	// entity at a time — a failed run of 10,000 per-entity failures is far harder
-	// for an operator to read than a sidecar that never came up.
-	if err := impl.Connect(runCtx); err != nil {
-		return fmt.Errorf("egress connect: %w", err)
-	}
 
 	s := &server{cfg: cfg, impl: impl}
 	srv := &http.Server{
@@ -177,6 +187,17 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 		}
 		serveErr <- nil
 	}()
+
+	// Connect AFTER the listener is up. A failure here is a recorded health
+	// fact, not a startup abort — /livez already answers 200, and /healthz
+	// reflects whatever the component's own Health(ctx) reports (a component
+	// with no cached-health tracking of its own answers unhealthy until
+	// Connect is retried, e.g. via the test-connection endpoint below).
+	if err := impl.Connect(runCtx); err != nil {
+		cfg.Logger.Error("egress component: initial connect failed; serving in a degraded state",
+			"error", err)
+		// No return — the process keeps running and serving /livez + /healthz.
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -212,6 +233,8 @@ func (s *server) mux() http.Handler {
 	mux.HandleFunc("POST "+PathSync, s.handleSync)
 	mux.HandleFunc("POST "+PathOntologySync, s.handleOntologySync)
 	mux.HandleFunc("GET "+PathHealthz, s.handleHealth)
+	mux.HandleFunc("GET "+PathLivez, s.handleLivez)
+	mux.HandleFunc("POST "+PathTestConnection, s.handleTestConnection)
 	return mux
 }
 
@@ -359,6 +382,38 @@ func (s *server) writeSyncError(w http.ResponseWriter, req *SyncRequest, lane st
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	h := s.impl.Health(r.Context())
+	code := http.StatusOK
+	if !h.OK {
+		code = http.StatusServiceUnavailable
+	}
+	s.writeJSON(w, code, h)
+}
+
+// handleLivez answers 200 as soon as the process is up — it has no dependency
+// on Connect or Health(ctx) at all. This is the endpoint the platform's K8s
+// readiness/liveness probes target for this role (OGA-874): a container that
+// can answer this is doing its job of being a process, regardless of whether
+// its external dependency is currently reachable.
+func (s *server) handleLivez(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleTestConnection forces a fresh connectivity check against the external
+// system, bypassing any cache/throttle the component applies to Health, and
+// returns the resulting Health. It introduces no other side effect — no sync,
+// no data push (Correctness Property P3 in the design doc).
+//
+// A component implementing the optional [Prober] interface is asked to force
+// a fresh probe; otherwise the server falls back to a plain Health(ctx) call,
+// which may return a cached verdict — best-effort, since the SDK cannot force
+// a cache bypass it was never told how to perform.
+func (s *server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
+	var h Health
+	if p, ok := s.impl.(Prober); ok {
+		h = p.TestConnection(r.Context())
+	} else {
+		h = s.impl.Health(r.Context())
+	}
 	code := http.StatusOK
 	if !h.OK {
 		code = http.StatusServiceUnavailable
