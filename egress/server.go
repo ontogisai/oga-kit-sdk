@@ -46,11 +46,12 @@ import (
 // the same anchor in both lanes), so before the split a component had to infer the
 // kind from the payload. See [OntologyTypeSyncer].
 const (
-	PathSync           = "/egress/sync"
-	PathOntologySync   = "/egress/ontology-sync"
-	PathHealthz        = "/healthz"
-	PathLivez          = "/livez"
-	PathTestConnection = "/egress/test-connection"
+	PathSync             = "/egress/sync"
+	PathOntologySync     = "/egress/ontology-sync"
+	PathRelationshipSync = "/egress/relationship-sync"
+	PathHealthz          = "/healthz"
+	PathLivez            = "/livez"
+	PathTestConnection   = "/egress/test-connection"
 )
 
 // Lane labels for LOGS ONLY.
@@ -62,6 +63,7 @@ const (
 const (
 	laneLabelEntities      = "entities"
 	laneLabelOntologyTypes = "ontology_types"
+	laneLabelRelationships = "relationships"
 )
 
 // DefaultMaxRequestBytes caps a decoded push body. A batch is bounded by the
@@ -287,6 +289,7 @@ func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+PathSync, s.handleSync)
 	mux.HandleFunc("POST "+PathOntologySync, s.handleOntologySync)
+	mux.HandleFunc("POST "+PathRelationshipSync, s.handleRelationshipSync)
 	mux.HandleFunc("GET "+PathHealthz, s.handleHealth)
 	mux.HandleFunc("GET "+PathLivez, s.handleLivez)
 	mux.HandleFunc("POST "+PathTestConnection, s.handleTestConnection)
@@ -333,6 +336,130 @@ func (s *server) handleOntologySync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.servePush(w, r, laneLabelOntologyTypes, syncer.SyncOntologyTypes)
+}
+
+// handleRelationshipSync serves the relationships lane, or reports that this
+// component does not implement it.
+//
+// The relationships lane carries a DIFFERENT request/batch shape
+// (RelationshipSyncRequest / RelationshipBatch, not SyncRequest / Batch), so
+// unlike handleOntologySync it cannot delegate to servePush — that function's
+// pushFunc signature is entity/ontology-shaped. serveRelationshipPush below is
+// its exact counterpart for this lane, sharing the same gating and logging
+// behavior by construction rather than by copying it correctly twice.
+func (s *server) handleRelationshipSync(w http.ResponseWriter, r *http.Request) {
+	syncer, ok := s.impl.(RelationshipSyncer)
+	if !ok {
+		// See handleOntologySync for why this is 501, checked before decoding,
+		// and logged at ERROR — the same reasoning applies verbatim, substituting
+		// "relationships_sync" for "ontology_sync" and RelationshipSyncer for
+		// OntologyTypeSyncer.
+		const msg = "this component does not serve the relationships lane: it does not implement " +
+			"egress.RelationshipSyncer. The manifest declares a relationships_sync block, so the " +
+			"running image is out of step with it — implement SyncRelationships, and pin the " +
+			"signature with `var _ egress.RelationshipSyncer = (*yourComponent)(nil)`"
+		s.cfg.Logger.Error("egress relationship push rejected: component does not implement RelationshipSyncer",
+			"path", PathRelationshipSync, "lane", laneLabelRelationships)
+		http.Error(w, "egress: "+msg, http.StatusNotImplemented)
+		return
+	}
+	s.serveRelationshipPush(w, r, syncer.SyncRelationships)
+}
+
+// relationshipPushFunc is the relationships-lane call, mirroring pushFunc.
+type relationshipPushFunc func(ctx context.Context, req *RelationshipSyncRequest, b *RelationshipBatch) error
+
+// serveRelationshipPush is servePush's exact counterpart for the relationships
+// lane: same connectPending gate, same decode-then-homogeneity-then-dispatch
+// order, same malformed-verdict ERROR logging, same throttle/error mapping via
+// writeSyncError (which is response-shape-agnostic — it only ever reads the
+// request's batch_id/entity_type-equivalent fields for logging, so it is
+// reused as-is below with the relationship request's fields substituted in a
+// throwaway SyncRequest-shaped log context).
+func (s *server) serveRelationshipPush(w http.ResponseWriter, r *http.Request, push relationshipPushFunc) {
+	if s.connectPending.Load() {
+		const msg = "component is still completing its initial Connect; retry shortly"
+		s.cfg.Logger.Warn("egress push rejected: initial connect still in flight", "lane", laneLabelRelationships)
+		http.Error(w, msg, http.StatusServiceUnavailable)
+		return
+	}
+
+	req, err := s.decodeRelationshipSync(w, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Relationships) == 0 {
+		s.writeJSON(w, http.StatusOK, SyncResponse{Results: []SyncResult{}})
+		return
+	}
+
+	b := newRelationshipBatch(req.Relationships)
+	if syncErr := push(r.Context(), req, b); syncErr != nil {
+		s.writeRelationshipSyncError(w, req, syncErr)
+		return
+	}
+
+	results, defects := b.Results()
+	for _, d := range defects {
+		s.cfg.Logger.Error("egress component returned a malformed verdict; normalized to a per-relationship failure",
+			"batch_id", req.BatchID, "lane", laneLabelRelationships, "predicate", req.Predicate, "defect", d)
+	}
+	s.writeJSON(w, http.StatusOK, SyncResponse{Results: results})
+}
+
+// decodeRelationshipSync reads and validates one relationships-lane push body.
+// Mirrors decodeSync's rules — unknown fields accepted (forward-compat), a
+// required identity field, homogeneity enforced, batch_id absence logged not
+// rejected — substituting Predicate for EntityType as the homogeneity label.
+func (s *server) decodeRelationshipSync(w http.ResponseWriter, r *http.Request) (*RelationshipSyncRequest, error) {
+	var req RelationshipSyncRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBytes))
+	if err := dec.Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return nil, fmt.Errorf("push body exceeds %d bytes", s.cfg.MaxRequestBytes)
+		}
+		return nil, fmt.Errorf("decode push body: %w", err)
+	}
+	if req.Predicate == "" {
+		return nil, errors.New("predicate is required")
+	}
+	// Homogeneity: one predicate per call, exactly like EntityType's rule on
+	// the other two lanes.
+	for i := range req.Relationships {
+		if p := req.Relationships[i].Predicate; p != "" && p != req.Predicate {
+			return nil, fmt.Errorf(
+				"batch is not homogeneous: relationships[%d].predicate = %q, request predicate = %q",
+				i, p, req.Predicate)
+		}
+	}
+	if req.BatchID == "" {
+		s.cfg.Logger.Warn("egress push carries no batch_id; redelivery cannot be deduplicated",
+			"predicate", req.Predicate, "mode", string(req.Mode))
+	}
+	return &req, nil
+}
+
+// writeRelationshipSyncError is writeSyncError's counterpart for the
+// relationships lane — same status mapping (throttle → 429 with Retry-After,
+// else 500), logged with the relationship batch's own identity fields instead
+// of a SyncRequest's.
+func (s *server) writeRelationshipSyncError(w http.ResponseWriter, req *RelationshipSyncRequest, err error) {
+	var te *ThrottleError
+	if errors.As(err, &te) && te.After > 0 {
+		s.cfg.Logger.Warn("egress batch throttled by external system",
+			"batch_id", req.BatchID, "lane", laneLabelRelationships, "predicate", req.Predicate,
+			"retry_after", te.After.String(), "error", err)
+		w.Header().Set("Retry-After", strconv.Itoa(int(te.After.Round(time.Second).Seconds())))
+		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		return
+	}
+	s.cfg.Logger.Error("egress batch failed",
+		"batch_id", req.BatchID, "lane", laneLabelRelationships, "predicate", req.Predicate,
+		"mode", string(req.Mode), "relationships", len(req.Relationships), "error", err)
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 // servePush is one push, whichever lane it belongs to.

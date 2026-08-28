@@ -1102,3 +1102,130 @@ func validEgressSpecForOntologyLane() EgressSyncSpec {
 		Container:      SidecarContainerSpec{Image: "ghcr.io/x/egress@sha256:abc123"},
 	}
 }
+
+// validEgressSpecForRelationshipLane is a component that passes every check, so
+// each relationship-lane test below mutates exactly the field it is about.
+func validEgressSpecForRelationshipLane() EgressSyncSpec {
+	return EgressSyncSpec{
+		Name:           "core-egress-sync",
+		ExternalSystem: "24k-core",
+		EntitiesSync:   []EgressEntityTypeSpec{{Name: "Equipment"}, {Name: "Location"}},
+		RelationshipsSync: []EgressRelationshipSyncSpec{
+			{Predicate: "feeds", SourceType: "Equipment", TargetType: "Equipment"},
+			{Predicate: "feeds", SourceType: "Equipment", TargetType: "Location", IncludeDescendants: true},
+		},
+		Container: SidecarContainerSpec{Image: "ghcr.io/x/egress@sha256:abc123"},
+	}
+}
+
+// A well-formed relationships_sync declaration, including two entries sharing a
+// predicate but scoped to different endpoint pairs (the exact shape OGA-875's
+// design requires for `feeds`), passes.
+func TestValidateEgressSyncs_RelationshipSyncAccepted(t *testing.T) {
+	e := validEgressSpecForRelationshipLane()
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("valid relationships_sync declaration rejected: %v", err)
+	}
+}
+
+// predicate is required — there is no default, since it both selects the read
+// and identifies the batch's homogeneity label.
+func TestValidateEgressSyncs_RelationshipSyncRequiresPredicate(t *testing.T) {
+	e := validEgressSpecForRelationshipLane()
+	e.RelationshipsSync = []EgressRelationshipSyncSpec{{SourceType: "Equipment", TargetType: "Equipment"}}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+		t.Fatal("expected an error for a relationship entry with no predicate")
+	}
+}
+
+// source_type is required — a relationship entry must scope BOTH endpoints, since
+// one predicate name can span several distinct anchor pairs (feeds spans
+// Equipment->Equipment and Equipment->Location in the sj24k campus export).
+func TestValidateEgressSyncs_RelationshipSyncRequiresSourceType(t *testing.T) {
+	e := validEgressSpecForRelationshipLane()
+	e.RelationshipsSync = []EgressRelationshipSyncSpec{{Predicate: "feeds", TargetType: "Equipment"}}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+		t.Fatal("expected an error for a relationship entry with no source_type")
+	}
+}
+
+// target_type is required, the mirror image of source_type above.
+func TestValidateEgressSyncs_RelationshipSyncRequiresTargetType(t *testing.T) {
+	e := validEgressSpecForRelationshipLane()
+	e.RelationshipsSync = []EgressRelationshipSyncSpec{{Predicate: "feeds", SourceType: "Equipment"}}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+		t.Fatal("expected an error for a relationship entry with no target_type")
+	}
+}
+
+// Blank (whitespace-only) fields are not a legal way to satisfy the required-field
+// check — the same discipline the ontology anchor check applies.
+func TestValidateEgressSyncs_RelationshipSyncBlankFieldsAreNotValues(t *testing.T) {
+	e := validEgressSpecForRelationshipLane()
+	e.RelationshipsSync = []EgressRelationshipSyncSpec{{Predicate: "feeds", SourceType: "  ", TargetType: "Equipment"}}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+		t.Fatal("expected an error for a relationship entry with a blank source_type")
+	}
+}
+
+// A repeated (predicate, source_type, target_type) tuple is the SAME push twice,
+// not a bigger one — the tuple resolves the whole read scope, so a duplicate is
+// rejected the same way a duplicate ontology anchor is.
+func TestValidateEgressSyncs_RelationshipSyncRejectsDuplicateTuple(t *testing.T) {
+	e := validEgressSpecForRelationshipLane()
+	e.RelationshipsSync = []EgressRelationshipSyncSpec{
+		{Predicate: "feeds", SourceType: "Equipment", TargetType: "Equipment"},
+		{Predicate: "feeds", SourceType: "Equipment", TargetType: "Equipment"},
+	}
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err == nil {
+		t.Fatal("expected an error for a duplicate (predicate, source_type, target_type) tuple")
+	}
+}
+
+// Two entries sharing a predicate but scoped to DIFFERENT target types are not a
+// duplicate — this is the exact shape the design requires for `feeds`
+// (Equipment->Equipment vs Equipment->Location) and must be accepted.
+func TestValidateEgressSyncs_RelationshipSyncSamePredicateDifferentTargetIsNotADuplicate(t *testing.T) {
+	e := validEgressSpecForRelationshipLane() // already carries this exact shape
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("two entries sharing a predicate but scoped to different target types must be accepted: %v", err)
+	}
+}
+
+// An absent relationships_sync block is legal — the lane is entirely optional, and
+// a component declaring none must not be rejected for it.
+func TestValidateEgressSyncs_RelationshipSyncAbsentIsAccepted(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	e.RelationshipsSync = nil
+	if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+		t.Fatalf("a component declaring no relationships_sync must be accepted: %v", err)
+	}
+}
+
+// RelationshipEntityTypes returns the distinct source_type/target_type names in
+// declared order, deduplicated — what the platform's convergence gate
+// (OGA-EGRS-VAL-1008) reads to decide which entity types must have converged
+// before a relationships-scoped run may proceed.
+func TestEgressSyncSpec_RelationshipEntityTypes(t *testing.T) {
+	e := validEgressSpecForRelationshipLane()
+	got := e.RelationshipEntityTypes()
+	want := []string{"Equipment", "Location"} // Equipment appears 3x across both entries, deduplicated
+	if len(got) != len(want) {
+		t.Fatalf("RelationshipEntityTypes() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("RelationshipEntityTypes()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// No relationships_sync declared ⇒ no entity types to converge-check, not a panic
+// or a spurious empty-but-non-nil slice that a caller might mistake for "declared,
+// but empty".
+func TestEgressSyncSpec_RelationshipEntityTypesAbsentIsNil(t *testing.T) {
+	e := validEgressSpecForOntologyLane()
+	if got := e.RelationshipEntityTypes(); got != nil {
+		t.Errorf("RelationshipEntityTypes() = %v, want nil", got)
+	}
+}
