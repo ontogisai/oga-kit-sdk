@@ -53,6 +53,22 @@ type Config struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+
+	// Background Connect retry (OGA-874). When the INITIAL Connect attempt
+	// fails, the SDK retries it on an exponential backoff until it succeeds or
+	// the context ends, so a connector recovers from a transient upstream
+	// outage without an operator pressing anything and without every kit author
+	// hand-rolling their own re-probe loop. This matters more for a connector
+	// than for an egress component: its poll loops keep running through the
+	// outage, so without the retry a connector that never established
+	// credentials would poll fruitlessly forever.
+	//
+	// Zero values apply defaultConnectRetryInitialDelay /
+	// defaultConnectRetryMaxDelay. Set DisableConnectRetry to opt out and own
+	// recovery yourself.
+	ConnectRetryInitialDelay time.Duration
+	ConnectRetryMaxDelay     time.Duration
+	DisableConnectRetry      bool
 }
 
 func (c *Config) defaults() {
@@ -160,14 +176,23 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 	// Webhook delivery is gated 503 for the duration of this call (see
 	// server.connectPending). Cleared in a defer so a panicking Connect cannot
 	// strand the connector refusing every delivery.
+	connectFailed := false
 	func() {
 		defer s.connectPending.Store(false)
 		if err := impl.Connect(runCtx); err != nil {
 			cfg.Logger.Error("source connector: initial connect failed; serving in a degraded state",
 				"error", err)
+			connectFailed = true
 			// No return — the process keeps running and serving /livez + /healthz.
 		}
 	}()
+
+	// Retry ONLY when the initial attempt failed, so a connector whose Connect
+	// succeeded is never called again and the happy path keeps the original
+	// "called once" contract.
+	if connectFailed && !cfg.DisableConnectRetry {
+		go retryConnect(runCtx, cfg, impl)
+	}
 
 	// Poll loops (one per poll-enabled binding).
 	var wg sync.WaitGroup

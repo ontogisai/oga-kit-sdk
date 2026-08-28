@@ -89,6 +89,20 @@ type Config struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+
+	// Background Connect retry (OGA-874). When the INITIAL Connect attempt
+	// fails, the SDK retries it on an exponential backoff until it succeeds or
+	// the context ends, so a component recovers from a transient external
+	// outage without an operator pressing anything and without every kit author
+	// hand-rolling their own re-probe loop.
+	//
+	// Zero values apply defaultConnectRetryInitialDelay /
+	// defaultConnectRetryMaxDelay. Set DisableConnectRetry to opt out entirely
+	// and own recovery yourself (e.g. a component that re-probes inside its own
+	// Health, as coreegress.Component does).
+	ConnectRetryInitialDelay time.Duration
+	ConnectRetryMaxDelay     time.Duration
+	DisableConnectRetry      bool
 }
 
 func (c *Config) defaults() {
@@ -202,14 +216,23 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 	// is already accepting, so without the gate a batch could arrive before the
 	// component holds the credentials Connect establishes. Cleared in a defer
 	// so a panicking Connect cannot strand the component refusing every push.
+	connectFailed := false
 	func() {
 		defer s.connectPending.Store(false)
 		if err := impl.Connect(runCtx); err != nil {
 			cfg.Logger.Error("egress component: initial connect failed; serving in a degraded state",
 				"error", err)
+			connectFailed = true
 			// No return — the process keeps running and serving /livez + /healthz.
 		}
 	}()
+
+	// Retry ONLY when the initial attempt failed. A component whose Connect
+	// succeeded is never called again, which is what keeps the happy path
+	// byte-identical to the original "called ONCE at startup" contract.
+	if connectFailed && !cfg.DisableConnectRetry {
+		go retryConnect(runCtx, cfg, impl)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
