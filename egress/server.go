@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -169,6 +170,9 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 	defer cancel()
 
 	s := &server{cfg: cfg, impl: impl}
+	// Set BEFORE the listener starts accepting, so there is no instant at which
+	// a push could be accepted ahead of the initial Connect attempt.
+	s.connectPending.Store(true)
 	srv := &http.Server{
 		Addr:              ":" + strings.TrimPrefix(cfg.Port, ":"),
 		Handler:           s.mux(),
@@ -193,11 +197,19 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 	// reflects whatever the component's own Health(ctx) reports (a component
 	// with no cached-health tracking of its own answers unhealthy until
 	// Connect is retried, e.g. via the test-connection endpoint below).
-	if err := impl.Connect(runCtx); err != nil {
-		cfg.Logger.Error("egress component: initial connect failed; serving in a degraded state",
-			"error", err)
-		// No return — the process keeps running and serving /livez + /healthz.
-	}
+	//
+	// The push lanes are gated 503 for the duration of this call: the listener
+	// is already accepting, so without the gate a batch could arrive before the
+	// component holds the credentials Connect establishes. Cleared in a defer
+	// so a panicking Connect cannot strand the component refusing every push.
+	func() {
+		defer s.connectPending.Store(false)
+		if err := impl.Connect(runCtx); err != nil {
+			cfg.Logger.Error("egress component: initial connect failed; serving in a degraded state",
+				"error", err)
+			// No return — the process keeps running and serving /livez + /healthz.
+		}
+	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -226,6 +238,26 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl Component) error {
 type server struct {
 	cfg  *Config
 	impl Component
+
+	// connectPending is true from the moment ListenAndServe binds the listener
+	// until the initial Connect attempt has COMPLETED (whether it succeeded or
+	// failed). While it is set, the push lanes answer 503 rather than accepting
+	// a batch (OGA-874).
+	//
+	// This exists because binding before Connect (the OGA-874 fix) opened a
+	// window that could not exist before: the listener is up, so /egress/sync
+	// is reachable, while the component may not yet hold the credentials or
+	// session Connect establishes. Accepting a batch there would produce
+	// exactly the per-entity failure storm the ORIGINAL connect-before-listen
+	// ordering existed to prevent — so the ordering change must not cost that
+	// guarantee. Requirement 18 (a component that never fails Connect observes
+	// no behavior change) depends on this gate.
+	//
+	// The ZERO VALUE is deliberately "not pending": a server constructed
+	// directly (tests, or any future in-process embedding) has no Connect
+	// lifecycle to wait on, so it behaves exactly as it did before this field
+	// existed. Only ListenAndServe opts into the gate.
+	connectPending atomic.Bool
 }
 
 func (s *server) mux() http.Handler {
@@ -282,6 +314,18 @@ func (s *server) handleOntologySync(w http.ResponseWriter, r *http.Request) {
 
 // servePush is one push, whichever lane it belongs to.
 func (s *server) servePush(w http.ResponseWriter, r *http.Request, lane string, push pushFunc) {
+	// Checked BEFORE decoding, and before any component call: until the initial
+	// Connect attempt has completed the component may hold no credentials, so
+	// accepting this batch would fail it one entity at a time. 503 (not 4xx) so
+	// the platform treats it as retryable — the condition clears on its own
+	// within one Connect call. See server.connectPending.
+	if s.connectPending.Load() {
+		const msg = "component is still completing its initial Connect; retry shortly"
+		s.cfg.Logger.Warn("egress push rejected: initial connect still in flight", "lane", lane)
+		http.Error(w, msg, http.StatusServiceUnavailable)
+		return
+	}
+
 	req, err := s.decodeSync(w, r)
 	if err != nil {
 		// 400: the platform treats a non-429 4xx as PERMANENT and surfaces it

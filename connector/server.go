@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -126,6 +127,10 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 	}
 	s.bindings = byID
 
+	// Set BEFORE the listener starts accepting, so there is no instant at which
+	// a webhook delivery could be processed ahead of the initial Connect attempt.
+	s.connectPending.Store(true)
+
 	server := &http.Server{
 		Addr:              ":" + strings.TrimPrefix(cfg.Port, ":"),
 		Handler:           s.mux(),
@@ -151,11 +156,18 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 	// Health(ctx) reports. The per-binding poll loops still start below: a
 	// struggling Sync just keeps failing and retrying on its own cadence,
 	// which is already-existing, already-correct behavior.
-	if err := impl.Connect(runCtx); err != nil {
-		cfg.Logger.Error("source connector: initial connect failed; serving in a degraded state",
-			"error", err)
-		// No return — the process keeps running and serving /livez + /healthz.
-	}
+	//
+	// Webhook delivery is gated 503 for the duration of this call (see
+	// server.connectPending). Cleared in a defer so a panicking Connect cannot
+	// strand the connector refusing every delivery.
+	func() {
+		defer s.connectPending.Store(false)
+		if err := impl.Connect(runCtx); err != nil {
+			cfg.Logger.Error("source connector: initial connect failed; serving in a degraded state",
+				"error", err)
+			// No return — the process keeps running and serving /livez + /healthz.
+		}
+	}()
 
 	// Poll loops (one per poll-enabled binding).
 	var wg sync.WaitGroup
@@ -201,6 +213,24 @@ type server struct {
 	impl     SourceConnector
 	sink     TimeseriesSink
 	bindings map[string]Binding
+
+	// connectPending is true from the moment ListenAndServe binds the listener
+	// until the initial Connect attempt has COMPLETED (whether it succeeded or
+	// failed). While it is set, inbound webhook DELIVERY answers 503 rather
+	// than being processed (OGA-874). Symmetric with the egress server's gate;
+	// see that field's comment for the full rationale.
+	//
+	// The zero value is deliberately "not pending" so a directly-constructed
+	// server (tests) behaves exactly as it did before this field existed — only
+	// ListenAndServe opts into the gate.
+	//
+	// The webhook VALIDATION handshake (GET /webhook/{binding}) is deliberately
+	// NOT gated: it echoes a challenge token back to the provider to prove
+	// ownership of the endpoint, and many providers retry that only a fixed
+	// number of times before disabling the subscription. Failing it during a
+	// boot window would cost more than it protects, and unlike a delivery it
+	// does not push data into the graph.
+	connectPending atomic.Bool
 }
 
 // validateBindings rejects empty or duplicate binding IDs and invalid modes
@@ -358,6 +388,18 @@ func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	b, ok := s.bindings[r.PathValue("binding")]
 	if !ok || !b.Mode.webhookEnabled() {
 		http.Error(w, "unknown or non-webhook binding", http.StatusNotFound)
+		return
+	}
+	// Checked before reading the body: until the initial Connect attempt has
+	// completed the connector may hold no credentials, so processing this
+	// delivery could fail against the external system. 503 so the provider
+	// retries — the condition clears within one Connect call. See
+	// server.connectPending.
+	if s.connectPending.Load() {
+		const msg = "connector is still completing its initial Connect; retry shortly"
+		s.cfg.Logger.Warn("webhook delivery rejected: initial connect still in flight",
+			"binding", b.ID)
+		http.Error(w, msg, http.StatusServiceUnavailable)
 		return
 	}
 	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20)) // 8 MiB cap

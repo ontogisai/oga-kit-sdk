@@ -6,9 +6,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -337,5 +340,124 @@ func TestTestConnection_FallsBackToHealthWhenNoProber(t *testing.T) {
 	}
 	if got["wo"].OK || got["wo"].Message != "auth expired" {
 		t.Errorf("body = %+v, want the connector's plain Health() result", got)
+	}
+}
+
+// --- OGA-874 follow-up: webhook DELIVERY is gated until the initial Connect
+// attempt completes; the VALIDATION handshake deliberately is not.
+
+type blockingConnectConnector struct {
+	*fakeConnector
+	release    chan struct{}
+	webhookHit atomic.Bool
+}
+
+func (b *blockingConnectConnector) Connect(context.Context) error {
+	<-b.release
+	return nil
+}
+
+func TestHandleWebhook_Gated503UntilInitialConnectCompletes(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	inner := &fakeConnector{
+		bindings: []Binding{{ID: "wo", Mode: ModeWebhook}},
+		health:   map[string]Health{"wo": {OK: true}},
+	}
+	impl := &blockingConnectConnector{fakeConnector: inner, release: make(chan struct{})}
+	inner.webhookFn = func(context.Context, Binding, []byte, *Emitter) error {
+		impl.webhookHit.Store(true)
+		return nil
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	_ = ln.Close()
+
+	cfg := &Config{
+		Port:          port,
+		WriterFactory: func(context.Context, Binding) (transfer.Writer, error) { return &fakeWriter{}, nil },
+		PollInterval:  time.Hour,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	done := make(chan error, 1)
+	go func() { done <- ListenAndServe(ctx, cfg, impl) }()
+
+	base := "http://127.0.0.1:" + port
+	var up bool
+	for range 100 {
+		resp, gerr := http.Get(base + PathLivez)
+		if gerr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				up = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !up {
+		t.Fatal("/livez never answered 200; the listener must bind before Connect")
+	}
+
+	resp, err := http.Post(base+"/webhook/wo", "application/json", strings.NewReader(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	code := resp.StatusCode
+	_ = resp.Body.Close()
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("webhook delivery during in-flight Connect = %d, want 503", code)
+	}
+	if impl.webhookHit.Load() {
+		t.Error("HandleWebhook was called before the initial Connect attempt completed")
+	}
+
+	close(impl.release)
+	var opened bool
+	for range 100 {
+		r2, perr := http.Post(base+"/webhook/wo", "application/json", strings.NewReader(`{"x":1}`))
+		if perr == nil {
+			c := r2.StatusCode
+			_ = r2.Body.Close()
+			if c != http.StatusServiceUnavailable {
+				opened = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !opened {
+		t.Error("webhook delivery still refused after Connect completed; the gate must clear")
+	}
+
+	cancel()
+	<-done
+}
+
+// A directly-constructed server has no Connect lifecycle, so delivery must not
+// be gated — keeps every pre-existing webhook test valid.
+func TestHandleWebhook_DirectlyConstructedServerIsNotGated(t *testing.T) {
+	fc := &fakeConnector{
+		bindings: []Binding{{ID: "wo", Mode: ModeWebhook}},
+		webhookFn: func(context.Context, Binding, []byte, *Emitter) error {
+			return nil
+		},
+	}
+	s := newTestServer(fc, func(context.Context, Binding) (transfer.Writer, error) { return &fakeWriter{}, nil })
+	srv := httptest.NewServer(s.mux())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/webhook/wo", "application/json", strings.NewReader(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		t.Error("a directly-constructed server must not gate webhook delivery")
 	}
 }
