@@ -25,11 +25,14 @@ import (
 // against either parses identically under both, and a kit author gets the platform
 // installer's field-level errors locally instead of at install time.
 //
-// A component declares TWO lanes, and which of them a field belongs to is the first
-// thing to get right when reading this file. OntologySync pushes the tenant's
-// ontology TYPES (the external system's type catalog); EntitiesSync pushes
-// INSTANCES. The ontology lane always runs first, structurally, so a catalog row
-// can never reference an instance.
+// A component declares up to THREE lanes, and which of them a field belongs to is
+// the first thing to get right when reading this file. OntologySync pushes the
+// tenant's ontology TYPES (the external system's type catalog); EntitiesSync
+// pushes INSTANCES; RelationshipsSync pushes EDGES between already-pushed
+// instances (OGA-875). Ordering is structural, never declared: ontology always
+// runs before entities, so a catalog row can never reference an instance; and
+// relationships always run after entities, so an edge can never reference an
+// endpoint that has not yet been pushed and correlated.
 
 // Default batching knobs, mirroring the platform's domainkit defaults. Modest
 // on purpose: the scarce resource in an egress run is the EXTERNAL system, not
@@ -211,6 +214,24 @@ type EgressSyncSpec struct {
 	// round. That is the reason these are two blocks rather than one list in which
 	// some magic type name means "the catalog".
 	OntologySync []EgressOntologySyncSpec `yaml:"ontology_sync,omitempty"`
+
+	// RelationshipsSync declares the relationship lane (OGA-875, kg-egress-sync
+	// THIRD lane): edges pushed as records with two independently-resolved
+	// endpoints, rather than as a single entity's owner reference.
+	//
+	// It exists because ParentEdges cannot express a many_to_many predicate: an
+	// owner reference is single-valued per declared edge, and forcing a
+	// many_to_many relationship through it means either lying about
+	// cardinality or picking one target arbitrarily. A relationship record is
+	// not a vertex with one owner — it is an edge with two ends, each
+	// independently resolved, which is a materially different read and payload
+	// shape and so gets its own lane.
+	//
+	// Structurally required to run AFTER EntitiesSync, exactly like OntologySync
+	// is required to run BEFORE it: both of a relationship's endpoints must
+	// already be correlated in the external system before the edge can
+	// reference them.
+	RelationshipsSync []EgressRelationshipSyncSpec `yaml:"relationships_sync,omitempty"`
 
 	// EntitiesSync are the entity types to push, in the order they must be pushed.
 	//
@@ -441,6 +462,61 @@ type EgressOntologySyncSpec struct {
 	IncludeParents bool `yaml:"include_parents,omitempty"`
 }
 
+// EgressRelationshipSyncSpec is one relationship-lane entry: a predicate,
+// scoped to the source and target entity types (anchors) it applies to.
+//
+// TWO SCOPE FIELDS, on purpose, because one predicate name can span several
+// distinct (source-anchor, target-anchor) pairs in real data. Measured on the
+// sj24k campus export, `feeds` alone spans Equipment→Equipment (709 edges,
+// mapping to the external system's asset-to-asset shape) and
+// Equipment→Location (344 edges, mapping to its asset-to-space shape) — and
+// only a declaration that names BOTH ends can tell the platform which read
+// belongs to which external target. Declaring the predicate alone (mirroring
+// EgressOntologySyncSpec's minimalism) would read every edge of that name
+// regardless of endpoint and silently cross-feed the two shapes into each
+// other.
+//
+// Unlike EgressOntologySyncSpec, the platform genuinely cannot infer this
+// scope from a predicate name — there is no "the adjacency is a column it
+// owns" shortcut here, because a relationship type may legitimately connect
+// several different anchor pairs and the platform has no way to know which
+// pair THIS entry means without being told.
+type EgressRelationshipSyncSpec struct {
+	// Predicate is the source-native relationship type name (e.g. "feeds"),
+	// verbatim — matches the platform's internal storage predicate name and the
+	// batch's own Predicate field exactly, the same rule Name follows on
+	// EgressEntityTypeSpec.
+	Predicate string `yaml:"predicate"`
+
+	// SourceType is the declared entity type (or anchor) this predicate's
+	// SOURCE endpoint (out() side) is scoped to. REQUIRED: there is no
+	// traversal-direction ambiguity to declare here, unlike ParentEdges — the
+	// source is always the edge's out() endpoint — but the ANCHOR PAIR still
+	// has to be stated, because that is what disambiguates one declared entry
+	// from another sharing the same predicate.
+	SourceType string `yaml:"source_type"`
+
+	// TargetType is the declared entity type (or anchor) this predicate's
+	// TARGET endpoint (in() side) is scoped to. REQUIRED, same reasoning as
+	// SourceType.
+	TargetType string `yaml:"target_type"`
+
+	// IncludeDescendants selects every entity type stored under the same
+	// physical anchor as SourceType/TargetType, rather than each alone —
+	// mirroring EgressEntityTypeSpec.IncludeDescendants exactly, including its
+	// forward-compatibility rationale: declaring the coarse anchor here means a
+	// class added under it later (a future Studio export adding a
+	// feeds-to-Room edge, say) is picked up with NO manifest change, rather
+	// than requiring the kit to have anticipated every leaf in advance.
+	//
+	// Applies to BOTH endpoints as one flag, not independently per endpoint:
+	// splitting it into SourceIncludeDescendants/TargetIncludeDescendants was
+	// considered and rejected as needless generality — no declared entry in
+	// practice needs one endpoint's descendants closed and the other's not,
+	// and a single flag is simpler to validate and to reason about.
+	IncludeDescendants bool `yaml:"include_descendants,omitempty"`
+}
+
 // EffectiveImage returns the component's container image, preferring the
 // canonical Container.Image and falling back to the deprecated top-level Image
 // (OGA-637). Every reader of an egress image — validation here, and the
@@ -509,6 +585,37 @@ func (e *EgressSyncSpec) OntologyAnchors() []string {
 		if a := e.OntologySync[i].Anchor; a != "" {
 			out = append(out, a)
 		}
+	}
+	return out
+}
+
+// RelationshipEntityTypes returns the distinct source_type/target_type names
+// the relationship lane declares, in declared order, skipping empty entries
+// and duplicates.
+//
+// This is what the platform's convergence gate (OGA-EGRS-VAL-1008) reads to
+// decide which entity types must have converged in the entities lane before a
+// relationships-scoped run may proceed — every endpoint the relationship lane
+// resolves must already be pushed and correlated.
+func (e *EgressSyncSpec) RelationshipEntityTypes() []string {
+	if len(e.RelationshipsSync) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(e.RelationshipsSync)*2)
+	out := make([]string, 0, len(e.RelationshipsSync)*2)
+	add := func(t string) {
+		if t == "" {
+			return
+		}
+		if _, dup := seen[t]; dup {
+			return
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	for i := range e.RelationshipsSync {
+		add(e.RelationshipsSync[i].SourceType)
+		add(e.RelationshipsSync[i].TargetType)
 	}
 	return out
 }
@@ -622,6 +729,61 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 				return err
 			}
 		}
+		if err := validateEgressRelationshipSync(i, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateEgressRelationshipSync checks the relationship lane
+// (spec.egress_syncs[].relationships_sync[]): every entry names a predicate
+// and both endpoint types, and no (predicate, source_type, target_type) tuple
+// is declared twice.
+//
+// Mirrors validateEgressOntologySync's shape. What is deliberately NOT checked
+// here — that the predicate is a PHYSICAL relationship type, and that
+// source_type/target_type each resolve against a declared entities_sync type —
+// needs the tenant's active ontology, so it stays install-time only
+// (domainkit.validateRelationshipSync raises OGA-EGRS-VAL-1011/1012 for those).
+func validateEgressRelationshipSync(i int, e *EgressSyncSpec) error {
+	if len(e.RelationshipsSync) == 0 {
+		return nil
+	}
+	type tuple struct{ predicate, source, target string }
+	seen := make(map[tuple]int, len(e.RelationshipsSync))
+	for j := range e.RelationshipsSync {
+		rs := &e.RelationshipsSync[j]
+		predicate := strings.TrimSpace(rs.Predicate)
+		source := strings.TrimSpace(rs.SourceType)
+		target := strings.TrimSpace(rs.TargetType)
+		if predicate == "" {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].relationships_sync[%d]: predicate is required", i, j)
+		}
+		if source == "" {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].relationships_sync[%d]: source_type is required — a relationship "+
+					"entry must scope BOTH endpoints, since one predicate name can span several distinct "+
+					"anchor pairs", i, j)
+		}
+		if target == "" {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].relationships_sync[%d]: target_type is required — a relationship "+
+					"entry must scope BOTH endpoints, since one predicate name can span several distinct "+
+					"anchor pairs", i, j)
+		}
+		key := tuple{predicate, source, target}
+		if prev, dup := seen[key]; dup {
+			return fmt.Errorf(
+				"spec.egress_syncs[%d].relationships_sync[%d]: (predicate=%q, source_type=%q, "+
+					"target_type=%q) duplicates spec.egress_syncs[%d].relationships_sync[%d]; one entry "+
+					"per (predicate, source_type, target_type) tuple, since the tuple resolves the whole "+
+					"read scope",
+				i, j, predicate, source, target, i, prev,
+			)
+		}
+		seen[key] = j
 	}
 	return nil
 }
