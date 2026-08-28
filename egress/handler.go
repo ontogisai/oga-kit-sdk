@@ -31,6 +31,15 @@ type Component interface {
 	// component still holds the guarantee it had when Connect ran before the
 	// listener was bound — it will not be handed a batch without having had
 	// its chance to establish credentials.
+	//
+	// ⚠️ Connect is called ONCE when it SUCCEEDS, but is RETRIED on an
+	// exponential backoff when it fails, until it succeeds or the process ends
+	// (Config.DisableConnectRetry opts out). So an implementation MUST be
+	// idempotent: re-establishing credentials or a session on a later call has
+	// to be safe, and must not leak the resources of a previous attempt. This
+	// is what lets a component recover from a transient outage on its own
+	// instead of staying degraded until an operator intervenes — a component
+	// whose Connect succeeds first time sees no change at all.
 	Connect(ctx context.Context) error
 
 	// Sync pushes one homogeneous batch to the external system and records a

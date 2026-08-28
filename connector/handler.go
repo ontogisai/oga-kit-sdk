@@ -34,6 +34,16 @@ type SourceConnector interface {
 	// attempt has completed. The webhook VALIDATION handshake (GET) is not
 	// gated — it proves endpoint ownership to the provider and does not push
 	// data into the graph.
+	//
+	// ⚠️ Connect is called ONCE when it SUCCEEDS, but is RETRIED on an
+	// exponential backoff when it fails, until it succeeds or the process ends
+	// (Config.DisableConnectRetry opts out). So an implementation MUST be
+	// idempotent: re-establishing credentials or a session on a later call has
+	// to be safe, and must not leak the resources of a previous attempt. This
+	// matters here because the poll loops keep running through an outage — a
+	// connector that never established credentials would otherwise poll
+	// fruitlessly forever. A connector whose Connect succeeds first time sees
+	// no change at all.
 	Connect(ctx context.Context) error
 
 	// Sync runs one poll batch for a binding. The connector fetches changes
