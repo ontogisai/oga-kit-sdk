@@ -28,6 +28,12 @@ type SourceConnector interface {
 	// the platform's monitor and the console can observe it. An external
 	// system being unreachable at boot is an expected, transient condition —
 	// not a reason to crash-loop the container.
+	//
+	// Neither Sync nor HandleWebhook is called before this returns: poll loops
+	// start after it, and webhook DELIVERY answers 503 until the initial
+	// attempt has completed. The webhook VALIDATION handshake (GET) is not
+	// gated — it proves endpoint ownership to the provider and does not push
+	// data into the graph.
 	Connect(ctx context.Context) error
 
 	// Sync runs one poll batch for a binding. The connector fetches changes

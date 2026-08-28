@@ -25,6 +25,12 @@ type Component interface {
 	// whatever Health(ctx) last reported. An external system being
 	// unreachable at boot is an expected, transient condition — not a reason
 	// to crash-loop the container.
+	//
+	// Sync is never called before this returns: the SDK answers 503 on both
+	// push lanes until the initial Connect attempt has completed, so a
+	// component still holds the guarantee it had when Connect ran before the
+	// listener was bound — it will not be handed a batch without having had
+	// its chance to establish credentials.
 	Connect(ctx context.Context) error
 
 	// Sync pushes one homogeneous batch to the external system and records a

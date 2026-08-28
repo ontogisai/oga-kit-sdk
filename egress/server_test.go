@@ -7,9 +7,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -533,5 +536,160 @@ func TestEntityTypesEndpoint_IsNotServed(t *testing.T) {
 			`"mode":"bulk","batch_id":"b1","entities":[]}`)))
 	if w.Code != http.StatusOK {
 		t.Errorf("POST %s = %d, want 200; body=%s", PathSync, w.Code, w.Body.String())
+	}
+}
+
+// --- OGA-874 follow-up: the push lanes are gated until the initial Connect
+// attempt completes, so binding the listener first does not cost the guarantee
+// that Sync is never called before Connect had its chance (Requirement 18).
+
+// blockingConnectComponent holds Connect open until release is closed, so a
+// push can be issued while the initial attempt is demonstrably still in flight.
+type blockingConnectComponent struct {
+	stubComponent
+	release  chan struct{}
+	syncSeen atomic.Bool
+}
+
+func (b *blockingConnectComponent) Connect(context.Context) error {
+	<-b.release
+	return nil
+}
+
+func (b *blockingConnectComponent) Sync(context.Context, *SyncRequest, *Batch) error {
+	b.syncSeen.Store(true)
+	return nil
+}
+
+func TestServePush_Gated503UntilInitialConnectCompletes(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	impl := &blockingConnectComponent{release: make(chan struct{})}
+	// Bind a real listener on an ephemeral port so the request path is the same
+	// one production takes — the gate lives in servePush, but the flag is only
+	// set by ListenAndServe, so a mux-only test could not exercise it.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	_ = ln.Close()
+
+	cfg := &Config{Port: port, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	done := make(chan error, 1)
+	go func() { done <- ListenAndServe(ctx, cfg, impl) }()
+
+	base := "http://127.0.0.1:" + port
+	// Wait for the listener, using /livez — which is deliberately NOT gated.
+	var up bool
+	for range 100 {
+		resp, gerr := http.Get(base + PathLivez)
+		if gerr == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				up = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !up {
+		t.Fatal("/livez never answered 200; the listener must bind before Connect")
+	}
+
+	// Connect is still blocked, so a push must be refused 503 — and must NOT
+	// reach the component.
+	body := `{"entity_type":"Room","entities":[{"id":"e1","entity_type":"Room"}]}`
+	resp, err := http.Post(base+PathSync, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	gotCode := resp.StatusCode
+	_ = resp.Body.Close()
+	if gotCode != http.StatusServiceUnavailable {
+		t.Errorf("push during in-flight Connect = %d, want 503", gotCode)
+	}
+	if impl.syncSeen.Load() {
+		t.Error("Sync was called before the initial Connect attempt completed")
+	}
+
+	// Release Connect; the lane must open.
+	close(impl.release)
+	var opened bool
+	for range 100 {
+		r2, perr := http.Post(base+PathSync, "application/json", strings.NewReader(body))
+		if perr == nil {
+			code := r2.StatusCode
+			_ = r2.Body.Close()
+			if code != http.StatusServiceUnavailable {
+				opened = true
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !opened {
+		t.Error("push still refused after Connect completed; the gate must clear")
+	}
+	if !impl.syncSeen.Load() {
+		t.Error("Sync was never called after Connect completed")
+	}
+
+	cancel()
+	<-done
+}
+
+// A FAILED Connect must still open the lane: the component is degraded, and it
+// is the component's own Health/Sync that reports that — the SDK must not
+// refuse pushes forever on its behalf.
+func TestServePush_GateClearsEvenWhenConnectFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	_ = ln.Close()
+
+	impl := &stubComponent{connect: errBoom, health: Health{OK: false}}
+	cfg := &Config{Port: port, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	done := make(chan error, 1)
+	go func() { done <- ListenAndServe(ctx, cfg, impl) }()
+
+	base := "http://127.0.0.1:" + port
+	body := `{"entity_type":"Room","entities":[{"id":"e1","entity_type":"Room"}]}`
+	var code int
+	for range 100 {
+		resp, perr := http.Post(base+PathSync, "application/json", strings.NewReader(body))
+		if perr == nil {
+			code = resp.StatusCode
+			_ = resp.Body.Close()
+			if code != http.StatusServiceUnavailable {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if code == http.StatusServiceUnavailable {
+		t.Error("lane still gated after a FAILED Connect; the gate must clear either way")
+	}
+
+	cancel()
+	<-done
+}
+
+// A directly-constructed server has no Connect lifecycle, so it must not be
+// gated — this is what keeps every pre-existing mux-level test valid.
+func TestServePush_DirectlyConstructedServerIsNotGated(t *testing.T) {
+	impl := &stubComponent{}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, PathSync,
+		strings.NewReader(`{"entity_type":"Room","entities":[{"id":"e1","entity_type":"Room"}]}`))
+	quietServer(impl).mux().ServeHTTP(w, req)
+	if w.Code == http.StatusServiceUnavailable {
+		t.Error("a directly-constructed server must not gate pushes (zero value = not pending)")
 	}
 }
