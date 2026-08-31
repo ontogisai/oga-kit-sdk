@@ -1,5 +1,11 @@
 package egress
 
+import (
+	"fmt"
+	"strings"
+	"unicode"
+)
+
 // Wire types for the egress HTTP contract. These mirror the platform's
 // internal/egress contract structs field-for-field, including every JSON tag —
 // the two live in different repositories, so the tags ARE the contract. See
@@ -282,7 +288,109 @@ type SyncResult struct {
 
 	// Error is a human-readable per-entity reason, for failed outcomes. It
 	// reaches the operator's run report, so make it actionable.
+	//
+	// LEGACY, and retained only for that: it is what a platform predating
+	// ReasonDetail reads. [Batch.Failed] still populates it, so a component needs
+	// no change. A SKIPPED result never sets it — a consumer keying on
+	// `error != ""` must never see a success dressed as a failure.
 	Error string `json:"error,omitempty"`
+
+	// ReasonCode is the STABLE, machine-readable classification of why this
+	// record was skipped or failed. Valid on `skipped` and `failed` alike; never
+	// set on created/updated, which need no reason.
+	//
+	// This is the field the operator's run report GROUPS BY, which is the whole
+	// reason it exists separately from the prose: a report that tallied a
+	// free-text message would key on wording, so re-phrasing a message would
+	// silently split one cause into two and an operator could not tell whether
+	// one cause dominated a step. Prefer a small closed vocabulary the component
+	// reuses (`predicate_unmapped`, `entity_type_excluded`) over a per-record
+	// string.
+	//
+	// Empty is a legitimate, honest answer — see [Batch.Skipped]. The platform
+	// tallies an unattributed verdict under a code of its own that says exactly
+	// that, rather than inventing a cause.
+	//
+	// Two prefixes are RESERVED and a component's code may not use them:
+	// "platform:" for codes the platform mints for its own verdicts, and "sdk:"
+	// for the ones this package mints (see the ReasonCode* constants). A code
+	// carrying either is dropped with a defect rather than forwarded, so a
+	// component can never make its own classification read as the platform's.
+	ReasonCode string `json:"reason_code,omitempty"`
+
+	// ReasonDetail is the human prose behind ReasonCode — the specifics a code
+	// cannot carry, such as WHICH field was missing or WHICH predicate had no
+	// mapping. Valid on `skipped` and `failed` alike.
+	//
+	// On a failure it carries the same text as Error; the duplication is
+	// deliberate and cheap, and it is what lets a kit author treat
+	// (ReasonCode, ReasonDetail) as meaning one thing on both verdicts instead of
+	// remembering that one of them reports its prose in a field called "error".
+	ReasonDetail string `json:"reason_detail,omitempty"`
+}
+
+// Reason codes this package mints, for the three component bugs
+// [Batch.Results] normalizes into a per-record failure rather than propagating.
+//
+// They exist so the operator's report can group them: before them, all three
+// arrived as distinct prose sentences and a run whose component returned no
+// verdict for 300 records reported 300 individually-worded failures with no
+// indication they shared one cause.
+//
+// The "sdk:" prefix is reserved — a component's own code may not use it, so a
+// code in this namespace is always one this package assigned.
+const (
+	// ReasonCodeNoVerdict: the component recorded nothing for a requested id.
+	ReasonCodeNoVerdict = "sdk:no_verdict"
+	// ReasonCodeUnrecognizedOutcome: the outcome was not one of the four.
+	ReasonCodeUnrecognizedOutcome = "sdk:unrecognized_outcome"
+	// ReasonCodeMissingExternalRecordID: created/updated with no external id.
+	ReasonCodeMissingExternalRecordID = "sdk:missing_external_record_id"
+	// ReasonCodeNoReason: the component failed a record without saying why.
+	ReasonCodeNoReason = "sdk:no_reason"
+)
+
+// reservedReasonPrefixes may not appear on a component-supplied reason code.
+//
+// "platform:" is the platform's own namespace and "sdk:" is this package's. A
+// component that could write either would be able to make its own guess read as
+// an authoritative classification in the run report.
+var reservedReasonPrefixes = []string{"platform:", "sdk:"}
+
+// maxReasonCodeLen bounds a reason code.
+//
+// A code is a grouping key that the platform carries in a bounded per-step tally
+// across every workflow continuation, so an unbounded one would put arbitrary
+// kit-authored bytes into that payload. 64 is far more than a real vocabulary
+// needs; anything longer is prose that belongs in the detail.
+const maxReasonCodeLen = 64
+
+// normalizeReasonCode validates a component-supplied reason code, returning the
+// code to record and a defect description when it was refused.
+//
+// A refused code is DROPPED rather than replaced: the verdict itself is still
+// recorded, and the platform then reports the record as unattributed — which is
+// true — instead of carrying a classification the component is not entitled to.
+func normalizeReasonCode(code string) (string, string) {
+	trimmed := strings.TrimSpace(code)
+	if trimmed == "" {
+		return "", ""
+	}
+	if len(trimmed) > maxReasonCodeLen {
+		return "", fmt.Sprintf("reason code %q exceeds %d bytes and was dropped; "+
+			"a code is a grouping key, so put the specifics in the detail", trimmed, maxReasonCodeLen)
+	}
+	if strings.ContainsFunc(trimmed, unicode.IsSpace) {
+		return "", fmt.Sprintf("reason code %q contains whitespace and was dropped; "+
+			"a code is a grouping key, so put the specifics in the detail", trimmed)
+	}
+	for _, p := range reservedReasonPrefixes {
+		if strings.HasPrefix(trimmed, p) {
+			return "", fmt.Sprintf("reason code %q uses the reserved %q prefix and was dropped; "+
+				"that namespace belongs to the platform, not to a component", trimmed, p)
+		}
+	}
+	return trimmed, ""
 }
 
 // SyncResponse is the body of a push reply, on either lane.

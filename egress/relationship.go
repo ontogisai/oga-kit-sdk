@@ -18,7 +18,10 @@ package egress
 // the other two lanes. Only the REQUEST side needs a new shape, because a
 // relationship carries two endpoints instead of one set of properties.
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // RelationshipEndpoint is one end of a relationship — a resolved
 // (entity_id, entity_type, correlation) triple.
@@ -177,25 +180,46 @@ func (b *RelationshipBatch) Updated(id, externalRecordID string) {
 	b.record(SyncResult{ID: id, Outcome: OutcomeUpdated, ExternalRecordID: externalRecordID})
 }
 
-// Skipped records that this relationship needs no external record.
+// Skipped records that this relationship needs no external record, with no
+// reason given.
 //
-// This is the right verdict for an unmapped predicate (Requirement 5.2 of the
-// design): a predicate the kit's mapping table does not recognize is
-// deliberately declined, never guessed onto one of the external system's
-// enum values, and Skipped is what keeps that a SUCCESS rather than a
-// failure.
+// ⚠️ An unmapped predicate is NOT this method's case, even though it was written
+// for it. Declining to guess one of the external system's enum values is the
+// right call (Requirement 5.2 of the design), and Skipped is the right verdict
+// for keeping it a SUCCESS — but a bare skip reaches the operator as a bare
+// number, so a run that pushed NONE of a predicate's edges is indistinguishable
+// from one where every edge was already current. Use
+// [RelationshipBatch.SkippedReason] with a stable code for that; keep this for a
+// skip that genuinely has nothing to explain.
 func (b *RelationshipBatch) Skipped(id string) {
 	b.record(SyncResult{ID: id, Outcome: OutcomeSkipped})
+}
+
+// SkippedReason is [RelationshipBatch.Skipped] with a cause the operator's run
+// report can group by and read. See [Batch.SkippedReason] — identical rules,
+// substituting "relationship" for "entity".
+func (b *RelationshipBatch) SkippedReason(id, code, detail string) {
+	b.record(SyncResult{
+		ID:           id,
+		Outcome:      OutcomeSkipped,
+		ReasonCode:   b.reasonCode(id, code),
+		ReasonDetail: strings.TrimSpace(detail),
+	})
 }
 
 // Failed records a per-relationship failure. See [Batch.Failed] — the same
 // rule applies: this fails THIS relationship only, and an empty reason is
 // replaced with a placeholder rather than left blank.
 func (b *RelationshipBatch) Failed(id, reason string) {
+	code := ""
 	if reason == "" {
 		reason = "component reported a failure without a reason"
+		code = ReasonCodeNoReason
 	}
-	b.record(SyncResult{ID: id, Outcome: OutcomeFailed, Error: reason})
+	b.record(SyncResult{
+		ID: id, Outcome: OutcomeFailed,
+		Error: reason, ReasonCode: code, ReasonDetail: reason,
+	})
 }
 
 // FailedErr is [RelationshipBatch.Failed] with an error value.
@@ -205,6 +229,33 @@ func (b *RelationshipBatch) FailedErr(id string, err error) {
 		reason = err.Error()
 	}
 	b.Failed(id, reason)
+}
+
+// FailedReason is [RelationshipBatch.Failed] with a stable classification
+// alongside the prose. See [Batch.FailedReason].
+func (b *RelationshipBatch) FailedReason(id, code, detail string) {
+	detail = strings.TrimSpace(detail)
+	normalized := b.reasonCode(id, code)
+	if detail == "" {
+		detail = "component reported a failure without a reason"
+		if normalized == "" {
+			normalized = ReasonCodeNoReason
+		}
+	}
+	b.record(SyncResult{
+		ID: id, Outcome: OutcomeFailed,
+		Error: detail, ReasonCode: normalized, ReasonDetail: detail,
+	})
+}
+
+// reasonCode mirrors Batch.reasonCode: a refused code is dropped with a defect,
+// never substituted.
+func (b *RelationshipBatch) reasonCode(id, code string) string {
+	out, defect := normalizeReasonCode(code)
+	if defect != "" {
+		b.defects = append(b.defects, "id "+id+": "+defect)
+	}
+	return out
 }
 
 // Record stores an arbitrary verdict. Prefer the named helpers.
@@ -247,26 +298,20 @@ func (b *RelationshipBatch) Results() ([]SyncResult, []string) {
 		r, ok := b.results[id]
 		if !ok {
 			defects = append(defects, "no verdict for requested id "+id)
-			out = append(out, SyncResult{
-				ID: id, Outcome: OutcomeFailed,
-				Error: "component returned no verdict for this relationship",
-			})
+			out = append(out, normalizedFailure(id, ReasonCodeNoVerdict,
+				"component returned no verdict for this relationship"))
 			continue
 		}
 		if !r.Outcome.Valid() {
 			defects = append(defects, "unrecognized outcome "+string(r.Outcome)+" for id "+id)
-			out = append(out, SyncResult{
-				ID: id, Outcome: OutcomeFailed,
-				Error: "component reported unrecognized outcome " + string(r.Outcome),
-			})
+			out = append(out, normalizedFailure(id, ReasonCodeUnrecognizedOutcome,
+				"component reported unrecognized outcome "+string(r.Outcome)))
 			continue
 		}
 		if (r.Outcome == OutcomeCreated || r.Outcome == OutcomeUpdated) && r.ExternalRecordID == "" {
 			defects = append(defects, "outcome "+string(r.Outcome)+" for id "+id+" carries no external_record_id")
-			out = append(out, SyncResult{
-				ID: id, Outcome: OutcomeFailed,
-				Error: "component reported " + string(r.Outcome) + " without an external_record_id",
-			})
+			out = append(out, normalizedFailure(id, ReasonCodeMissingExternalRecordID,
+				"component reported "+string(r.Outcome)+" without an external_record_id"))
 			continue
 		}
 		out = append(out, r)
