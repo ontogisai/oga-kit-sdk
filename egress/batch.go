@@ -1,6 +1,9 @@
 package egress
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Batch collects a component's per-entity verdicts for one push and builds a
 // response the platform will accept.
@@ -69,8 +72,34 @@ func (b *Batch) Updated(id, externalRecordID string) {
 // full of skips is a clean run. Do NOT use it to swallow a problem: a skipped
 // entity is never correlated and never retried, so an error reported as a skip
 // disappears permanently from the operator's view.
+//
+// It records NO reason, which is the honest verdict when there is none to give:
+// "already current" needs no explanation. Prefer [Batch.SkippedReason] whenever
+// the component knows WHY, because a bare skip reaches the operator as a number
+// they cannot attribute — they cannot tell a deliberate no-op from a whole class
+// of records silently not being pushed.
 func (b *Batch) Skipped(id string) {
 	b.record(SyncResult{ID: id, Outcome: OutcomeSkipped})
+}
+
+// SkippedReason is [Batch.Skipped] with a cause the operator's run report can
+// group by and read.
+//
+// It is a SEPARATE method rather than a required argument on Skipped for the
+// reason the bare form documents: a genuine "nothing to do" has no cause, and
+// forcing one would produce invented prose — which is worse than an honest
+// absence, because it looks like an answer.
+//
+// code is the STABLE grouping key and detail is the human specifics; see
+// [SyncResult.ReasonCode] for what makes a good code and which prefixes are
+// reserved. Either may be empty: with neither this is exactly [Batch.Skipped].
+func (b *Batch) SkippedReason(id, code, detail string) {
+	b.record(SyncResult{
+		ID:           id,
+		Outcome:      OutcomeSkipped,
+		ReasonCode:   b.reasonCode(id, code),
+		ReasonDetail: strings.TrimSpace(detail),
+	})
 }
 
 // Failed records a per-entity failure for id. reason reaches the operator's run
@@ -80,11 +109,22 @@ func (b *Batch) Skipped(id string) {
 // This fails THIS entity only — the rest of the batch is still correlated. For a
 // batch-wide fault return an error from Sync instead, which lets the platform
 // retry the whole batch.
+//
+// Prefer [Batch.FailedReason] when the component can classify the failure: the
+// report groups failures by code, so prose alone tallies every differently-worded
+// message as its own cause.
 func (b *Batch) Failed(id, reason string) {
+	code := ""
 	if reason == "" {
 		reason = "component reported a failure without a reason"
+		// A stable code for the ONE case this method can classify by itself. The
+		// placeholder prose says the same thing, but prose is not a grouping key.
+		code = ReasonCodeNoReason
 	}
-	b.record(SyncResult{ID: id, Outcome: OutcomeFailed, Error: reason})
+	b.record(SyncResult{
+		ID: id, Outcome: OutcomeFailed,
+		Error: reason, ReasonCode: code, ReasonDetail: reason,
+	})
 }
 
 // FailedErr is [Batch.Failed] with an error value.
@@ -94,6 +134,37 @@ func (b *Batch) FailedErr(id string, err error) {
 		reason = err.Error()
 	}
 	b.Failed(id, reason)
+}
+
+// FailedReason is [Batch.Failed] with a stable classification alongside the
+// prose, so the run report can tally the cause instead of the wording.
+//
+// detail is what Failed would have taken as its reason, and is subject to the
+// same placeholder rule — an empty one is never rendered blank.
+func (b *Batch) FailedReason(id, code, detail string) {
+	detail = strings.TrimSpace(detail)
+	normalized := b.reasonCode(id, code)
+	if detail == "" {
+		detail = "component reported a failure without a reason"
+		if normalized == "" {
+			normalized = ReasonCodeNoReason
+		}
+	}
+	b.record(SyncResult{
+		ID: id, Outcome: OutcomeFailed,
+		Error: detail, ReasonCode: normalized, ReasonDetail: detail,
+	})
+}
+
+// reasonCode validates a component-supplied code, recording a defect (which the
+// server logs at ERROR) when it is refused. A refused code is dropped, never
+// substituted: see normalizeReasonCode.
+func (b *Batch) reasonCode(id, code string) string {
+	out, defect := normalizeReasonCode(code)
+	if defect != "" {
+		b.defects = append(b.defects, fmt.Sprintf("id %q: %s", id, defect))
+	}
+	return out
 }
 
 // Record stores an arbitrary verdict. Prefer the named helpers; this exists for
@@ -157,31 +228,37 @@ func (b *Batch) Results() ([]SyncResult, []string) {
 		r, ok := b.results[id]
 		if !ok {
 			defects = append(defects, fmt.Sprintf("no verdict for requested id %q", id))
-			out = append(out, SyncResult{
-				ID: id, Outcome: OutcomeFailed,
-				Error: "component returned no verdict for this entity",
-			})
+			out = append(out, normalizedFailure(id, ReasonCodeNoVerdict,
+				"component returned no verdict for this entity"))
 			continue
 		}
 		if !r.Outcome.Valid() {
 			defects = append(defects, fmt.Sprintf(
 				"unrecognized outcome %q for id %q", r.Outcome, id))
-			out = append(out, SyncResult{
-				ID: id, Outcome: OutcomeFailed,
-				Error: fmt.Sprintf("component reported unrecognized outcome %q", r.Outcome),
-			})
+			out = append(out, normalizedFailure(id, ReasonCodeUnrecognizedOutcome,
+				fmt.Sprintf("component reported unrecognized outcome %q", r.Outcome)))
 			continue
 		}
 		if (r.Outcome == OutcomeCreated || r.Outcome == OutcomeUpdated) && r.ExternalRecordID == "" {
 			defects = append(defects, fmt.Sprintf(
 				"outcome %s for id %q carries no external_record_id", r.Outcome, id))
-			out = append(out, SyncResult{
-				ID: id, Outcome: OutcomeFailed,
-				Error: fmt.Sprintf("component reported %s without an external_record_id", r.Outcome),
-			})
+			out = append(out, normalizedFailure(id, ReasonCodeMissingExternalRecordID,
+				fmt.Sprintf("component reported %s without an external_record_id", r.Outcome)))
 			continue
 		}
 		out = append(out, r)
 	}
 	return out, defects
+}
+
+// normalizedFailure builds the per-record failure a component bug is turned into.
+//
+// Shared by both batch types so the two cannot drift in what they report, and so
+// the SDK-minted code and the prose that explains it are always assigned together
+// — a code with no prose is unreadable, prose with no code is ungroupable.
+func normalizedFailure(id, code, detail string) SyncResult {
+	return SyncResult{
+		ID: id, Outcome: OutcomeFailed,
+		Error: detail, ReasonCode: code, ReasonDetail: detail,
+	}
 }

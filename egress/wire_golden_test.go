@@ -61,6 +61,26 @@ const (
   ]
 }`
 
+	// The RESPONSE direction. Extended by OGA-880 with the two reason fields, and
+	// reconciled with the platform's own internal/egress/wire_golden_test.go copy in
+	// the same breath — before OGA-880 this literal existed only here, so it proved
+	// the SDK agreed with itself and could not have caught a platform-side rename.
+	//
+	// The six results cover every shape the platform must handle, and the last four
+	// are the ones that matter for drift:
+	//
+	//   eq-3  a BARE skip — no reason, which stays legitimate (a "nothing to do" skip
+	//         has nothing to explain), so both fields are OMITTED rather than present
+	//         and empty. A present-but-empty reason_code is a value a client could
+	//         read as an answer.
+	//   eq-4  a LEGACY failure carrying only `error`, which is what a component built
+	//         against a pre-OGA-880 SDK still sends. The platform must fall back to it.
+	//   eq-5  a skip WITH a reason, and NO `error` key: a skip is a SUCCESS, so a
+	//         consumer keying on `error != ""` must never see one. That omission is
+	//         the assertion, not an accident of omitempty.
+	//   eq-6  a failure with a code, whose prose appears in BOTH `error` (legacy) and
+	//         `reason_detail` (current). The duplication is deliberate — see
+	//         SyncResult.ReasonDetail.
 	platformResponseJSON = `{
   "results": [
     {
@@ -81,6 +101,19 @@ const (
       "id": "eq-4",
       "outcome": "failed",
       "error": "external system rejected payload: missing site"
+    },
+    {
+      "id": "eq-5",
+      "outcome": "skipped",
+      "reason_code": "entity_type_excluded",
+      "reason_detail": "BMS aggregations are deliberately not Core assets"
+    },
+    {
+      "id": "eq-6",
+      "outcome": "failed",
+      "error": "class \"sjcs:Unregistered\" is not routable to a Core target",
+      "reason_code": "target_unroutable",
+      "reason_detail": "class \"sjcs:Unregistered\" is not routable to a Core target"
     }
   ]
 }`
@@ -209,12 +242,7 @@ func TestSyncRequest_DecodesPlatformWire(t *testing.T) {
 // An SDK-marshalled response must reproduce the platform's wire bytes exactly,
 // including which fields omitempty drops.
 func TestSyncResponse_MarshalsToPlatformWire(t *testing.T) {
-	resp := SyncResponse{Results: []SyncResult{
-		{ID: "eq-1", Outcome: OutcomeCreated, ExternalRecordID: "CORE-90"},
-		{ID: "eq-2", Outcome: OutcomeUpdated, ExternalRecordID: "CORE-77"},
-		{ID: "eq-3", Outcome: OutcomeSkipped},
-		{ID: "eq-4", Outcome: OutcomeFailed, Error: "external system rejected payload: missing site"},
-	}}
+	resp := SyncResponse{Results: wireGoldenResults()}
 	got, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -231,14 +259,62 @@ func TestSyncResponse_DecodesPlatformWire(t *testing.T) {
 	if err := json.Unmarshal([]byte(platformResponseJSON), &resp); err != nil {
 		t.Fatalf("decode platform response: %v", err)
 	}
-	want := []SyncResult{
+	if want := wireGoldenResults(); !reflect.DeepEqual(resp.Results, want) {
+		t.Errorf("results = %+v, want %+v", resp.Results, want)
+	}
+}
+
+// wireGoldenResults is the Go value platformResponseJSON encodes.
+//
+// One definition drives both directions, so the marshal and decode assertions
+// cannot disagree about what the fixture means — which they could when each
+// spelled the slice out separately.
+func wireGoldenResults() []SyncResult {
+	const unroutable = `class "sjcs:Unregistered" is not routable to a Core target`
+	return []SyncResult{
 		{ID: "eq-1", Outcome: OutcomeCreated, ExternalRecordID: "CORE-90"},
 		{ID: "eq-2", Outcome: OutcomeUpdated, ExternalRecordID: "CORE-77"},
 		{ID: "eq-3", Outcome: OutcomeSkipped},
 		{ID: "eq-4", Outcome: OutcomeFailed, Error: "external system rejected payload: missing site"},
+		{
+			ID: "eq-5", Outcome: OutcomeSkipped,
+			ReasonCode:   "entity_type_excluded",
+			ReasonDetail: "BMS aggregations are deliberately not Core assets",
+		},
+		{
+			ID: "eq-6", Outcome: OutcomeFailed,
+			Error:        unroutable,
+			ReasonCode:   "target_unroutable",
+			ReasonDetail: unroutable,
+		},
 	}
-	if !reflect.DeepEqual(resp.Results, want) {
-		t.Errorf("results = %+v, want %+v", resp.Results, want)
+}
+
+// A skip must never carry the legacy `error` key, whatever else it carries.
+//
+// Asserted on the SDK's own builders rather than on a hand-built struct, because
+// the hazard is a builder writing the detail into Error out of symmetry with
+// Failed: a consumer keying on `error != ""` would then read a SUCCESS as a
+// failure, which is the one thing the skipped outcome exists to avoid.
+func TestSkippedVerdicts_NeverCarryTheLegacyErrorField(t *testing.T) {
+	b := newBatch([]Entity{{ID: "a"}, {ID: "b"}})
+	b.Skipped("a")
+	b.SkippedReason("b", "predicate_unmapped", "no Core enum mapping for this predicate")
+
+	rb := newRelationshipBatch([]Relationship{{ID: "r1"}, {ID: "r2"}})
+	rb.Skipped("r1")
+	rb.SkippedReason("r2", "predicate_unmapped", "no Core enum mapping for this predicate")
+
+	entityResults, _ := b.Results()
+	relResults, _ := rb.Results()
+	for _, r := range append(entityResults, relResults...) {
+		if r.Outcome != OutcomeSkipped {
+			t.Fatalf("id %q: outcome = %q, want skipped", r.ID, r.Outcome)
+		}
+		if r.Error != "" {
+			t.Errorf("id %q: skipped verdict carries error = %q; a skip is a SUCCESS and "+
+				"a consumer keying on error != \"\" would read it as a failure", r.ID, r.Error)
+		}
 	}
 }
 
