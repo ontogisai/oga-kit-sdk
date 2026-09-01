@@ -26,7 +26,10 @@ func TestMaterializeRemoteSource_HTTPDownloadsToFile(t *testing.T) {
 		t.Fatalf("SourceURI not rewritten to file://: %q", req.SourceURI)
 	}
 	path := strings.TrimPrefix(req.SourceURI, "file://")
-	got, err := os.ReadFile(path) //nolint:gosec // test temp path
+	// Test-only: path is the temp file materializeRemoteSource just created, and
+	// reading it back IS the assertion, so no untrusted input reaches the call.
+	// The semgrep suppression must sit on the sink line to take effect.
+	got, err := os.ReadFile(path) //nolint:gosec // test temp path -- nosemgrep: gosec.G304-1
 	if err != nil {
 		t.Fatalf("read materialized file: %v", err)
 	}

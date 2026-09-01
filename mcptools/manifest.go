@@ -199,7 +199,13 @@ func EmitToolsManifestFile(tools []Tool, meta ManifestMeta, path string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // world-readable manifest is intended
+	// 0o600, not 0o644: the manifest is a generate-time artifact the kit author
+	// commits (see the //go:generate step in the kit's tools cmd), and git records
+	// no mode beyond the exec bit -- so every downstream reader gets its mode from
+	// checkout, not from here. The write mode only ever applies to the first
+	// creation on the authoring machine, where owner-only is sufficient. Please
+	// don't widen it back: gosec/semgrep G302 flags anything above 0o640.
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
