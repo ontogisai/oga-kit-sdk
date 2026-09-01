@@ -231,6 +231,84 @@ For source files larger than `transfer.MultiPassThreshold` (5 MiB), kit authors 
 
 The SDK has no opinion about how the kit parses — only about how records leave the loader. The 5 MiB constant is a guideline, not an enforced threshold.
 
+## Source connectors
+
+A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding.
+
+Declare the bindings in the kit manifest and collapse them to the runtime mode with `connector.ModeFromStrings`:
+
+```yaml
+source_connectors:
+  - name: my-sync
+    bindings:
+      - id: upstream-feed
+        external_system: upstream
+        source_type: my_snapshot
+        modes: [webhook, poll]        # a LIST in the manifest…
+```
+
+```go
+// …one IngressMode at runtime. Use the SDK's resolver rather than writing your
+// own: the platform provisions ingress from the manifest, so a connector that
+// disagrees about what a declared mode means serves no route for half of it and
+// silently 404s every delivery.
+b.Mode = connector.ModeFromStrings(spec.Modes)
+```
+
+### Webhook processing: sync (default) or async
+
+```go
+cfg := &connector.Config{
+    Port:          port,
+    WriterFactory: factory,
+    WebhookMode:   connector.WebhookAsync,   // opt in
+    WebhookQueueDepth: 16,                   // optional; 16 is the default
+}
+```
+
+| | `WebhookSync` (default) | `WebhookAsync` |
+|---|---|---|
+| Response | after the handler, reflecting its outcome | `202` **before** the handler runs |
+| Handler error | becomes a 5xx → the provider retries | can only be logged |
+| Full queue | n/a | `429` (never a silent drop) |
+| Use when | the work fits comfortably in the request | a download / large parse risks the ingress proxy's 30s read timeout |
+
+**⚠️ Async moves retry ownership to your connector.** Once `202` is sent the provider considers the delivery accepted, so a later failure is unreportable. Choose async only if your connector is either safe to lose a delivery — a full-snapshot connector is, because the next trigger re-reads everything and repairs the gap — or owns its own retry and dedupe. Your handler must also tolerate running *after* the response was written, so do not capture anything request-scoped.
+
+This is a Go field rather than a manifest key on purpose: whether ACK-before-process is safe is a property of your handler's code, so it belongs with the code and not somewhere an operator could flip it without touching the handler that has to satisfy it.
+
+The `connectPending` gate applies in both modes — a delivery arriving before the connector's first `Connect` attempt completes gets `503`, so the provider retries rather than the delivery being accepted and lost.
+
+### Extra routes
+
+Needing one more endpoint should not cost you the whole contract:
+
+```go
+cfg.ExtraRoutes = map[string]http.Handler{
+    "POST /trigger": triggerHandler,
+    "GET /metrics":  promHandler,
+}
+```
+
+A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`) is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
+
+### Fetching a published artifact
+
+When the upstream pushes a pointer rather than the payload — a presigned URL in the webhook body — **the connector dereferences it, never the platform** (SSRF containment). `fetch` supplies the guards:
+
+```go
+dl := fetch.New(
+    fetch.WithMaxBytes(64<<20),
+    fetch.WithHostAllowlist(hosts),        // from per-tenant config
+    fetch.WithBearer(token, pollHost),     // sent ONLY to that host
+)
+res, err := dl.Get(ctx, notification.PresignedURL)
+```
+
+HTTPS-only, size-capped, allowlist-checked before any request is made, bounded retry that treats a 4xx as permanent and a 5xx as retryable, and errors that redact the query string — for a presigned URL, the signature *is* the credential.
+
+Set the allowlist whenever a fetch target arrives in a webhook body: even a validly signed notification can then only point your connector at a known origin. An allowlist that reduces to nothing is treated as *unset*, not deny-all, so reading it from optional config degrades to unrestricted rather than to a connector that can fetch nothing.
+
 ## Build an agent
 
 ```yaml
