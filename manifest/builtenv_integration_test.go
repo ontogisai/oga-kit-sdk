@@ -102,7 +102,12 @@ func TestParse_BuiltEnvironmentKit_HasPolicies(t *testing.T) {
 func TestValidate_BuiltEnvironmentKit_OntologyPropertyTypes(t *testing.T) {
 	const kitRoot = "../../oga-kit-built-environment"
 	manifestPath := filepath.Join(kitRoot, "manifest.yaml")
-	data, err := os.ReadFile(manifestPath)
+	// kitRoot is a compile-time const and this is a test-only sibling-repo fixture
+	// read, so no untrusted input reaches the call. The semgrep G304 rule treats
+	// filepath.Join as an unconditional taint source and so flags even all-constant
+	// paths; real gosec does const propagation and does not flag this line. The
+	// suppression must sit on the sink line and is rule-scoped on purpose.
+	data, err := os.ReadFile(manifestPath) // nosemgrep: gosec.G304-1
 	if err != nil {
 		t.Skipf("oga-kit-built-environment not present at %s: %v", manifestPath, err)
 	}
