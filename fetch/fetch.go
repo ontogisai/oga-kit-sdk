@@ -196,8 +196,12 @@ func safeURL(u *url.URL) string {
 // for the same reason — it will not shrink. A network error or a 5xx is
 // retryable; a 4xx is not.
 //
-// The returned error never contains the URL's query string or userinfo password
-// (see safeURL), since for a presigned URL those are the credential.
+// The returned error never contains the URL's query string or userinfo password,
+// since for a presigned URL those are the credential. That holds for the whole
+// error chain, not just the outermost message: safeURL covers the message this
+// function assembles, and scrubURLError covers the *url.Error that net/http
+// produces underneath it, whose own Error() would otherwise print the URL
+// verbatim.
 func (d *Downloader) Get(ctx context.Context, rawURL string) (*Result, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -221,9 +225,11 @@ func (d *Downloader) Get(ctx context.Context, rawURL string) (*Result, error) {
 		}
 	}
 
+	safe := safeURL(u)
+
 	var res *Result
 	err = Do(ctx, d.retry, func() error {
-		r, ferr := d.attempt(ctx, u.String())
+		r, ferr := d.attempt(ctx, u.String(), safe)
 		if ferr != nil {
 			return ferr
 		}
@@ -231,22 +237,52 @@ func (d *Downloader) Get(ctx context.Context, rawURL string) (*Result, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("download %s: %w", safeURL(u), err)
+		return nil, fmt.Errorf("download %s: %w", safe, err)
 	}
 	return res, nil
 }
 
-func (d *Downloader) attempt(ctx context.Context, target string) (*Result, error) {
+// scrubURLError removes the credential-bearing URL that net/http puts inside a
+// *url.Error.
+//
+// url.Error.Error() renders its URL field verbatim, query string and all, and
+// Client.Do / NewRequest return exactly that type — so an unmodified network
+// error carries a WORKING presigned URL, which is precisely what safeURL exists
+// to prevent. safeURL on the surrounding message is not enough on its own.
+//
+// Two details make this correct, and both are load-bearing:
+//
+//   - It MUST run before any fmt.Errorf wraps the error. fmt.Errorf renders %w
+//     into a stored string at construction time, so once the raw URL has been
+//     folded into an outer message, rewriting the inner *url.Error changes
+//     nothing. That is why this is applied at the point the error is produced
+//     rather than at the boundary where the message is assembled.
+//   - It rewrites the URL IN PLACE rather than rebuilding the chain. errors.AsType
+//     yields a pointer to the actual *url.Error, so every enclosing wrapper — the
+//     permanent marker, the attempt-count wrapper — keeps referring to the same
+//     value, and retry classification is untouched: url.Error still satisfies
+//     net.Error and still forwards Timeout() to its cause.
+//
+// Mutation is safe because net/http constructs the *url.Error for this call and
+// hands it to no one else.
+func scrubURLError(err error, safe string) error {
+	if uerr, ok := errors.AsType[*url.Error](err); ok {
+		uerr.URL = safe
+	}
+	return err
+}
+
+func (d *Downloader) attempt(ctx context.Context, target, safe string) (*Result, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, Permanent(err)
+		return nil, Permanent(scrubURLError(err, safe))
 	}
 	if d.authToken != "" && d.authHost != "" && normalizeHost(req.URL.Host) == d.authHost {
 		req.Header.Set("Authorization", "Bearer "+d.authToken)
 	}
 	resp, err := d.http.Do(req)
 	if err != nil {
-		return nil, err // network error — retryable
+		return nil, scrubURLError(err, safe) // network error — retryable
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -259,7 +295,10 @@ func (d *Downloader) attempt(ctx context.Context, target string) (*Result, error
 	// deterministically rather than inferred from a truncated read.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, d.maxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		// Scrubbed before the wrap, for the reason given on scrubURLError: a
+		// mid-body transport failure can surface as *url.Error, and fmt.Errorf
+		// would bake its raw URL into this message.
+		return nil, fmt.Errorf("read body: %w", scrubURLError(err, safe))
 	}
 	if int64(len(body)) > d.maxBytes {
 		return nil, Permanent(fmt.Errorf("download exceeds the %d byte cap", d.maxBytes))

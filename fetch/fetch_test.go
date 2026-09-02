@@ -2,7 +2,9 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -249,6 +251,112 @@ func TestGet_ErrorRedactsQuery(t *testing.T) {
 		t.Errorf("error dropped the URL path, making it undebuggable: %v", err)
 	}
 }
+
+// TestGet_TransportErrorRedactsQuery covers the path TestGet_ErrorRedactsQuery
+// above does NOT: a transport failure rather than an HTTP status.
+//
+// This distinction is the whole point of the test. A non-2xx response produces a
+// StatusError built from a status code and a body snippet, which never contains a
+// URL — so the status-path test passes whether or not redaction works on the
+// transport path. A transport failure instead surfaces net/http's *url.Error,
+// whose Error() prints the URL field verbatim, query string included. For a
+// presigned URL the query IS the credential, so that path leaked a working signed
+// URL into every error string and from there into caller logs, while the existing
+// test stayed green.
+//
+// Both wrap depths are asserted, because they fail differently:
+//   - connection refused is classified non-retryable (url.Error.Timeout() is
+//     false), so Do returns it directly and only Get's own fmt.Errorf wraps it.
+//   - a timeout is retryable, so Do exhausts its attempts and adds an
+//     attempt-count fmt.Errorf on top. fmt.Errorf renders %w into a stored string
+//     at construction, so a scrub applied any later than the moment the error is
+//     produced would be silently too late here.
+func TestGet_TransportErrorRedactsQuery(t *testing.T) {
+	const sig = "SECRETSIG"
+	const query = "?X-Amz-Signature=" + sig + "&X-Amz-Expires=900"
+
+	// assertClean walks the whole chain, not just the top message: a nested
+	// wrapper's Error() is what a caller gets from %v on an unwrapped cause.
+	assertClean := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		for e := err; e != nil; e = errors.Unwrap(e) {
+			if strings.Contains(e.Error(), sig) {
+				t.Errorf("error chain leaked the URL signature at %T: %v", e, e)
+			}
+		}
+		// The *url.Error's own field must be rewritten, not merely absent from the
+		// assembled message — a caller may extract and render it itself.
+		if uerr, ok := errors.AsType[*url.Error](err); ok {
+			if strings.Contains(uerr.URL, sig) {
+				t.Errorf("url.Error.URL still carries the signature: %q", uerr.URL)
+			}
+			if !strings.Contains(uerr.URL, "REDACTED") {
+				t.Errorf("url.Error.URL = %q, want the REDACTED marker", uerr.URL)
+			}
+		} else {
+			t.Fatalf("expected a *url.Error in the chain, got %T — "+
+				"if net/http stopped returning one this test needs rewriting, "+
+				"not deleting", err)
+		}
+		// Still debuggable.
+		if !strings.Contains(err.Error(), "/a.json") {
+			t.Errorf("error dropped the URL path, making it undebuggable: %v", err)
+		}
+	}
+
+	t.Run("connection refused (single wrap)", func(t *testing.T) {
+		// A listener opened then closed yields a port nothing is serving, which is
+		// deterministic where a hardcoded high port is not.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+
+		d := New(WithAllowInsecure(true), WithRetry(RetryConfig{MaxAttempts: 1}))
+		_, err = d.Get(context.Background(), "http://"+addr+"/a.json"+query)
+		assertClean(t, err)
+	})
+
+	t.Run("retryable timeout exhausting attempts (double wrap)", func(t *testing.T) {
+		// A synthetic timeout, not a real Client.Timeout. Client.Timeout surfaces
+		// as context.DeadlineExceeded, which isRetryable treats as TERMINAL, so it
+		// would never reach the exhaustion wrapper this subtest exists to cover.
+		// net/http wraps a RoundTripper's error in *url.Error with the full URL,
+		// which is the condition under test.
+		d := New(
+			WithAllowInsecure(true),
+			WithRetry(fastRetry),
+			WithHTTPClient(&http.Client{Transport: timeoutTransport{}}),
+		)
+		_, err := d.Get(context.Background(), "http://stub.invalid/a.json"+query)
+		assertClean(t, err)
+		// Confirm the attempt-count wrapper really is present, so this subtest
+		// cannot silently degrade into a copy of the one above.
+		if !strings.Contains(err.Error(), "after 3 attempts") {
+			t.Errorf("expected the retry-exhaustion wrapper, got: %v", err)
+		}
+	})
+}
+
+// timeoutTransport fails every request with an error that reports itself as a
+// timeout, which isRetryable classifies as retryable — unlike
+// context.DeadlineExceeded.
+type timeoutTransport struct{}
+
+func (timeoutTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, timeoutErr{}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "synthetic i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
 
 // TestSafeURL pins the redaction directly, including the userinfo password case.
 // url.Redacted handles that one but NOT the query, so both are asserted here to
