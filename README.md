@@ -279,6 +279,38 @@ This is a Go field rather than a manifest key on purpose: whether ACK-before-pro
 
 The `connectPending` gate applies in both modes — a delivery arriving before the connector's first `Connect` attempt completes gets `503`, so the provider retries rather than the delivery being accepted and lost.
 
+### Rejecting a malformed payload with `400`
+
+Implement `connector.PayloadValidator` and a body you cannot accept is answered `400` **before** the delivery is queued:
+
+```go
+func (c *MyConnector) ValidateWebhookPayload(_ context.Context, _ connector.Binding, payload []byte) error {
+    var n Notification
+    if err := json.Unmarshal(payload, &n); err != nil {
+        return fmt.Errorf("invalid notification json: %w", err)
+    }
+    if strings.TrimSpace(n.PresignedURL) == "" {
+        return errors.New("presigned_url is required")
+    }
+    return nil
+}
+```
+
+**An async connector should take this.** It is the one class of failure async mode would otherwise hide: without a validator a malformed body gets `202`, so the upstream team debugs a silent failure holding a success status. Sync connectors gain from it too — a handler cannot tell "your payload is bad" from "my downstream broke", so it reports both as `500`.
+
+| | no validator | with validator |
+|---|---|---|
+| async, malformed body | `202`, then logged | **`400`**, never queued |
+| sync, malformed body | `500` (handler error) | **`400`** |
+
+Three constraints:
+
+- **Keep it cheap and side-effect free.** It runs inline in the request, ahead of the queue. Doing I/O here — resolving the payload's URL, calling the external system — reintroduces exactly the request-timeout exposure async mode exists to remove, while looking like validation.
+- **Return an error only when the payload itself is unacceptable.** For a transient condition return `nil` and let the handler deal with it: a `400` tells the caller to change its request, which is wrong advice for a fault that would clear on retry.
+- **Your handler still validates.** The interface is optional, so the handler is the layer that must hold regardless.
+
+It runs *after* the `connectPending` gate, so a delivery arriving during the boot window is still a retryable `503` rather than a `400` the caller would never retry. Distinct from `ValidationHandler`, which answers the provider's subscribe-time challenge on the webhook `GET` and carries no payload.
+
 ### Extra routes
 
 Needing one more endpoint should not cost you the whole contract:

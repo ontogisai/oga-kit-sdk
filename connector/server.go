@@ -56,6 +56,14 @@ type Config struct {
 	// dedupe. It must also tolerate its handler running AFTER the response was
 	// written, which means not capturing anything request-scoped.
 	//
+	// One class of failure is exempt, and an async connector should take the
+	// exemption: implement [PayloadValidator] and a MALFORMED body is answered
+	// 400 before the delivery is queued, so the caller is told its request was
+	// bad instead of being told the delivery succeeded. That covers the failures
+	// the caller can actually act on; what stays unreportable is everything
+	// discovered later — a download that fails, a source that has moved on, a
+	// commit the platform rejects.
+	//
 	// This is a Go-level choice on purpose, not a manifest field or an
 	// environment variable: whether ACK-before-process is safe is a property of
 	// the handler's code, so it belongs with the code rather than somewhere an
@@ -621,6 +629,19 @@ func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	// Payload validation runs INLINE, before the mode branch, so a malformed body
+	// is answered 400 in both modes rather than 202-then-silence (async) or 500
+	// (sync, where a handler cannot distinguish a bad request from its own
+	// downstream failure). See PayloadValidator for why it must stay cheap.
+	if v, ok := s.impl.(PayloadValidator); ok {
+		if verr := v.ValidateWebhookPayload(r.Context(), b, payload); verr != nil {
+			s.cfg.Logger.Warn("webhook delivery rejected: payload validation failed",
+				"binding", b.ID, "error", verr)
+			http.Error(w, "invalid payload: "+verr.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	if s.webhookQueue != nil {
