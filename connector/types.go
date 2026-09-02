@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"strings"
 	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/transfer"
@@ -64,6 +65,61 @@ func (m IngressMode) valid() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// ModeFromStrings collapses a manifest `modes` LIST into the single runtime
+// IngressMode.
+//
+// The two representations are both real and both correct for their layer: a
+// kit manifest declares `modes: [webhook, poll]` (a list, which the platform
+// validates at install and stores verbatim on the sidecar registry record),
+// while a running connector carries one IngressMode. Something has to bridge
+// them, and until now that something lived in a KIT — oga-kit-sj24k's
+// ontosync/manifest.go — so a second connector meant a second copy, free to
+// drift. Two copies disagreeing about what a declared mode means is the
+// silent-404 failure class: the platform provisions ingress from the manifest,
+// so a binding the platform believes is webhook-enabled while the connector
+// serves no webhook route drops every delivery.
+//
+// The mapping, preserved exactly from the kit implementation it replaces:
+//
+//	[]                 → ModePoll     (the documented default for an empty Mode)
+//	[poll]             → ModePoll
+//	[webhook]          → ModeWebhook
+//	[webhook, poll]    → ModeBoth     (in any order)
+//	[both]             → ModeBoth
+//	[unrecognized]     → ignored entirely
+//
+// An unrecognized entry is IGNORED rather than guessed at, and that is
+// defense-in-depth only: the manifest validator already rejects an unknown mode
+// at install time, so one cannot normally reach a running sidecar. Were it to,
+// promoting it into a mode the connector then serves would be worse than
+// dropping it.
+//
+// ⚠️ A list of nothing but unrecognized entries therefore yields ModePoll — the
+// same as an empty list. A connector that must not silently fall back to polling
+// should compare against its own configuration and refuse to start on a
+// mismatch, which is what the sj24k connector does with SYNC_TRIGGER.
+func ModeFromStrings(modes []string) IngressMode {
+	var poll, webhook bool
+	for _, m := range modes {
+		switch IngressMode(strings.ToLower(strings.TrimSpace(m))) {
+		case ModePoll:
+			poll = true
+		case ModeWebhook:
+			webhook = true
+		case ModeBoth:
+			poll, webhook = true, true
+		}
+	}
+	switch {
+	case poll && webhook:
+		return ModeBoth
+	case webhook:
+		return ModeWebhook
+	default:
+		return ModePoll
 	}
 }
 

@@ -75,6 +75,47 @@ type ValidationHandler interface {
 	ValidateWebhook(ctx context.Context, b Binding, query map[string][]string) ([]byte, error)
 }
 
+// PayloadValidator is an optional interface a connector implements to reject a
+// malformed webhook payload BEFORE the delivery is accepted, so the caller learns
+// its request was bad instead of being told the delivery succeeded.
+//
+// It exists because of an asymmetry in the async contract. Once the server has
+// answered 202 a handler error can only be logged — so without this seam a
+// malformed body is indistinguishable, from the caller's side, from a delivery
+// that worked. The upstream team then debugs a silent failure with a success status
+// in hand. Validating here gives that one class of failure — "this payload is not
+// something I can accept" — an honest answer in BOTH modes:
+//
+//	async: 400 instead of 202-then-silence
+//	sync:  400 instead of the 500 a handler error maps to
+//
+// The sync improvement is real and not incidental: a handler cannot distinguish
+// "your payload is bad" from "my downstream broke", so it reports both as 500.
+//
+// ⚠️ MUST BE CHEAP AND SIDE-EFFECT FREE. It runs INLINE IN THE REQUEST, ahead of
+// the queue. Doing I/O here — resolving the payload's URL, calling the external
+// system, touching the graph — reintroduces exactly the request-timeout exposure
+// async mode exists to remove, while looking like validation. Parse the body and
+// check its required fields; nothing else.
+//
+// Return an error ONLY when the payload itself is unacceptable. A transient
+// condition (a dependency being down, a cache miss) must return nil and be dealt
+// with by the handler, because a 400 tells the caller to change its request, and
+// for a transient fault that advice is wrong.
+//
+// Implementing it does not excuse the handler from validating. The interface is
+// optional, so the handler is the layer that must hold regardless; treat this as
+// the fast, caller-facing half of a check the handler also makes.
+//
+// Distinct from ValidationHandler, which answers the provider's subscribe-time
+// challenge on the webhook GET and carries no payload. This one is about a POSTed
+// delivery's body.
+type PayloadValidator interface {
+	// ValidateWebhookPayload reports whether payload is acceptable for b. A
+	// non-nil error is answered to the caller as 400 with the error's message.
+	ValidateWebhookPayload(ctx context.Context, b Binding, payload []byte) error
+}
+
 // Prober is implemented by a connector whose Health(ctx) may serve a cached
 // verdict. TestConnection forces a fresh check against every binding's
 // external system, bypassing any cache/throttle, and returns the resulting
