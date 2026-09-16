@@ -103,6 +103,11 @@ func TestGet_LargeArtifactDoesNotScaleMemory(t *testing.T) {
 				return
 			default:
 			}
+			// ReadMemStats stops the world, so a 1 ms loop paused the very
+			// window it measures roughly once per millisecond. 25 ms still
+			// samples a multi-hundred-millisecond transfer several times over,
+			// and the assertion below is on cumulative allocation anyway —
+			// which is exact and needs no sampling at all.
 			runtime.ReadMemStats(&ms)
 			for {
 				cur := peakHeap.Load()
@@ -110,7 +115,7 @@ func TestGet_LargeArtifactDoesNotScaleMemory(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(time.Millisecond)
+			time.Sleep(25 * time.Millisecond)
 		}
 	}()
 
@@ -155,7 +160,11 @@ func TestGet_LargeArtifactDoesNotScaleMemory(t *testing.T) {
 
 	// And the spool must really hold the artifact: a streaming implementation that
 	// dropped bytes would pass every memory assertion above.
-	fi, err := os.Stat(spoolFiles(t, dir)[0])
+	spools := spoolFiles(t, dir)
+	if len(spools) != 1 {
+		t.Fatalf("spool files = %d, want exactly 1", len(spools))
+	}
+	fi, err := os.Stat(spools[0])
 	if err != nil {
 		t.Fatalf("stat spool: %v", err)
 	}

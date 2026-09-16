@@ -280,8 +280,12 @@ func TestResult_CloseDeletesTheSpoolFile(t *testing.T) {
 	if err := res.Close(); err != nil {
 		t.Errorf("second Close: %v", err)
 	}
-	if res.Reader() != nil {
-		t.Error("Reader() after Close must be nil, so a use-after-close fails at the call site")
+	// Reader stays non-nil after Close, and reads fail instead. See
+	// TestResult_ReaderAfterCloseErrorsRatherThanPanicking for why: a typed nil in
+	// an interface is not nil, so returning nil here defeated a caller's guard and
+	// then panicked further from the mistake.
+	if res.Reader() == nil {
+		t.Error("Reader() after Close must not be nil — a typed nil defeats a nil guard")
 	}
 }
 
@@ -317,11 +321,11 @@ func TestGet_DuringCopyCapIsAuthoritative(t *testing.T) {
 // byte count separates the two implementations. Under a 64 KiB cap a 4 MiB
 // artifact must cost 64 KiB + 1, not 4 MiB.
 func TestGet_OverCapStopsAtTheCapNotTheFullLength(t *testing.T) {
-	const cap = 64 << 10
+	const capBytes = 64 << 10
 	const total = 4 << 20
 	body := &countingBody{remaining: total}
 	tr := &undeclaredLengthTransport{body: body}
-	d := New(WithAllowInsecure(true), WithMaxBytes(cap), WithTempDir(t.TempDir()),
+	d := New(WithAllowInsecure(true), WithMaxBytes(capBytes), WithTempDir(t.TempDir()),
 		WithRetry(RetryConfig{MaxAttempts: 1}),
 		WithHTTPClient(&http.Client{Transport: tr}))
 
@@ -330,8 +334,8 @@ func TestGet_OverCapStopsAtTheCapNotTheFullLength(t *testing.T) {
 	}
 	// Exact: the LimitReader hands out cap+1 and not one byte more, and the
 	// counting body is read directly with no intervening buffering.
-	if got := body.bytesRead(); got != cap+1 {
-		t.Errorf("read %d bytes for a %d byte cap, want exactly %d (cap+1)", got, cap, cap+1)
+	if got := body.bytesRead(); got != capBytes+1 {
+		t.Errorf("read %d bytes for a %d byte cap, want exactly %d (cap+1)", got, capBytes, capBytes+1)
 	}
 }
 
@@ -434,9 +438,13 @@ func TestGet_MidTransferFailureDeletesTheSpool(t *testing.T) {
 	if n := spoolCount(t, dir); n != 0 {
 		t.Errorf("spool files after a mid-transfer failure = %d, want 0 (left: %v)", n, spoolFiles(t, dir))
 	}
-	// The spool path assembles its own wrapper around the body error, which is a
-	// construction site the pre-SJ24K-53 code did not have — so the redaction
-	// property is re-asserted here rather than assumed to carry over.
+	// ⚠️ This loop is NOT the redaction coverage, and must not be mistaken for it.
+	// A hijacked transfer surfaces as a bare io.ErrUnexpectedEOF — no *url.Error,
+	// no URL anywhere in the chain — so it cannot fail whatever the scrub does,
+	// which is exactly how an ordering defect on this path once shipped with a
+	// test claiming to cover it. Retained only as a cheap belt-and-braces check.
+	// The real coverage is TestGet_SpoolBodyErrorRedactsTheURL, which injects a
+	// *url.Error from the body read.
 	for e := err; e != nil; e = errors.Unwrap(e) {
 		if strings.Contains(e.Error(), "SECRETSIG") {
 			t.Errorf("error chain leaked the URL signature at %T: %v", e, e)
@@ -447,19 +455,39 @@ func TestGet_MidTransferFailureDeletesTheSpool(t *testing.T) {
 // TestGet_RetriedAttemptsLeaveNoSpoolBehind — each attempt spools into its own
 // file, so a retried success must leave exactly one. Three attempts each leaking
 // 300 MB is the outage this guards against.
+//
+// ⚠️ The failing attempts MUST fail PART WAY THROUGH THE BODY, not with a status
+// code. An earlier version used 502s, which return at the status check before
+// spool() is ever called — so no failed attempt created a file and the final
+// count of 1 could not distinguish a leaking retry loop from a clean one. Probing
+// it confirmed the spool count at the start of each attempt was [0 0 0]. A
+// truncated transfer is the only shape that actually spools and then fails.
 func TestGet_RetriedAttemptsLeaveNoSpoolBehind(t *testing.T) {
 	var mu sync.Mutex
 	var n int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		n++
 		attempt := n
 		mu.Unlock()
 		if attempt < 3 {
-			w.WriteHeader(http.StatusBadGateway)
+			// Announce more than will be sent, write some of it — so the spool
+			// file exists and is partly written — then drop the connection.
+			w.Header().Set("Content-Length", "10000")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, 4096))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
 			return
 		}
 		_, _ = w.Write([]byte("recovered"))
+		_ = r
 	}))
 	defer srv.Close()
 
@@ -493,9 +521,16 @@ func TestGet_UnwritableTempDirIsPermanent(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	var attempts int
+	countingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer countingSrv.Close()
+
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(missing))
-	_, err := d.Get(context.Background(), srv.URL)
+	_, err := d.Get(context.Background(), countingSrv.URL)
 	if err == nil {
 		t.Fatal("a missing spool directory was accepted")
 	}
@@ -505,6 +540,24 @@ func TestGet_UnwritableTempDirIsPermanent(t *testing.T) {
 	if !strings.Contains(err.Error(), "spool") {
 		t.Errorf("error does not say what failed: %v", err)
 	}
+	// The terminal behaviour, which the message alone cannot show: without it this
+	// test asserted only wording and would have passed with three attempts.
+	//
+	// ⚠️ It does NOT isolate the Permanent wrapper, and it is worth knowing why
+	// rather than assuming it does. os.CreateTemp on a missing directory returns a
+	// *fs.PathError wrapping syscall.ENOENT, syscall.Errno satisfies net.Error, and
+	// ENOENT.Timeout() is false — so isRetryable stops the retry on its own
+	// (measured: isRetryable reports false for the raw error). One attempt
+	// therefore has two independent causes and removing the marker keeps this
+	// green. The marker stays anyway, because depending on that coincidence is the
+	// fragility spoolWriteError exists to remove: it does not hold for an error
+	// that is not an Errno, and it would break silently if isRetryable's net.Error
+	// branch were ever tightened.
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1 — a mis-configured spool directory will not "+
+			"fix itself, so retrying only delays the report", attempts)
+	}
+	_ = srv
 }
 
 // TestResult_NilIsUsable — a caller that got an error has no Result, and
