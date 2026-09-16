@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,20 +18,26 @@ import (
 // (MaxAttempts 1 would stop them exercising the loop at all).
 var fastRetry = RetryConfig{MaxAttempts: 3, InitialDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, BackoffFactor: 2.0}
 
-func TestGet_FetchesBodyAndETag(t *testing.T) {
+// Spooling behaviour — the temp file, the streamed digest, cap enforcement during
+// the copy — lives in spool_test.go, along with the spoolCount / readAll helpers
+// these tests use.
+
+func TestGet_FetchesArtifactAndETag(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("ETag", `"abc123"`)
 		_, _ = w.Write([]byte("payload"))
 	}))
 	defer srv.Close()
 
-	d := New(WithAllowInsecure(true), WithRetry(fastRetry))
+	d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(t.TempDir()))
 	res, err := d.Get(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if string(res.Body) != "payload" {
-		t.Errorf("body = %q", res.Body)
+	defer func() { _ = res.Close() }()
+
+	if got := readAll(t, res); got != "payload" {
+		t.Errorf("artifact = %q", got)
 	}
 	// The quotes ETag values carry are stripped, so a caller can compare directly.
 	if res.ETag != "abc123" {
@@ -59,31 +66,8 @@ func TestGet_RejectsNonHTTPS(t *testing.T) {
 	}
 }
 
-// TestGet_EnforcesMaxBytes — R6.2, and permanence matters: an over-cap body will
-// not shrink, so retrying it only wastes the budget.
-func TestGet_EnforcesMaxBytes(t *testing.T) {
-	var attempts int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		attempts++
-		_, _ = w.Write([]byte(strings.Repeat("x", 100)))
-	}))
-	defer srv.Close()
-
-	d := New(WithAllowInsecure(true), WithMaxBytes(10), WithRetry(fastRetry))
-	_, err := d.Get(context.Background(), srv.URL)
-	if err == nil {
-		t.Fatal("an over-cap body was accepted")
-	}
-	if !strings.Contains(err.Error(), "cap") {
-		t.Errorf("error does not mention the cap: %v", err)
-	}
-	if attempts != 1 {
-		t.Errorf("attempts = %d, want 1 — an over-cap body is permanent and must not be retried", attempts)
-	}
-}
-
 // TestGet_MaxBytesBoundaryIsInclusive — a body exactly at the cap is valid. The
-// implementation reads cap+1 to detect an overrun, so an off-by-one here would
+// implementation copies cap+1 to detect an overrun, so an off-by-one here would
 // reject every artifact of exactly the configured size.
 func TestGet_MaxBytesBoundaryIsInclusive(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -91,13 +75,14 @@ func TestGet_MaxBytesBoundaryIsInclusive(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := New(WithAllowInsecure(true), WithMaxBytes(10), WithRetry(fastRetry))
+	d := New(WithAllowInsecure(true), WithMaxBytes(10), WithRetry(fastRetry), WithTempDir(t.TempDir()))
 	res, err := d.Get(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("a body exactly at the cap was rejected: %v", err)
 	}
-	if len(res.Body) != 10 {
-		t.Errorf("body length = %d, want 10", len(res.Body))
+	defer func() { _ = res.Close() }()
+	if res.Size != 10 {
+		t.Errorf("Size = %d, want 10", res.Size)
 	}
 }
 
@@ -111,7 +96,8 @@ func TestGet_HostAllowlist(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := New(WithAllowInsecure(true), WithRetry(fastRetry),
+	dir := t.TempDir()
+	d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(dir),
 		WithHostAllowlist([]string{"allowed.example.com"}))
 	if _, err := d.Get(context.Background(), srv.URL); err == nil {
 		t.Error("a host outside the allowlist was fetched")
@@ -119,14 +105,20 @@ func TestGet_HostAllowlist(t *testing.T) {
 	if contacted {
 		t.Error("a disallowed host was contacted; the allowlist must be checked before the request")
 	}
+	if n := spoolCount(t, dir); n != 0 {
+		t.Errorf("spool files = %d, want 0 — a rejected URL must create no file", n)
+	}
 
 	// The same server, now allowlisted by its real host, must succeed — otherwise
 	// this test would pass against an allowlist that rejects everything.
 	host := strings.TrimPrefix(srv.URL, "http://")
-	d2 := New(WithAllowInsecure(true), WithRetry(fastRetry), WithHostAllowlist([]string{host}))
-	if _, err := d2.Get(context.Background(), srv.URL); err != nil {
-		t.Errorf("an allowlisted host was rejected: %v", err)
+	d2 := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(t.TempDir()),
+		WithHostAllowlist([]string{host}))
+	res, err := d2.Get(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("an allowlisted host was rejected: %v", err)
 	}
+	_ = res.Close()
 }
 
 // TestGet_EmptyAllowlistIsUnset — an allowlist that reduces to nothing must mean
@@ -138,11 +130,13 @@ func TestGet_EmptyAllowlistIsUnset(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := New(WithAllowInsecure(true), WithRetry(fastRetry),
+	d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(t.TempDir()),
 		WithHostAllowlist([]string{"", "   ", ""}))
-	if _, err := d.Get(context.Background(), srv.URL); err != nil {
-		t.Errorf("an all-empty allowlist behaved as deny-all: %v", err)
+	res, err := d.Get(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("an all-empty allowlist behaved as deny-all: %v", err)
 	}
+	_ = res.Close()
 }
 
 // TestGet_BearerIsHostScoped — R6.4, the security property of the credential.
@@ -158,10 +152,12 @@ func TestGet_BearerIsHostScoped(t *testing.T) {
 
 	// Scoped to THIS host (which carries an explicit port, the case a naive
 	// Host-vs-Hostname comparison silently gets wrong) — the bearer must attach.
-	d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithBearer("tok123", host))
-	if _, err := d.Get(context.Background(), srv.URL); err != nil {
+	d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(t.TempDir()), WithBearer("tok123", host))
+	res, err := d.Get(context.Background(), srv.URL)
+	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
+	_ = res.Close()
 	if gotAuth != "Bearer tok123" {
 		t.Errorf("Authorization = %q, want the bearer to attach to its own host "+
 			"(a port in the host must not defeat the match)", gotAuth)
@@ -170,10 +166,13 @@ func TestGet_BearerIsHostScoped(t *testing.T) {
 	// Scoped to a DIFFERENT host — the bearer must not leak to this origin, which
 	// is the presigned-URL case (it authenticates via signed query params).
 	gotAuth = ""
-	d2 := New(WithAllowInsecure(true), WithRetry(fastRetry), WithBearer("tok123", "other.example.com"))
-	if _, err := d2.Get(context.Background(), srv.URL); err != nil {
+	d2 := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(t.TempDir()),
+		WithBearer("tok123", "other.example.com"))
+	res2, err := d2.Get(context.Background(), srv.URL)
+	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
+	_ = res2.Close()
 	if gotAuth != "" {
 		t.Errorf("Authorization = %q, want empty — a credential must not leak to a different host", gotAuth)
 	}
@@ -194,13 +193,14 @@ func TestGet_Retries5xxAndNot4xx(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		d := New(WithAllowInsecure(true), WithRetry(fastRetry))
+		d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(t.TempDir()))
 		res, err := d.Get(context.Background(), srv.URL)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
-		if string(res.Body) != "recovered" {
-			t.Errorf("body = %q", res.Body)
+		defer func() { _ = res.Close() }()
+		if got := readAll(t, res); got != "recovered" {
+			t.Errorf("artifact = %q", got)
 		}
 		if n != 3 {
 			t.Errorf("attempts = %d, want 3", n)
@@ -215,7 +215,8 @@ func TestGet_Retries5xxAndNot4xx(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		d := New(WithAllowInsecure(true), WithRetry(fastRetry))
+		dir := t.TempDir()
+		d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(dir))
 		_, err := d.Get(context.Background(), srv.URL)
 		if err == nil {
 			t.Fatal("a 403 was treated as success")
@@ -225,6 +226,9 @@ func TestGet_Retries5xxAndNot4xx(t *testing.T) {
 		}
 		if got := StatusOf(err); got != http.StatusForbidden {
 			t.Errorf("StatusOf = %d, want 403", got)
+		}
+		if got := spoolCount(t, dir); got != 0 {
+			t.Errorf("spool files = %d, want 0 — a non-2xx must create no file", got)
 		}
 	})
 }
@@ -237,7 +241,7 @@ func TestGet_ErrorRedactsQuery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := New(WithAllowInsecure(true), WithRetry(RetryConfig{MaxAttempts: 1}))
+	d := New(WithAllowInsecure(true), WithRetry(RetryConfig{MaxAttempts: 1}), WithTempDir(t.TempDir()))
 	_, err := d.Get(context.Background(), srv.URL+"/a.json?X-Amz-Signature=SECRETSIG&X-Amz-Expires=900")
 	if err == nil {
 		t.Fatal("expected an error")
@@ -271,6 +275,10 @@ func TestGet_ErrorRedactsQuery(t *testing.T) {
 //     attempt-count fmt.Errorf on top. fmt.Errorf renders %w into a stored string
 //     at construction, so a scrub applied any later than the moment the error is
 //     produced would be silently too late here.
+//
+// The third construction site, a failure PART WAY THROUGH the body, is covered by
+// TestGet_MidTransferFailureDeletesTheSpool — that one only exists because the
+// spool rewrite added a wrapper the earlier code did not have.
 func TestGet_TransportErrorRedactsQuery(t *testing.T) {
 	const sig = "SECRETSIG"
 	const query = "?X-Amz-Signature=" + sig + "&X-Amz-Expires=900"
@@ -317,7 +325,7 @@ func TestGet_TransportErrorRedactsQuery(t *testing.T) {
 		addr := ln.Addr().String()
 		_ = ln.Close()
 
-		d := New(WithAllowInsecure(true), WithRetry(RetryConfig{MaxAttempts: 1}))
+		d := New(WithAllowInsecure(true), WithRetry(RetryConfig{MaxAttempts: 1}), WithTempDir(t.TempDir()))
 		_, err = d.Get(context.Background(), "http://"+addr+"/a.json"+query)
 		assertClean(t, err)
 	})
@@ -331,6 +339,7 @@ func TestGet_TransportErrorRedactsQuery(t *testing.T) {
 		d := New(
 			WithAllowInsecure(true),
 			WithRetry(fastRetry),
+			WithTempDir(t.TempDir()),
 			WithHTTPClient(&http.Client{Transport: timeoutTransport{}}),
 		)
 		_, err := d.Get(context.Background(), "http://stub.invalid/a.json"+query)
@@ -388,7 +397,7 @@ func TestGet_ContextCancellationIsTerminal(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	d := New(WithAllowInsecure(true), WithRetry(fastRetry))
+	d := New(WithAllowInsecure(true), WithRetry(fastRetry), WithTempDir(t.TempDir()))
 	if _, err := d.Get(ctx, srv.URL); err == nil {
 		t.Error("a cancelled context still produced a successful fetch")
 	}
@@ -427,5 +436,13 @@ func TestDo_StopsOnPermanent(t *testing.T) {
 	// The marker is unwrapped on return, so a caller sees its own error.
 	if IsPermanent(err) {
 		t.Error("Do must return the unwrapped error, not the permanent marker")
+	}
+}
+
+// TestDefaultSpoolDirIsTempDir pins the default so a kit that sets no temp dir
+// spools somewhere sane rather than the working directory.
+func TestDefaultSpoolDirIsTempDir(t *testing.T) {
+	if got := New().spoolDir(); got != os.TempDir() {
+		t.Errorf("default spoolDir = %q, want os.TempDir() %q", got, os.TempDir())
 	}
 }

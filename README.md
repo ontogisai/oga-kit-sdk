@@ -330,16 +330,35 @@ When the upstream pushes a pointer rather than the payload — a presigned URL i
 
 ```go
 dl := fetch.New(
-    fetch.WithMaxBytes(64<<20),
+    fetch.WithMaxBytes(300<<20),           // your upstream's realistic ceiling
     fetch.WithHostAllowlist(hosts),        // from per-tenant config
     fetch.WithBearer(token, pollHost),     // sent ONLY to that host
 )
 res, err := dl.Get(ctx, notification.PresignedURL)
+if err != nil {
+    return err
+}
+defer res.Close()                          // deletes the spooled temp file
+
+// res.Hash is the sha256 of the artifact, computed during the transfer:
+// compare it against the publisher's claimed checksum, and use it as the
+// no-op gate's key. res.Reader() hands out an independent reader each call,
+// so a multi-pass parse needs no rewind and no second download.
+if err := parse(res.Reader()); err != nil {
+    return err
+}
 ```
 
 HTTPS-only, size-capped, allowlist-checked before any request is made, bounded retry that treats a 4xx as permanent and a 5xx as retryable, and errors that redact the query string — for a presigned URL, the signature *is* the credential.
 
 Set the allowlist whenever a fetch target arrives in a webhook body: even a validly signed notification can then only point your connector at a known origin. An allowlist that reduces to nothing is treated as *unset*, not deny-all, so reading it from optional config degrades to unrestricted rather than to a connector that can fetch nothing.
+
+**The artifact is spooled to a temp file, not held in memory** (SJ24K-53). `Result` owns an open descriptor and a file on disk, so the caller **must** `Close` it — a leak per failed cycle is its own outage at these sizes. Measured on a 300 MB artifact: 317 KiB of total allocation streaming, against 616 MiB for the byte-slice version it replaced.
+
+Two things follow from that:
+
+- **`res.Hash` is free.** The transfer is the one unavoidable pass over the bytes, so the SHA-256 is computed during it. Nothing needs a second read to gate on content or to check a publisher's checksum.
+- **`WithTempDir` matters when `/tmp` is RAM-backed.** Spooling to a tmpfs moves the artifact off the Go heap but *not* out of the container's memory allowance — measured on Docker 29.4.0, a 300 MB write to a tmpfs `/tmp` in a 512 MiB container took `memory.current` from 2.9 MB to 317 MB. Under the ONTOGIS Kubernetes runtime `/tmp` is an `emptyDir` on node disk, so the default is correct there; under the Docker runtime it is tmpfs, so either size the cap against the memory limit or point `WithTempDir` at a disk-backed mount.
 
 ## Build an agent
 
