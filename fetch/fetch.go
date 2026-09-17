@@ -10,7 +10,7 @@
 // A connector performing that fetch needs, every time:
 //
 //   - HTTPS only, so a downgraded or plaintext URL cannot be honoured silently
-//   - a size cap, so a hostile or mis-configured source cannot exhaust memory
+//   - a size cap, so a hostile or mis-configured source cannot exhaust the host
 //   - an optional host allowlist, so a leaked webhook credential cannot redirect
 //     the fetch at an arbitrary origin
 //   - a credential scoped to ONE host, so a poll token is not leaked to a
@@ -22,34 +22,220 @@
 // whether to enforce an allowlist and which hosts belong on it (usually from
 // per-tenant deployment configuration, since a customer's bucket host differs per
 // tenant), and which host may see a credential.
+//
+// # The artifact is spooled to a temp file, not buffered in memory
+//
+// Get writes the body straight to a temp file and hands back a Result the caller
+// reads from and MUST Close (SJ24K-53). It used to return the whole body as a
+// []byte, which made peak memory scale with the artifact: a 210 MB customer
+// export cost 210 MB of heap per connector, per cycle, for every tenant sharing a
+// node — and every consumer that needed a second look at the bytes (a content
+// hash, a checksum comparison, a second parse pass) either kept that slice alive
+// or was tempted to make its own copy.
+//
+// Because the transfer is the only pass over the bytes that is unavoidable, the
+// SHA-256 is computed DURING it, through an io.MultiWriter. So the digest a
+// caller needs for a no-op gate or a publisher-checksum comparison falls out of
+// the download for free, rather than costing a second full read.
+//
+// Two consequences worth knowing before using this package:
+//
+//   - Result owns an open file descriptor and a file on disk. Close deletes it.
+//     A caller that forgets leaks both, and at these sizes a leak per failed
+//     cycle is its own outage.
+//   - Result.Reader hands out independent readers over the same spooled bytes,
+//     so a caller may make as many passes as it likes (the sj24k asset export
+//     takes three) without re-downloading and without a shared cursor to rewind.
+//
+// # Where the temp file lands, and why that is not always "off memory"
+//
+// The spool directory defaults to os.TempDir and is overridable with
+// WithTempDir. That option exists for a specific, measured reason: writing to a
+// RAM-backed filesystem moves the artifact off the Go heap but NOT out of memory.
+//
+// The ONTOGIS sidecar runtimes differ here, and the difference is invisible in
+// the code that spools. Under Kubernetes /tmp is an emptyDir with the default
+// medium, i.e. node disk, so a spooled artifact genuinely leaves the container's
+// memory allowance. Under Docker the platform mounts /tmp as tmpfs, whose pages
+// are charged to the container's memory cgroup in full — measured on Docker
+// 29.4.0: a 300 MB write to a tmpfs /tmp in a 512 MiB container moved
+// memory.current from 2.9 MB to 317 MB, with memory.stat shmem accounting for
+// every byte. So on a Docker-run sidecar the spool must either fit the memory
+// limit or be pointed at a disk-backed mount with WithTempDir.
 package fetch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
-// DefaultMaxBytes caps a downloaded artifact at 64 MiB — generous for a
-// published catalogue or export, bounded against a hostile source, and matching
-// the platform intake's own body cap so a fetch that succeeds here is not
-// rejected downstream for size.
+// DefaultMaxBytes caps a downloaded artifact at 64 MiB.
+//
+// It is deliberately conservative rather than generous, and it stays at 64 MiB
+// even though the artifact is now spooled to disk (SJ24K-53). Two reasons:
+//
+//   - It matches the platform ontology-snapshot intake's own body cap, so a
+//     fetch that succeeds under the default is not rejected downstream for size.
+//     A connector cap ABOVE the intake's would defer a clear, immediate
+//     rejection into a 413 that only arrives after a full download.
+//   - A cap is a policy decision belonging to the kit, which knows what its
+//     upstream publishes. An SDK default that silently accommodated the largest
+//     artifact anyone might send would remove the guard for every kit that never
+//     thought about it.
+//
+// A connector whose upstream publishes a DATA export rather than a catalogue
+// should raise this explicitly with WithMaxBytes, and size it against the
+// sidecar's memory limit when the spool directory is RAM-backed (see the package
+// doc).
 const DefaultMaxBytes int64 = 64 << 20
 
 // DefaultTimeout bounds a single attempt end-to-end.
 const DefaultTimeout = 2 * time.Minute
 
-// Result carries the fetched bytes plus the source's entity tag, which a poll
-// loop can use for cheap change detection before paying for a full parse.
+// copyBufferSize is the transfer buffer, and it is what "peak memory is
+// proportional to the copy buffer, not the artifact" refers to. 256 KiB rather
+// than io.Copy's internal 32 KiB: at 300 MB that is 1,200 write syscalls instead
+// of 9,600, and 256 KiB is still negligible beside any sidecar's memory limit.
+const copyBufferSize = 256 << 10
+
+// tempFilePrefix names the spooled file. It is searchable, so an operator finding
+// one of these left behind knows which component to blame, and it is what
+// SweepStaleSpools matches on — so the two cannot drift apart.
+const tempFilePrefix = "oga-fetch-artifact-"
+
+// tempFilePattern is the os.CreateTemp pattern built from that prefix.
+const tempFilePattern = tempFilePrefix + "*"
+
+// Result is a downloaded artifact, spooled to a temp file.
+//
+// The caller OWNS it and MUST Close it — that is what deletes the temp file and
+// releases the descriptor. Get returns a Result only on success; on every
+// failure path Get cleans up its own partial spool, so a caller that got an
+// error has nothing to close.
 type Result struct {
-	Body []byte
+	// Hash is the SHA-256 of the artifact as bare lower-case hex, with no
+	// algorithm prefix, computed during the transfer.
+	//
+	// This is the digest of the RAW bytes as published, which is the only form
+	// comparable with a publisher's asserted checksum (computed over the same
+	// file) and the conservative key for a no-op gate: a semantically identical
+	// re-publish differing only in key order re-ingests, where hashing a
+	// normalized form risks calling two genuinely different artifacts equal.
+	Hash string
+
+	// Size is the artifact's length in bytes, and always equals the spooled
+	// file's length.
+	Size int64
+
+	// ETag is the source's entity tag with any surrounding quotes stripped, so a
+	// caller can compare it directly. Empty when the source sent none.
+	//
+	// It is an opaque cache validator, NOT a digest — an S3 multipart ETag is
+	// neither a SHA-256 nor a whole-object MD5 — so it must never be used where a
+	// checksum is meant. Use Hash for that.
 	ETag string
+
+	// mu guards the lifecycle fields below.
+	//
+	// It is here because the doc above promises two things that are each true
+	// alone and were not true together: that a caller may take as many readers as
+	// it likes, and that Close may be called more than once. Close mutated the
+	// fields Reader reads, so the natural parallel shape — several passes under an
+	// errgroup with one deferred Close — was a data race, and a consumer running
+	// `go test -race` would have inherited a failure from this package. A mutex
+	// per artifact costs nothing beside a multi-hundred-megabyte download.
+	mu sync.Mutex
+	// file is the spooled artifact, held open so Reader can hand out
+	// independent io.ReaderAt-backed views of it. It is NOT cleared by Close —
+	// see Reader for why.
+	file *os.File
+	// path is retained for the unlink in Close: it is the name Close removes,
+	// not something a caller should reach for.
+	path string
+	// closed records that Close has run, so it is idempotent without having to
+	// nil out file as its signal.
+	closed bool
+}
+
+// Reader returns an independent reader over the whole artifact, positioned at
+// the start.
+//
+// Independent is the point. A caller that needs several passes — the sj24k asset
+// export is read once for its embedded class catalogue, once for vertices and
+// once for edges — gets a fresh cursor each time rather than having to rewind a
+// shared one, and forgetting to rewind is the bug this shape makes unwritable.
+// Concurrent readers are safe for the same reason: io.SectionReader keeps its
+// offset itself and reads through ReadAt, which does not move the file's own
+// offset.
+//
+// The returned reader is also an io.ReadSeeker, which is what lets a caller that
+// retries an upload replay the body.
+//
+// After Close, reads through the returned reader FAIL with os.ErrClosed. They do
+// not panic, and Reader does not return nil: an earlier revision returned nil
+// after Close on the theory that a use-after-close should fault at the call site,
+// which was worse on both counts. A typed nil in an interface is not nil —
+// `var rd io.Reader = res.Reader()` is non-nil, so the guard a defensive caller
+// writes passes and the panic then arrives inside io.ReadAll, FURTHER from the
+// call site rather than closer. An error from Read names the mistake where it
+// happens and can be handled.
+//
+// Reader still returns nil for a nil *Result, which is a different mistake: it
+// means the caller ignored Get's error, and there is no artifact to describe.
+func (r *Result) Reader() *io.SectionReader {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.file == nil {
+		return nil
+	}
+	return io.NewSectionReader(r.file, 0, r.Size)
+}
+
+// Close releases the descriptor and deletes the temp file. It is safe to call
+// more than once, and safe to call concurrently with Reader, so a
+// `defer res.Close()` costs nothing next to an explicit close on a success path.
+//
+// The unlink runs even when the close fails: leaving a multi-hundred-megabyte
+// file behind because a descriptor misbehaved would be the worse of the two
+// outcomes, and on Unix removing a name whose descriptor is still open is
+// legitimate anyway.
+//
+// Both failures are reported when both occur, rather than the first one winning.
+// They are not equally interesting — a close error is usually benign while a
+// failed unlink is the one that leaks the disk — so returning only the close
+// error would hide the more consequential of the two behind the less.
+func (r *Result) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed || r.file == nil {
+		return nil
+	}
+	r.closed = true
+	closeErr := r.file.Close()
+	rmErr := os.Remove(r.path)
+	if errors.Is(rmErr, os.ErrNotExist) {
+		rmErr = nil
+	}
+	return errors.Join(closeErr, rmErr)
 }
 
 // Downloader fetches artifacts under the guards described on the package.
@@ -57,6 +243,7 @@ type Result struct {
 type Downloader struct {
 	http          *http.Client
 	maxBytes      int64
+	tempDir       string
 	retry         RetryConfig
 	allowInsecure bool
 	authToken     string
@@ -83,6 +270,25 @@ func WithMaxBytes(n int64) Option {
 	return func(d *Downloader) {
 		if n > 0 {
 			d.maxBytes = n
+		}
+	}
+}
+
+// WithTempDir overrides the directory the artifact is spooled to. An empty value
+// is ignored, leaving os.TempDir.
+//
+// Set it when the default temp directory is RAM-backed and the artifact is large
+// enough for that to matter: spooling to a tmpfs moves the bytes off the Go heap
+// but leaves them charged to the container's memory limit, which defeats the
+// point. See the package doc for the measured Docker-versus-Kubernetes
+// difference.
+//
+// The directory must exist and be writable; Get reports a permanent error if it
+// is not, since a mis-configured spool directory will not fix itself on a retry.
+func WithTempDir(dir string) Option {
+	return func(d *Downloader) {
+		if s := strings.TrimSpace(dir); s != "" {
+			d.tempDir = s
 		}
 	}
 }
@@ -156,7 +362,8 @@ func normalizeHost(h string) string {
 }
 
 // New builds a Downloader with the documented defaults: HTTPS only, 64 MiB cap,
-// 2 minute per-attempt timeout, bounded retry, no allowlist, no credential.
+// 2 minute per-attempt timeout, bounded retry, os.TempDir for the spool, no
+// allowlist, no credential.
 func New(opts ...Option) *Downloader {
 	d := &Downloader{
 		http:     &http.Client{Timeout: DefaultTimeout},
@@ -188,7 +395,13 @@ func safeURL(u *url.URL) string {
 	return c.Redacted()
 }
 
-// Get fetches rawURL under the configured guards.
+// Get fetches rawURL under the configured guards, spooling the body to a temp
+// file and hashing it in the same pass.
+//
+// On success the caller owns the returned Result and MUST Close it. On failure
+// nothing is returned and nothing is left on disk: every path that abandons a
+// spool — a rejected URL, an over-cap body, a mid-transfer transport failure, an
+// attempt that will be retried — deletes its own partial file before returning.
 //
 // Scheme, host and allowlist are validated BEFORE any request is made, and each
 // rejection is permanent: a URL that is not allowed will not become allowed on a
@@ -229,6 +442,14 @@ func (d *Downloader) Get(ctx context.Context, rawURL string) (*Result, error) {
 
 	var res *Result
 	err = Do(ctx, d.retry, func() error {
+		// A retried attempt must not inherit the previous one's spool. attempt
+		// cleans up its own failures, so this only guards the case where a
+		// successful attempt is somehow followed by another — cheap insurance
+		// against a future edit to the retry loop leaking a 300 MB file.
+		if res != nil {
+			_ = res.Close()
+			res = nil
+		}
 		r, ferr := d.attempt(ctx, u.String(), safe)
 		if ferr != nil {
 			return ferr
@@ -237,6 +458,12 @@ func (d *Downloader) Get(ctx context.Context, rawURL string) (*Result, error) {
 		return nil
 	})
 	if err != nil {
+		// Do returns an error only when no attempt succeeded, but closing here
+		// keeps "an error means nothing to clean up" true by construction rather
+		// than by reading the retry loop.
+		if res != nil {
+			_ = res.Close()
+		}
 		return nil, fmt.Errorf("download %s: %w", safe, err)
 	}
 	return res, nil
@@ -291,17 +518,231 @@ func (d *Downloader) attempt(ctx context.Context, target, safe string) (*Result,
 		return nil, StatusError(resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 
-	// Read one byte past the cap so an over-limit body is detected
-	// deterministically rather than inferred from a truncated read.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, d.maxBytes+1))
+	// A declared length over the cap is refused before a single byte is
+	// transferred. Advisory only — Content-Length is absent on a chunked response
+	// and a hostile source can understate it — so the during-copy check below
+	// stays authoritative. It is worth having because the common case of a
+	// genuinely-too-large artifact is a well-behaved source that declares its
+	// size, and there is no reason to spend the bandwidth and the disk to
+	// rediscover what it already told us.
+	if resp.ContentLength > d.maxBytes {
+		return nil, Permanent(fmt.Errorf("download declares %d bytes, over the %d byte cap",
+			resp.ContentLength, d.maxBytes))
+	}
+
+	return d.spool(resp, safe)
+}
+
+// spool streams the response body to a temp file, hashing as it goes, and
+// enforces the cap during the copy.
+//
+// Every failure after the file exists deletes it before returning — that is the
+// whole reason this is a function rather than inline in attempt: one place owns
+// the cleanup, so a new early return cannot forget it.
+func (d *Downloader) spool(resp *http.Response, safe string) (*Result, error) {
+	f, err := os.CreateTemp(d.tempDir, tempFilePattern)
 	if err != nil {
-		// Scrubbed before the wrap, for the reason given on scrubURLError: a
-		// mid-body transport failure can surface as *url.Error, and fmt.Errorf
-		// would bake its raw URL into this message.
-		return nil, fmt.Errorf("read body: %w", scrubURLError(err, safe))
+		// A missing, unwritable or read-only spool directory is a deployment
+		// fault, not a transient one: retrying cannot create the directory, and
+		// the error text names the path so an operator can fix it. This is the
+		// failure a read-only container root filesystem produces when no writable
+		// temp dir was mounted.
+		return nil, Permanent(fmt.Errorf("create spool file in %q: %w", d.spoolDir(), err))
 	}
-	if int64(len(body)) > d.maxBytes {
-		return nil, Permanent(fmt.Errorf("download exceeds the %d byte cap", d.maxBytes))
+
+	res, err := writeSpool(f, resp.Body, d.maxBytes)
+	if err != nil {
+		discardSpool(f)
+		// Scrub INSIDE the wrap, in one expression, for the reason given on
+		// scrubURLError: fmt.Errorf renders %w into a stored string at
+		// construction, so a scrub applied after any wrapping is already too
+		// late. writeSpool therefore returns its errors bare and the wrapping
+		// happens here — an earlier revision of this change wrapped in
+		// writeSpool and scrubbed here, which left the raw presigned URL in the
+		// message one wrapper below an outermost line that read ?REDACTED.
+		//
+		// A write failure is permanent: the disk is full, read-only, or the
+		// descriptor is gone, and none of those clears inside the retry budget.
+		// See spoolWriteError for why that is tagged rather than inferred.
+		var we *spoolWriteError
+		if errors.As(err, &we) {
+			return nil, Permanent(fmt.Errorf("spool body to %s: %w", d.spoolDir(), we.err))
+		}
+		return nil, fmt.Errorf("spool body: %w", scrubURLError(err, safe))
 	}
-	return &Result{Body: body, ETag: strings.Trim(resp.Header.Get("ETag"), `"`)}, nil
+	res.ETag = strings.Trim(resp.Header.Get("ETag"), `"`)
+	return res, nil
+}
+
+// spoolDir reports the directory os.CreateTemp will use, for an error message
+// that names a real path rather than an empty string.
+func (d *Downloader) spoolDir() string {
+	if d.tempDir != "" {
+		return d.tempDir
+	}
+	return os.TempDir()
+}
+
+// spoolWriteError marks a failure writing to the spool file, as opposed to a
+// failure reading the response body. The two share a copy loop and nothing else:
+// one means the local filesystem is full, read-only or gone, the other means the
+// customer's server hung up.
+//
+// It exists so that distinction is TAGGED at the point it is known rather than
+// inferred later from an errno. Without it a full disk is terminal only by
+// accident — syscall.Errno happens to satisfy net.Error and ENOSPC.Timeout() is
+// false, so isRetryable's net.Error branch stops the retry. That is three
+// coincidences deep, it does not hold for a write error that is not an Errno
+// (os.ErrClosed, or anything a wrapping io.Writer returns), and it would break
+// silently if isRetryable's net.Error branch were ever tightened.
+type spoolWriteError struct{ err error }
+
+func (e *spoolWriteError) Error() string { return e.err.Error() }
+func (e *spoolWriteError) Unwrap() error { return e.err }
+
+// tagWriteErrors marks every error from w as a spool-write failure, so the copy
+// loop's two failure sources stay distinguishable after the fact.
+type tagWriteErrors struct{ w io.Writer }
+
+func (t tagWriteErrors) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	if err != nil {
+		return n, &spoolWriteError{err: err}
+	}
+	return n, nil
+}
+
+// writeSpool copies body into f, hashing in the same pass, and returns a Result
+// holding f. On any error f is left untouched for the caller to discard — this
+// function never closes or removes it, so ownership stays with exactly one
+// place.
+//
+// Errors are returned BARE, never wrapped. The caller wraps them, because it is
+// also the place that scrubs the credential-bearing URL out of them, and the two
+// have to happen in one expression (see the call site in spool, and
+// scrubURLError's doc for why).
+//
+// The cap is enforced DURING the copy by reading one byte past it, which keeps
+// the pre-SJ24K-53 detection semantics: an artifact exactly at the cap is valid
+// and one byte over is deterministically rejected, rather than inferred from a
+// truncated read. The overshoot is bounded at a single byte, so an over-cap
+// artifact costs cap+1 bytes of transfer and disk rather than its full length —
+// a 400 MB artifact under a 300 MB cap is abandoned at 300 MB, not downloaded.
+func writeSpool(f *os.File, body io.Reader, maxBytes int64) (*Result, error) {
+	sum := sha256.New()
+	buf := make([]byte, copyBufferSize)
+	n, err := io.CopyBuffer(io.MultiWriter(tagWriteErrors{w: f}, sum), io.LimitReader(body, readLimit(maxBytes)), buf)
+	if err != nil {
+		return nil, err
+	}
+	if n > maxBytes {
+		return nil, Permanent(fmt.Errorf("download exceeds the %d byte cap", maxBytes))
+	}
+	return &Result{
+		Hash: hex.EncodeToString(sum.Sum(nil)),
+		Size: n,
+		file: f,
+		path: f.Name(),
+	}, nil
+}
+
+// readLimit is the cap plus the one byte that makes an overrun detectable,
+// computed without overflowing.
+//
+// The guard is not hypothetical. math.MaxInt64 is the natural way to spell
+// "effectively uncapped", WithMaxBytes accepts it (it rejects only non-positive
+// values), and a bare maxBytes+1 wraps to math.MinInt64 — whereupon io.LimitReader
+// returns EOF on its first read and the download "succeeds" with ZERO bytes and
+// the SHA-256 of the empty string, which looks entirely legitimate to a
+// content-addressed gate. For a connector whose snapshot apply is a scoped
+// replace, an empty artifact accepted as real is destructive rather than merely
+// wrong.
+//
+// At the maximum there is nothing to detect: no artifact can exceed MaxInt64
+// bytes, so returning the cap unchanged makes the n > maxBytes check
+// unreachable, which is correct rather than a compromise.
+func readLimit(maxBytes int64) int64 {
+	// == rather than >=: for an int64 the two are equivalent, and staticcheck
+	// rightly points out that nothing can exceed the maximum.
+	if maxBytes == math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return maxBytes + 1
+}
+
+// discardSpool closes and deletes an abandoned spool file. Errors are ignored
+// deliberately: this only ever runs on a path that is already returning a more
+// informative error, and replacing that error with a cleanup failure would hide
+// the cause.
+func discardSpool(f *os.File) {
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+}
+
+// DefaultStaleSpoolAge is the age at which SweepStaleSpools considers a spool
+// file abandoned. Deliberately far longer than any cycle can legitimately run: a
+// single attempt is bounded by DefaultTimeout (2 minutes) and the retry policy
+// tries three, so an hour leaves an order of magnitude of headroom over the
+// slowest plausible download.
+const DefaultStaleSpoolAge = time.Hour
+
+// SweepStaleSpools deletes spool files in dir older than olderThan, returning how
+// many it removed. A non-positive olderThan means DefaultStaleSpoolAge; an empty
+// dir means os.TempDir.
+//
+// Call it ONCE at process start. It exists because Close is the only thing that
+// removes a spool, and SIGKILL runs no defers — so a connector that is OOM-killed
+// or evicted mid-download leaves the partial artifact behind. Whether that
+// matters depends on the runtime, and the two the platform uses differ:
+//
+//   - Under Kubernetes /tmp is an emptyDir, which survives CONTAINER restarts and
+//     is deleted only when the pod is removed from the node. A crash-looping
+//     connector therefore accumulates one abandoned artifact per crash, in a
+//     volume with no sizeLimit, against node ephemeral storage the platform
+//     declares no request for. That is the case this function is for.
+//   - Under Docker /tmp is a tmpfs, whose contents are lost when the container
+//     stops, so that path already cleans itself.
+//
+// It is age-based rather than unconditional because a spool file belonging to a
+// LIVE download is indistinguishable from an abandoned one by name. Within a
+// single container that cannot happen (a connector runs one cycle at a time), but
+// a caller that points several components at one shared directory would otherwise
+// have each sweep delete its peers' work in progress. Deleting only what is older
+// than a whole hour makes that safe without the caller having to reason about it.
+//
+// Errors reading dir are returned. A file that cannot be removed is skipped
+// rather than aborting the sweep, since one stubborn file should not strand the
+// rest — the count reflects what was actually removed.
+func SweepStaleSpools(dir string, olderThan time.Duration) (int, error) {
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	if olderThan <= 0 {
+		olderThan = DefaultStaleSpoolAge
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, fmt.Errorf("sweep stale spools in %q: %w", dir, err)
+	}
+	cutoff := time.Now().Add(-olderThan)
+	var removed int
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if !strings.HasPrefix(e.Name(), tempFilePrefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // vanished under us, or unreadable — either way not ours to fix
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			removed++
+		}
+	}
+	return removed, nil
 }

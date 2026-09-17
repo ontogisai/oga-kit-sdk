@@ -330,16 +330,48 @@ When the upstream pushes a pointer rather than the payload — a presigned URL i
 
 ```go
 dl := fetch.New(
-    fetch.WithMaxBytes(64<<20),
+    fetch.WithMaxBytes(300<<20),           // your upstream's realistic ceiling
     fetch.WithHostAllowlist(hosts),        // from per-tenant config
     fetch.WithBearer(token, pollHost),     // sent ONLY to that host
 )
 res, err := dl.Get(ctx, notification.PresignedURL)
+if err != nil {
+    return err
+}
+defer res.Close()                          // deletes the spooled temp file
+
+// res.Hash is the sha256 of the artifact, computed during the transfer:
+// compare it against the publisher's claimed checksum, and use it as the
+// no-op gate's key. res.Reader() hands out an independent reader each call,
+// so a multi-pass parse needs no rewind and no second download.
+if err := parse(res.Reader()); err != nil {
+    return err
+}
 ```
 
 HTTPS-only, size-capped, allowlist-checked before any request is made, bounded retry that treats a 4xx as permanent and a 5xx as retryable, and errors that redact the query string — for a presigned URL, the signature *is* the credential.
 
 Set the allowlist whenever a fetch target arrives in a webhook body: even a validly signed notification can then only point your connector at a known origin. An allowlist that reduces to nothing is treated as *unset*, not deny-all, so reading it from optional config degrades to unrestricted rather than to a connector that can fetch nothing.
+
+**Pick the cap for your own downstream, not from this example.** 300 MB suits a connector that emits over the transfer wire. A connector that PUTs its artifact back to the platform's ontology-snapshot intake must stay at or below that intake's own 64 MiB body cap — which is what `DefaultMaxBytes` is — or a clear, immediate size rejection becomes a 413 that only arrives after a full download has succeeded.
+
+**The artifact is spooled to a temp file, not held in memory** (SJ24K-53). `Result` owns an open descriptor and a file on disk, so the caller **must** `Close` it — a leak per failed cycle is its own outage at these sizes. Measured on a 300 MB artifact: 317 KiB of total allocation streaming, against 616 MiB for the byte-slice version it replaced.
+
+Three things follow from that:
+
+- **`res.Hash` is free.** The transfer is the one unavoidable pass over the bytes, so the SHA-256 is computed during it. Nothing needs a second read to gate on content or to check a publisher's checksum.
+- **`WithTempDir` matters when `/tmp` is RAM-backed.** Spooling to a tmpfs moves the artifact off the Go heap but *not* out of the container's memory allowance — measured on Docker 29.4.0, a 300 MB write to a tmpfs `/tmp` in a 512 MiB container took `memory.current` from 2.9 MB to 317 MB. Under the ONTOGIS Kubernetes runtime `/tmp` is an `emptyDir` on node disk, so the default is correct there; under the Docker runtime it is tmpfs, so either size the cap against the memory limit or point `WithTempDir` at a disk-backed mount.
+- **Sweep once at startup.** `Close` is the only thing that removes a spool and `SIGKILL` runs no defers, so a component killed mid-download leaves the partial artifact behind. Under Kubernetes an `emptyDir` survives *container* restarts, so a crash-looping component accumulates one per crash:
+
+  ```go
+  if n, err := fetch.SweepStaleSpools(tempDir, fetch.DefaultStaleSpoolAge); err != nil {
+      slog.Warn("could not sweep stale download spools", "error", err)
+  } else if n > 0 {
+      slog.Info("removed abandoned download spools", "count", n)
+  }
+  ```
+
+  It is age-based (default one hour, against a two-minute per-attempt timeout) so it can never delete a live download, which is what makes it safe to call unconditionally even when several components share a directory.
 
 ## Build an agent
 
