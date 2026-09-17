@@ -64,6 +64,34 @@ Returns:  receipt (job_id, content_hash, mode)
 
 The platform owns the job ledger; both ontology and data loads are uniformly async. The kit's caller (the install workflow for ontology, the import workflow for data) polls `loader.status` until terminal.
 
+### Full-snapshot feeds: asserting edge completeness
+
+By default an artifact's edges are a **partial batch** — the platform never infers that a relationship ended because your artifact stopped carrying it. That is right for an incremental loader, and wrong for a feed whose export is the system of record for the assets it carries: a relationship you drop would survive in the graph forever.
+
+A full-snapshot connector opts in on the writer:
+
+```go
+w := transfer.NewDataWriter(client, "sj24k",
+    transfer.WithEdgeCompleteness(transfer.EdgeCompleteness{
+        Mode: transfer.EdgeCompletenessPerSource,
+        GovernedPredicates: []string{
+            "feeds", "hasLocation", "hasPoint", "hasPart",
+            "controls", "meters", "hasSubMeter",
+        },
+    }))
+```
+
+This asserts: *for every vertex this artifact carries, the edges it carries from that vertex under the governed predicates are the complete set — including the empty set.* The platform closes a live edge whose source is one of those vertices, whose predicate is governed, and which the artifact does not carry. Closure is soft (`is_deleted` + `tx_to`), so an as-of traversal before the publish still resolves.
+
+`GovernedPredicates` bounds the assertion and is **required**. A source routinely also carries edges written by another feed, the MCP tools, or the platform itself; those are only left alone because they are not in your vocabulary. An empty list is rejected rather than read as "all predicates".
+
+⚠️ **Two obligations the platform cannot verify.**
+
+1. **Collapse inverse pairs before you emit.** If the upstream declares a relationship from both ends (`feeds` on the damper, `isFedBy` on the AHU), that is *one* canonical edge. Emit it under a single canonical source whichever end declared it — the platform honours the submitted set verbatim and never re-derives an owner from the declaring asset. Without the collapse, you will close edges the other endpoint still declares.
+2. **One artifact per snapshot.** A source's edges must be in the *same* artifact as its vertex. Splitting one logical export across two artifacts makes each one's vertex set partial, and the first would close the edges the second carries.
+
+The platform applies a **volume guard**: a publish that would close an implausible number of edges is refused whole (nothing applied) and alerts an operator, who can clear a genuinely large removal. Expect a refused sync if your export truncates.
+
 ## Single-pass loader (most kits)
 
 For source files under 5 MiB or formats that don't need cross-pass state, implement `loader.LoaderHandler` and stream every record in one pass:

@@ -138,6 +138,46 @@ type CompleteResponse struct {
 	AcceptedAt string `json:"accepted_at,omitempty"`
 }
 
+// WriterOption configures a writer at construction. Variadic so every
+// existing NewWriter / NewDataWriter / NewOntologyWriter call site
+// compiles unchanged.
+type WriterOption func(*bufferedWriter)
+
+// WithEdgeCompleteness declares how complete the edge set in this
+// artifact is (OGA-914). Use [EdgeCompletenessPerSource] for a
+// full-snapshot feed whose export is the system of record for the
+// assets it carries — read that constant's doc first, it carries two
+// obligations the platform cannot verify.
+//
+// An invalid assertion is captured and returned from every subsequent
+// Write* call and from Close, rather than panicking or being dropped:
+// NewWriter has no error to return, and silently ignoring it would
+// ship an artifact the kit author believes asserts completeness when
+// it does not.
+func WithEdgeCompleteness(ec EdgeCompleteness) WriterOption {
+	return func(w *bufferedWriter) {
+		if err := ec.Validate(); err != nil {
+			w.optErr = err
+			return
+		}
+		if ec.Mode == EdgeCompletenessPartial {
+			// Nothing asserted — leave the header field absent rather
+			// than emitting an empty object.
+			return
+		}
+		if w.header.Kind == KindOntology {
+			w.optErr = errors.New("transfer: edge_completeness is not valid on an ontology writer " +
+				"(an ontology artifact carries no edge instances to scope)")
+			return
+		}
+		copied := EdgeCompleteness{
+			Mode:               ec.Mode,
+			GovernedPredicates: append([]string(nil), ec.GovernedPredicates...),
+		}
+		w.header.EdgeCompleteness = &copied
+	}
+}
+
 // NewWriter constructs the default in-process writer. Production
 // callers use this with an [HTTPCommitClient]; tests can substitute a
 // stub via the same constructor.
@@ -146,8 +186,8 @@ type CompleteResponse struct {
 // switching to the presigned-upload path. kind controls which
 // platform-side dispatcher receives the artifact; kit authors get
 // this set automatically by [NewOntologyWriter] / [NewDataWriter].
-func NewWriter(client CommitClient, kind LoadKind, kitID string) Writer {
-	return &bufferedWriter{
+func NewWriter(client CommitClient, kind LoadKind, kitID string, opts ...WriterOption) Writer {
+	w := &bufferedWriter{
 		client: client,
 		header: Header{
 			Format:        FormatNDJSON,
@@ -156,18 +196,24 @@ func NewWriter(client CommitClient, kind LoadKind, kitID string) Writer {
 			KitID:         kitID,
 		},
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(w)
+		}
+	}
+	return w
 }
 
 // NewOntologyWriter constructs a writer pre-configured for the
 // ontology dispatcher. Sugar on top of [NewWriter].
-func NewOntologyWriter(client CommitClient, kitID string) Writer {
-	return NewWriter(client, KindOntology, kitID)
+func NewOntologyWriter(client CommitClient, kitID string, opts ...WriterOption) Writer {
+	return NewWriter(client, KindOntology, kitID, opts...)
 }
 
 // NewDataWriter constructs a writer pre-configured for the data
 // dispatcher. Sugar on top of [NewWriter].
-func NewDataWriter(client CommitClient, kitID string) Writer {
-	return NewWriter(client, KindData, kitID)
+func NewDataWriter(client CommitClient, kitID string, opts ...WriterOption) Writer {
+	return NewWriter(client, KindData, kitID, opts...)
 }
 
 // bufferedWriter is the default Writer. It accumulates lines in an
@@ -183,6 +229,11 @@ type bufferedWriter struct {
 	buf    bytes.Buffer
 	count  int
 	closed bool
+	// optErr holds a construction-time option failure. NewWriter returns
+	// a bare Writer, so there is nowhere to surface it at construction;
+	// it is returned from every write and from Close instead, which is
+	// what stops a mis-configured writer from committing an artifact.
+	optErr error
 }
 
 func (w *bufferedWriter) WriteVertex(_ context.Context, v Vertex) error {
@@ -221,6 +272,9 @@ func (w *bufferedWriter) WriteHierarchy(_ context.Context, h HierarchyEntry) err
 }
 
 func (w *bufferedWriter) writeEnvelope(kind EntryKind, value any) error {
+	if w.optErr != nil {
+		return w.optErr
+	}
 	if w.closed {
 		return errors.New("transfer.Writer: cannot write after Close")
 	}
@@ -247,6 +301,13 @@ func writeJSONLine(buf *bytes.Buffer, v any) error {
 }
 
 func (w *bufferedWriter) Close(ctx context.Context) (*Receipt, error) {
+	if w.optErr != nil {
+		// Refuse to commit rather than shipping an artifact whose header
+		// does not carry the assertion the caller asked for. Marked closed
+		// so a caller that ignores the error cannot retry into a commit.
+		w.closed = true
+		return nil, w.optErr
+	}
 	if w.closed {
 		return nil, errors.New("transfer.Writer: already closed")
 	}
