@@ -27,7 +27,7 @@ func TestSkipped_BareFormRecordsNoReason(t *testing.T) {
 
 func TestSkippedReason_CarriesCodeAndDetail(t *testing.T) {
 	b := newBatch([]Entity{{ID: "a"}})
-	b.SkippedReason("a", "predicate_unmapped", "  no Core enum mapping for `feeds`  ")
+	b.SkippedReason("a", "predicate_unmapped", "  no external-system enum mapping for `feeds`  ")
 
 	results, defects := b.Results()
 	if len(defects) != 0 {
@@ -42,7 +42,7 @@ func TestSkippedReason_CarriesCodeAndDetail(t *testing.T) {
 	}
 	// Trimmed, so a stray newline in a composed message cannot produce a detail
 	// that renders as blank-but-present.
-	if r.ReasonDetail != "no Core enum mapping for `feeds`" {
+	if r.ReasonDetail != "no external-system enum mapping for `feeds`" {
 		t.Errorf("reason_detail = %q, want trimmed", r.ReasonDetail)
 	}
 }
@@ -95,7 +95,7 @@ func TestReasonCode_ReservedPrefixesAreRefusedNotSubstituted(t *testing.T) {
 // crosses every workflow continuation.
 func TestReasonCode_MalformedCodesAreRefused(t *testing.T) {
 	cases := map[string]string{
-		"whitespace": "no Core enum mapping for this predicate",
+		"whitespace": "no external-system enum mapping for this predicate",
 		"too long":   strings.Repeat("x", maxReasonCodeLen+1),
 	}
 	for name, code := range cases {
@@ -122,14 +122,14 @@ func TestReasonCode_MalformedCodesAreRefused(t *testing.T) {
 // current platform reads one field for both verdict kinds.
 func TestFailed_PopulatesLegacyErrorAndReasonDetail(t *testing.T) {
 	b := newBatch([]Entity{{ID: "a"}})
-	b.Failed("a", "Core rejected the payload")
+	b.Failed("a", "the external system rejected the payload")
 
 	results, _ := b.Results()
 	r := results[0]
-	if r.Error != "Core rejected the payload" {
+	if r.Error != "the external system rejected the payload" {
 		t.Errorf("error = %q", r.Error)
 	}
-	if r.ReasonDetail != "Core rejected the payload" {
+	if r.ReasonDetail != "the external system rejected the payload" {
 		t.Errorf("reason_detail = %q", r.ReasonDetail)
 	}
 	// No code: this component did not classify the failure, and guessing one from
@@ -224,7 +224,7 @@ func TestResults_NormalizedComponentBugsCarryStableCodes(t *testing.T) {
 func TestRelationshipBatch_ReasonBehaviorMatchesEntityBatch(t *testing.T) {
 	rb := newRelationshipBatch([]Relationship{{ID: "r1"}, {ID: "r2"}, {ID: "r3"}, {ID: "r4"}})
 	rb.Skipped("r1")
-	rb.SkippedReason("r2", "predicate_unmapped", "no Core enum mapping")
+	rb.SkippedReason("r2", "predicate_unmapped", "no external-system enum mapping")
 	rb.FailedReason("r3", "target_unroutable", "class not routable")
 	rb.FailedErr("r4", errors.New("boom"))
 

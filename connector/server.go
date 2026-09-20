@@ -80,7 +80,7 @@ type Config struct {
 	//
 	// It exists so needing one extra endpoint does not force a kit to abandon
 	// this server and re-implement the whole contract by hand — which is what
-	// the sj24k ontology-sync connector had to do, and how its webhook route
+	// the reference ontology-sync connector had to do, and how its webhook route
 	// drifted from what the platform ingress actually posts to.
 	//
 	// A pattern that collides with a reserved contract path (the webhook,

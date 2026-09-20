@@ -22,7 +22,7 @@ const (
 	// 1 MiB and the JSON-RPC inline_body field is base64-encoded
 	// (~1.333× expansion), so a raw NDJSON body up to 700 KiB stays
 	// safely under the wire limit (~933 KiB encoded plus envelope).
-	// Larger artifacts (SJ campus data, IFC imports, ontologies with
+	// Larger artifacts (campus-scale data, IFC imports, ontologies with
 	// many type defs) use the presigned upload path which streams
 	// directly to object storage without buffering in the gateway or
 	// MCP server.

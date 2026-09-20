@@ -181,7 +181,7 @@ func TestWriter_RejectsMissingRequiredFields(t *testing.T) {
 func TestWriter_RelationshipTypeEmitsEnvelope(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	w := transfer.NewOntologyWriter(fc, "oga-kit-sj24k")
+	w := transfer.NewOntologyWriter(fc, "oga-kit-example")
 	ctx := context.Background()
 
 	if err := w.WriteEntityType(ctx, transfer.EntityTypeDef{Name: "brick_AHU"}); err != nil {

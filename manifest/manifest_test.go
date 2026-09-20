@@ -771,7 +771,7 @@ func TestParse_ModelingHybrid(t *testing.T) {
 api_version: ontogis.ai/v1
 kind: DomainKitManifest
 metadata:
-  name: oga-kit-sj24k
+  name: oga-kit-example
   version: "1.0.0"
 spec:
   platform_version: ">=1.0.0"

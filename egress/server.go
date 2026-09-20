@@ -35,7 +35,7 @@ import (
 // container. See the [Component] doc comment for the full contract.
 //
 // NOTE: there is no entity-types introspection path. GET /egress/entity-types
-// was removed in SJ24K-8 (platform half: OGA-855) — its own contract note said
+// was removed (platform half: OGA-855) — its own contract note said
 // the MANIFEST is authoritative, which is the argument against serving a second,
 // partial description of the same thing. It had no production consumer, and
 // OGA-846's ontology_sync lane made it wrong as well as unused: it reported

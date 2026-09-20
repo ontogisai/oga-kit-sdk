@@ -4,7 +4,7 @@ import "testing"
 
 // ModeFromStrings behaviour lock (OGA-892 / OGA-891 spec R7.2).
 //
-// This function REPLACES a kit-side implementation (oga-kit-sj24k's
+// This function REPLACES a kit-side implementation (oga-kit-example's
 // ontosync.ingressModeFor), so the point of this table is not that the mapping is
 // desirable in the abstract — it is that the mapping is UNCHANGED. Moving the
 // collapse into the SDK must be behaviour-preserving, or the kit that adopts it
@@ -40,7 +40,7 @@ func TestModeFromStrings(t *testing.T) {
 		// ⚠️ The consequence worth pinning: a list of ONLY unrecognized entries is
 		// indistinguishable from an empty list, so it yields poll. A connector that
 		// must not silently fall back to polling has to cross-check its own config
-		// and refuse to start — which is what the sj24k connector does.
+		// and refuse to start — which is what the example-kit connector does.
 		{"only unknown falls back to poll", []string{"stream", "grpc"}, ModePoll},
 		{"empty strings only", []string{"", "   "}, ModePoll},
 	}

@@ -200,9 +200,10 @@ type EgressSyncSpec struct {
 	// the same run.
 	//
 	// It exists because an external system of record commonly models types as data
-	// and requires a reference to one — 24K Core's asset_classification is a table
-	// and Asset.asset_classification_id is a required foreign key. The entity lane
-	// could not express that, because a type catalog is not an entity type.
+	// and requires a reference to one — in one external core system
+	// asset_classification is a table and Asset.asset_classification_id is a
+	// required foreign key. The entity lane could not express that, because a
+	// type catalog is not an entity type.
 	//
 	// ONE ENTRY PER PHYSICAL ANCHOR. That is what keeps each batch homogeneous:
 	// types stored under different anchors are different external targets
@@ -399,7 +400,7 @@ type EgressEntityTypeSpec struct {
 	//
 	// No second declaration is needed to find it: an entity's entity_type column
 	// already IS the catalog row's key, so this flag supplies the instruction to
-	// look, not the join. For 24K Core the resolved value is exactly
+	// look, not the join. In one external core system the resolved value is exactly
 	// Asset.asset_classification_id.
 	//
 	// It requires the entity's anchor to be declared in OntologySync — without a
@@ -466,8 +467,8 @@ type EgressOntologySyncSpec struct {
 // scoped to the source and target entity types (anchors) it applies to.
 //
 // TWO SCOPE FIELDS, on purpose, because one predicate name can span several
-// distinct (source-anchor, target-anchor) pairs in real data. Measured on the
-// sj24k campus export, `feeds` alone spans Equipment→Equipment (709 edges,
+// distinct (source-anchor, target-anchor) pairs in real data. Measured on a
+// campus-scale export, `feeds` alone spans Equipment→Equipment (709 edges,
 // mapping to the external system's asset-to-asset shape) and
 // Equipment→Location (344 edges, mapping to its asset-to-space shape) — and
 // only a declaration that names BOTH ends can tell the platform which read
@@ -505,7 +506,7 @@ type EgressRelationshipSyncSpec struct {
 	// physical anchor as SourceType/TargetType, rather than each alone —
 	// mirroring EgressEntityTypeSpec.IncludeDescendants exactly, including its
 	// forward-compatibility rationale: declaring the coarse anchor here means a
-	// class added under it later (a future Studio export adding a
+	// class added under it later (a future source export adding a
 	// feeds-to-Room edge, say) is picked up with NO manifest change, rather
 	// than requiring the kit to have anticipated every leaf in advance.
 	//

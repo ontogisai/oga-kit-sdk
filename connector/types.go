@@ -75,7 +75,7 @@ func (m IngressMode) valid() bool {
 // kit manifest declares `modes: [webhook, poll]` (a list, which the platform
 // validates at install and stores verbatim on the sidecar registry record),
 // while a running connector carries one IngressMode. Something has to bridge
-// them, and until now that something lived in a KIT — oga-kit-sj24k's
+// them, and until now that something lived in a KIT — a kit's own
 // ontosync/manifest.go — so a second connector meant a second copy, free to
 // drift. Two copies disagreeing about what a declared mode means is the
 // silent-404 failure class: the platform provisions ingress from the manifest,
@@ -100,7 +100,8 @@ func (m IngressMode) valid() bool {
 // ⚠️ A list of nothing but unrecognized entries therefore yields ModePoll — the
 // same as an empty list. A connector that must not silently fall back to polling
 // should compare against its own configuration and refuse to start on a
-// mismatch, which is what the sj24k connector does with SYNC_TRIGGER.
+// mismatch, which is what the reference ontology-sync connector does with
+// SYNC_TRIGGER.
 func ModeFromStrings(modes []string) IngressMode {
 	var poll, webhook bool
 	for _, m := range modes {

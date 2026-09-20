@@ -24,17 +24,17 @@ func outEdges(names ...string) []ParentEdgeSpec {
 const egressManifestYAML = `api_version: ontogis.ai/v1
 kind: DomainKitManifest
 metadata:
-  name: sj24k
+  name: example-kit
   version: 1.0.0
   display_name:
     en-US: SJ 24K
   description:
-    en-US: 24K Core integration
+    en-US: External core integration
 spec:
   platform_version: ">=1.0.0"
   egress_syncs:
-    - name: 24k-core-egress
-      external_system: 24k-core
+    - name: ext-core-egress
+      external_system: ext-core
       entities_sync:
         - name: rec_Site
           include_descendants: true
@@ -45,14 +45,14 @@ spec:
         - name: brick_Equipment
           parent_edges: [hasPart]
       credential_refs:
-        - 24k-core-api-key
+        - ext-core-api-key
       batch_size: 100
       max_in_flight: 4
       container:
-        image: ghcr.io/ontogisai/oga-kit-sj24k/24k-core-egress@sha256:abc123
+        image: ghcr.io/ontogisai/oga-kit-example/ext-core-egress@sha256:abc123
         port: 8600
         env:
-          CORE_BASE_URL: "secret://24k-core-base-url"
+          EXT_CORE_BASE_URL: "secret://ext-core-base-url"
 `
 
 func TestParse_EgressSyncsBlock(t *testing.T) {
@@ -67,10 +67,10 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 		t.Fatalf("egress_syncs = %d, want 1", len(m.Spec.EgressSyncs))
 	}
 	e := &m.Spec.EgressSyncs[0]
-	if e.Name != "24k-core-egress" {
+	if e.Name != "ext-core-egress" {
 		t.Errorf("name = %q", e.Name)
 	}
-	if e.ExternalSystem != "24k-core" {
+	if e.ExternalSystem != "ext-core" {
 		t.Errorf("external_system = %q", e.ExternalSystem)
 	}
 	// Declaration ORDER is load-bearing: the platform pushes a type to
@@ -109,7 +109,7 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 	if e.EntitiesSync[2].Hierarchical {
 		t.Error("entities_sync[2].hierarchical = true; a cross-type edge is not a hierarchy")
 	}
-	if len(e.CredentialRefs) != 1 || e.CredentialRefs[0] != "24k-core-api-key" {
+	if len(e.CredentialRefs) != 1 || e.CredentialRefs[0] != "ext-core-api-key" {
 		t.Errorf("credential_refs = %v", e.CredentialRefs)
 	}
 	if e.EffectiveBatchSize() != 100 {
@@ -118,7 +118,7 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 	if e.Container.Port != 8600 {
 		t.Errorf("container.port = %d", e.Container.Port)
 	}
-	if e.Container.Env["CORE_BASE_URL"] != "secret://24k-core-base-url" {
+	if e.Container.Env["EXT_CORE_BASE_URL"] != "secret://ext-core-base-url" {
 		t.Errorf("container.env = %v", e.Container.Env)
 	}
 }
@@ -190,7 +190,7 @@ func TestValidateEgressSyncs(t *testing.T) {
 	valid := func() EgressSyncSpec {
 		return EgressSyncSpec{
 			Name:           "e1",
-			ExternalSystem: "24k-core",
+			ExternalSystem: "ext-core",
 			EntitiesSync:   []EgressEntityTypeSpec{{Name: "Equipment"}},
 			Container:      pinned,
 		}
@@ -273,7 +273,7 @@ func TestValidateEgressSyncs(t *testing.T) {
 // call would let a malformed block parse cleanly and fail only at install.
 func TestValidate_ReachesEgressValidator(t *testing.T) {
 	bad := strings.Replace(egressManifestYAML,
-		"      external_system: 24k-core\n", "", 1)
+		"      external_system: ext-core\n", "", 1)
 	m, err := Parse(strings.NewReader(bad))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -294,7 +294,7 @@ func TestValidate_ReachesEgressValidator(t *testing.T) {
 func TestValidateEgressSyncs_DoesNotCheckOntology(t *testing.T) {
 	e := EgressSyncSpec{
 		Name:           "e1",
-		ExternalSystem: "24k-core",
+		ExternalSystem: "ext-core",
 		EntitiesSync:   []EgressEntityTypeSpec{{Name: "NoSuchTypeAnywhere"}},
 		Container:      SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
@@ -314,7 +314,7 @@ func TestValidateEgressSyncs_DoesNotCheckOntology(t *testing.T) {
 func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 	e := EgressSyncSpec{
 		Name:           "core-sync",
-		ExternalSystem: "24k-core",
+		ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "rec:Space", ParentEdges: outEdges("hasLocation"), Hierarchical: true},
 			{Name: "brick:Equipment"},
@@ -349,7 +349,7 @@ func TestValidateEgressSyncs_AcceptsNamespacedClassID(t *testing.T) {
 // (egress.assertAddressableEdge), so without this check the failure is mid-run.
 func TestValidateEgressSyncs_RejectsUnaddressableParentEdges(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "rec:Space", ParentEdges: outEdges("rec:hasPart")},
 		},
@@ -377,7 +377,7 @@ func TestValidateEgressSyncs_RejectsUnaddressableParentEdges(t *testing.T) {
 func TestValidateEgressSyncs_RejectsParentEdgesCasesACharacterDenylistWouldMiss(t *testing.T) {
 	for _, edge := range []string{"hasLocation_", "has.location", "has location", "has/location", "has-location"} {
 		e := EgressSyncSpec{
-			Name: "core-sync", ExternalSystem: "24k-core",
+			Name: "core-sync", ExternalSystem: "ext-core",
 			EntitiesSync: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(edge)}},
 			Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 		}
@@ -391,7 +391,7 @@ func TestValidateEgressSyncs_RejectsParentEdgesCasesACharacterDenylistWouldMiss(
 // empty suggestion, which would read as "declare nothing".
 func TestValidateEgressSyncs_ParentEdgesWithNoLegalForm(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{{Name: "Location", ParentEdges: outEdges(":::")}},
 		Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
@@ -411,7 +411,7 @@ func TestValidateEgressSyncs_ParentEdgesWithNoLegalForm(t *testing.T) {
 // one (which means "no containment edge", not "invalid").
 func TestValidateEgressSyncs_AcceptsAddressableAndAbsentParentEdges(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Location", ParentEdges: outEdges("hasLocation"), Hierarchical: true},
 			{Name: "brick:AHU", ParentEdges: outEdges("rec_hasPart")},
@@ -450,7 +450,7 @@ func TestSanitizeEdgeName_MatchesPlatformSanitizer(t *testing.T) {
 // level walk would look for roots via an edge that was never named.
 func TestValidateEgressSyncs_RejectsHierarchicalWithoutEdge(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{{Name: "Location", Hierarchical: true}},
 		Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
@@ -468,7 +468,7 @@ func TestValidateEgressSyncs_RejectsHierarchicalWithoutEdge(t *testing.T) {
 // names one key twice and leaves which resolution wins undefined.
 func TestValidateEgressSyncs_RejectsDuplicateParentEdge(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Point", ParentEdges: outEdges("isPointOf", "isPointOf")},
 		},
@@ -489,7 +489,7 @@ func TestValidateEgressSyncs_RejectsDuplicateParentEdge(t *testing.T) {
 // never arrives.
 func TestValidateEgressSyncs_RejectsEmptyParentEdgeEntry(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: outEdges("isPointOf", "  ")}},
 		Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 	}
@@ -503,7 +503,7 @@ func TestValidateEgressSyncs_RejectsEmptyParentEdgeEntry(t *testing.T) {
 // Guards against a future "one implies the other" simplification.
 func TestValidateEgressSyncs_IncludeDescendantsIsIndependentOfHierarchical(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Equipment", IncludeDescendants: true, ParentEdges: outEdges("hasLocation")},
 			{Name: "Location", Hierarchical: true, ParentEdges: outEdges("hasLocation")},
@@ -520,7 +520,7 @@ func TestValidateEgressSyncs_IncludeDescendantsIsIndependentOfHierarchical(t *te
 // landing on the wrong field.
 func TestValidateEgressSyncs_DigestColonIsNotAClassIDColon(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{{Name: "brick:AHU"}},
 		Container:    SidecarContainerSpec{Image: "ghcr.io/ontogisai/x@sha256:deadbeef"},
 	}
@@ -546,20 +546,20 @@ func egressManifestWithEntitiesSync(entityTypes string) string {
 	return `api_version: ontogis.ai/v1
 kind: DomainKitManifest
 metadata:
-  name: sj24k
+  name: example-kit
   version: 1.0.0
   display_name:
     en-US: SJ 24K
   description:
-    en-US: 24K Core integration
+    en-US: External core integration
 spec:
   platform_version: ">=1.0.0"
   egress_syncs:
     - name: core-egress-sync
-      external_system: 24k-core
+      external_system: ext-core
       entities_sync:
 ` + entityTypes + `      container:
-        image: ghcr.io/ontogisai/oga-kit-sj24k/core-egress@sha256:abc123
+        image: ghcr.io/ontogisai/oga-kit-example/core-egress@sha256:abc123
 `
 }
 
@@ -645,7 +645,7 @@ func TestParse_ParentEdgesRejectsUnsupportedNodeShape(t *testing.T) {
 // author's stated intent.
 func TestValidateEgressSyncs_RejectsUnknownDirection(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Point", ParentEdges: []ParentEdgeSpec{{Edge: "hasPoint", Direction: "inbound"}}},
 		},
@@ -668,7 +668,7 @@ func TestValidateEgressSyncs_RejectsUnknownDirection(t *testing.T) {
 // is stored, rather than delete a redundant line.
 func TestValidateEgressSyncs_RejectsSameEdgeInBothDirections(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Point", ParentEdges: []ParentEdgeSpec{
 				{Edge: "hasPoint"},
@@ -697,7 +697,7 @@ func TestValidateEgressSyncs_RejectsSameEdgeInBothDirections(t *testing.T) {
 func TestValidateEgressSyncs_InboundDirection(t *testing.T) {
 	base := func(edges []ParentEdgeSpec) []EgressSyncSpec {
 		return []EgressSyncSpec{{
-			Name: "core-sync", ExternalSystem: "24k-core",
+			Name: "core-sync", ExternalSystem: "ext-core",
 			EntitiesSync: []EgressEntityTypeSpec{{Name: "Point", ParentEdges: edges}},
 			Container:    SidecarContainerSpec{Image: "ghcr.io/x/e@sha256:abc"},
 		}}
@@ -725,7 +725,7 @@ func TestValidateEgressSyncs_InboundDirection(t *testing.T) {
 // failure (parity fix found while implementing OGA-836).
 func TestValidateEgressSyncs_RejectsHierarchicalWithSeveralEdges(t *testing.T) {
 	e := EgressSyncSpec{
-		Name: "core-sync", ExternalSystem: "24k-core",
+		Name: "core-sync", ExternalSystem: "ext-core",
 		EntitiesSync: []EgressEntityTypeSpec{
 			{Name: "Location", Hierarchical: true, ParentEdges: outEdges("managedBy", "hasLocation")},
 		},
@@ -848,17 +848,17 @@ func TestParentEdgeNames(t *testing.T) {
 const ontologyLaneManifestYAML = `api_version: ontogis.ai/v1
 kind: DomainKitManifest
 metadata:
-  name: sj24k
+  name: example-kit
   version: 1.0.0
   display_name:
     en-US: SJ 24K
   description:
-    en-US: 24K Core integration
+    en-US: External core integration
 spec:
   platform_version: ">=1.0.0"
   egress_syncs:
     - name: core-egress-sync
-      external_system: 24k-core
+      external_system: ext-core
       ontology_sync:
         - anchor: Equipment
           include_parents: true
@@ -876,7 +876,7 @@ spec:
           include_descendants: true
           type_ref: true
       container:
-        image: ghcr.io/ontogisai/oga-kit-sj24k/core-egress@sha256:abc123
+        image: ghcr.io/ontogisai/oga-kit-example/core-egress@sha256:abc123
 `
 
 // The lane parses through the STRICT decoder — which is the check that matters,
@@ -1097,7 +1097,7 @@ func TestOntologyAnchors_SkipsEmptyAndPreservesOrder(t *testing.T) {
 func validEgressSpecForOntologyLane() EgressSyncSpec {
 	return EgressSyncSpec{
 		Name:           "core-egress-sync",
-		ExternalSystem: "24k-core",
+		ExternalSystem: "ext-core",
 		EntitiesSync:   []EgressEntityTypeSpec{{Name: "Equipment"}},
 		Container:      SidecarContainerSpec{Image: "ghcr.io/x/egress@sha256:abc123"},
 	}
@@ -1108,7 +1108,7 @@ func validEgressSpecForOntologyLane() EgressSyncSpec {
 func validEgressSpecForRelationshipLane() EgressSyncSpec {
 	return EgressSyncSpec{
 		Name:           "core-egress-sync",
-		ExternalSystem: "24k-core",
+		ExternalSystem: "ext-core",
 		EntitiesSync:   []EgressEntityTypeSpec{{Name: "Equipment"}, {Name: "Location"}},
 		RelationshipsSync: []EgressRelationshipSyncSpec{
 			{Predicate: "feeds", SourceType: "Equipment", TargetType: "Equipment"},
@@ -1140,7 +1140,7 @@ func TestValidateEgressSyncs_RelationshipSyncRequiresPredicate(t *testing.T) {
 
 // source_type is required — a relationship entry must scope BOTH endpoints, since
 // one predicate name can span several distinct anchor pairs (feeds spans
-// Equipment->Equipment and Equipment->Location in the sj24k campus export).
+// Equipment->Equipment and Equipment->Location in a campus-scale export).
 func TestValidateEgressSyncs_RelationshipSyncRequiresSourceType(t *testing.T) {
 	e := validEgressSpecForRelationshipLane()
 	e.RelationshipsSync = []EgressRelationshipSyncSpec{{Predicate: "feeds", TargetType: "Equipment"}}

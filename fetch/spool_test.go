@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-// This file holds the SJ24K-53 spooling tests: the artifact goes to a temp file
+// These are the spooling tests: the artifact goes to a temp file
 // rather than a byte slice, the digest falls out of the transfer, and the file is
 // deleted on every path.
 //
@@ -177,7 +177,7 @@ func TestGet_HashMatchesAnIndependentSHA256(t *testing.T) {
 	}
 }
 
-// TestResult_ReaderIsIndependentPerCall covers the property the sj24k asset
+// TestResult_ReaderIsIndependentPerCall covers the property the example-kit asset
 // export depends on: it reads the artifact three times (embedded class
 // catalogue, then vertices, then edges). With one shared cursor the second pass
 // would read nothing — a silent empty ingest rather than an error.

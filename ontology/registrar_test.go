@@ -58,7 +58,7 @@ func TestRegistrar_RegisterTypes_StreamsAllEntries(t *testing.T) {
 func TestRegistrar_RegisterTypes_StreamsRelationshipTypes(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	w := transfer.NewOntologyWriter(fc, "oga-kit-sj24k")
+	w := transfer.NewOntologyWriter(fc, "oga-kit-example")
 	reg := ontology.NewRegistrar(w)
 
 	req := ontology.RegisterTypesRequest{
@@ -165,7 +165,7 @@ func TestRegistrar_PassesPropertiesThrough(t *testing.T) {
 func TestRegistrar_ThreadsHybridFields(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	w := transfer.NewOntologyWriter(fc, "oga-kit-sj24k")
+	w := transfer.NewOntologyWriter(fc, "oga-kit-example")
 	reg := ontology.NewRegistrar(w)
 
 	req := ontology.RegisterTypesRequest{

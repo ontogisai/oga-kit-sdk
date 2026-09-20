@@ -24,11 +24,11 @@ import (
 // the tags and the field order.
 func TestParentRefs_DecodesAndKeysOnTheDeclaredEdge(t *testing.T) {
 	const body = `{
-  "tenant_id": "sjcs",
-  "external_system": "24k-core",
+  "tenant_id": "tnt1",
+  "external_system": "ext-core",
   "entity_type": "rec:Room",
   "mode": "bulk",
-  "batch_id": "sjcs:core-sync:rec:Room:bulk:2:abc",
+  "batch_id": "tnt1:core-sync:rec:Room:bulk:2:abc",
   "entities": [
     {
       "id": "019e38e3-room",

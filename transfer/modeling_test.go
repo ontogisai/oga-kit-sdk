@@ -16,7 +16,7 @@ import (
 func TestEntityTypeDef_LogicalWireRoundTrip(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	w := transfer.NewOntologyWriter(fc, "oga-kit-sj24k")
+	w := transfer.NewOntologyWriter(fc, "oga-kit-example")
 	ctx := context.Background()
 
 	if err := w.WriteEntityType(ctx, transfer.EntityTypeDef{

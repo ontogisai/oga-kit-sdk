@@ -91,7 +91,7 @@ func decodeHeaderLine(t *testing.T, body []byte) Header {
 func TestWithEdgeCompleteness_RidesTheHeader(t *testing.T) {
 	t.Parallel()
 	fc := &FakeCommitClient{}
-	w := NewDataWriter(fc, "sj24k", WithEdgeCompleteness(EdgeCompleteness{
+	w := NewDataWriter(fc, "example-kit", WithEdgeCompleteness(EdgeCompleteness{
 		Mode:               EdgeCompletenessPerSource,
 		GovernedPredicates: []string{"feeds", "hasPoint"},
 	}))
@@ -121,7 +121,7 @@ func TestWithEdgeCompleteness_RidesTheHeader(t *testing.T) {
 func TestWithEdgeCompleteness_AbsentByDefault(t *testing.T) {
 	t.Parallel()
 	fc := &FakeCommitClient{}
-	w := NewDataWriter(fc, "sj24k")
+	w := NewDataWriter(fc, "example-kit")
 	if err := w.WriteVertex(context.Background(), Vertex{ID: "AHU-01", EntityType: "brick:AHU"}); err != nil {
 		t.Fatalf("WriteVertex: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestWithEdgeCompleteness_AbsentByDefault(t *testing.T) {
 func TestWithEdgeCompleteness_PartialModeLeavesHeaderClean(t *testing.T) {
 	t.Parallel()
 	fc := &FakeCommitClient{}
-	w := NewDataWriter(fc, "sj24k", WithEdgeCompleteness(EdgeCompleteness{Mode: EdgeCompletenessPartial}))
+	w := NewDataWriter(fc, "example-kit", WithEdgeCompleteness(EdgeCompleteness{Mode: EdgeCompletenessPartial}))
 	if err := w.WriteVertex(context.Background(), Vertex{ID: "A", EntityType: "T"}); err != nil {
 		t.Fatalf("WriteVertex: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestWithEdgeCompleteness_PartialModeLeavesHeaderClean(t *testing.T) {
 func TestWithEdgeCompleteness_InvalidBlocksWritesAndClose(t *testing.T) {
 	t.Parallel()
 	fc := &FakeCommitClient{}
-	w := NewDataWriter(fc, "sj24k", WithEdgeCompleteness(EdgeCompleteness{
+	w := NewDataWriter(fc, "example-kit", WithEdgeCompleteness(EdgeCompleteness{
 		Mode: EdgeCompletenessPerSource, // no governed predicates
 	}))
 	if err := w.WriteVertex(context.Background(), Vertex{ID: "A", EntityType: "T"}); err == nil {
@@ -177,7 +177,7 @@ func TestWithEdgeCompleteness_InvalidBlocksWritesAndClose(t *testing.T) {
 func TestWithEdgeCompleteness_RejectedOnAnOntologyWriter(t *testing.T) {
 	t.Parallel()
 	fc := &FakeCommitClient{}
-	w := NewOntologyWriter(fc, "sj24k", WithEdgeCompleteness(EdgeCompleteness{
+	w := NewOntologyWriter(fc, "example-kit", WithEdgeCompleteness(EdgeCompleteness{
 		Mode:               EdgeCompletenessPerSource,
 		GovernedPredicates: []string{"feeds"},
 	}))
@@ -193,7 +193,7 @@ func TestWithEdgeCompleteness_CopiesTheCallerSlice(t *testing.T) {
 	t.Parallel()
 	preds := []string{"feeds"}
 	fc := &FakeCommitClient{}
-	w := NewDataWriter(fc, "sj24k", WithEdgeCompleteness(EdgeCompleteness{
+	w := NewDataWriter(fc, "example-kit", WithEdgeCompleteness(EdgeCompleteness{
 		Mode:               EdgeCompletenessPerSource,
 		GovernedPredicates: preds,
 	}))
@@ -213,7 +213,7 @@ func TestWithEdgeCompleteness_CopiesTheCallerSlice(t *testing.T) {
 func TestWithEdgeCompleteness_NilOptionIsIgnored(t *testing.T) {
 	t.Parallel()
 	fc := &FakeCommitClient{}
-	w := NewDataWriter(fc, "sj24k", nil)
+	w := NewDataWriter(fc, "example-kit", nil)
 	if err := w.WriteVertex(context.Background(), Vertex{ID: "A", EntityType: "T"}); err != nil {
 		t.Fatalf("WriteVertex: %v", err)
 	}

@@ -21,11 +21,11 @@ import (
 // not on every CI run of an unrelated change.
 const largeArtifactEnv = "OGA_FETCH_LARGE_ARTIFACT_TEST"
 
-// largeArtifactSize is the SJ24K-53 Phase 1 cap, and the size Studio's largest
-// measured export (210 MB) has to fit inside.
+// largeArtifactSize is the Phase 1 cap, and the size the largest
+// measured customer export (210 MB) has to fit inside.
 const largeArtifactSize int64 = 300 << 20
 
-// TestGet_LargeArtifactDoesNotScaleMemory is the measurement behind the SJ24K-53
+// TestGet_LargeArtifactDoesNotScaleMemory is the measurement behind the
 // acceptance criterion "peak RSS a small multiple of the copy buffer, not of the
 // artifact. Measured, not assumed."
 //
