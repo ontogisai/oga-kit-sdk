@@ -163,6 +163,12 @@ func WithLoaderKind(kind transfer.LoadKind) HandlerOption {
 type handlerConfig struct {
 	writerFactory WriterFactory
 	kind          transfer.LoadKind
+
+	// standardWriterInstalled and declaredPredicates are set by
+	// [WithCommitClient] so the boot-time vocabulary check below can run. They
+	// are not read on the request path.
+	standardWriterInstalled bool
+	declaredPredicates      []string
 }
 
 func newHandlerConfig(opts []HandlerOption) *handlerConfig {
@@ -176,7 +182,37 @@ func newHandlerConfig(opts []HandlerOption) *handlerConfig {
 	for _, opt := range opts {
 		opt(c)
 	}
+	warnIfNoGovernedPredicates(c, kitlog.Default())
 	return c
+}
+
+// warnIfNoGovernedPredicates reports a data loader that can never honor an
+// operator's full-snapshot assertion.
+//
+// Such a loader REFUSES every assertion, which is fail-closed and correct but
+// silent: the operator ticks the box, the import fails with a message about the
+// kit's source code, and nothing said so at startup. Without this, a kit that
+// forgot to declare a vocabulary reproduces the very defect the standard factory
+// exists to remove — an operator control that quietly does nothing.
+//
+// Called after every option is applied, so the loader kind is known. Only KindData
+// is checked: an ontology loader can never carry an assertion, so warning it about
+// a predicate vocabulary it cannot use is noise.
+//
+// Takes the logger as an argument rather than reaching for kitlog.Default() so the
+// policy is testable without capturing process stderr.
+func warnIfNoGovernedPredicates(c *handlerConfig, lg *slog.Logger) {
+	if c == nil || lg == nil {
+		return
+	}
+	if !c.standardWriterInstalled || c.kind != transfer.KindData || len(c.declaredPredicates) > 0 {
+		return
+	}
+	lg.Warn(
+		"loader: no governed predicates declared; operator full-snapshot imports will be refused",
+		"remedy", "pass loader.WithGovernedPredicates(...) to loader.WithCommitClient",
+		"config_key", ConfigKeyFullSnapshot,
+	)
 }
 
 // ServerConfig tunes the [ListenAndServe] HTTP server. Zero values
@@ -325,6 +361,15 @@ func loadHandlerFunc(impl LoaderHandler, cfg *handlerConfig) http.HandlerFunc {
 
 		writer, err := cfg.writerFactory(r.Context(), cfg.kind, req)
 		if err != nil {
+			// Separate a bad REQUEST from a broken loader. Both used to be 500,
+			// which made a malformed operator-supplied config key read as a
+			// platform fault and get triaged as one, when the remedy is to fix the
+			// request. A genuine factory failure (no commit client, unreachable
+			// gateway) stays 500 so it is retried and escalated.
+			if errors.Is(err, ErrInvalidLoadConfig) {
+				writeError(w, http.StatusBadRequest, "invalid_load_config", err.Error())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "writer_factory_failed", err.Error())
 			return
 		}
