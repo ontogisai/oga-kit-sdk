@@ -49,21 +49,21 @@ func postRelationshipSync(t *testing.T, impl Component, req RelationshipSyncRequ
 
 func twoRelationshipRequest() RelationshipSyncRequest {
 	corr := func(id string) *Correlation {
-		return &Correlation{ExternalSystem: "24k-core", ExternalRecordID: id}
+		return &Correlation{ExternalSystem: "ext-core", ExternalRecordID: id}
 	}
 	return RelationshipSyncRequest{
-		TenantID: "sjcs1", ExternalSystem: "24k-core", Predicate: "feeds",
+		TenantID: "tnt2", ExternalSystem: "ext-core", Predicate: "feeds",
 		Mode: ModeBulk, BatchID: "b-1",
 		Relationships: []Relationship{
 			{
 				ID: "rel-1", Predicate: "feeds",
-				Source: RelationshipEndpoint{EntityID: "eq-1", EntityType: "Equipment", Correlation: corr("CORE-EQ-1")},
-				Target: RelationshipEndpoint{EntityID: "eq-2", EntityType: "Equipment", Correlation: corr("CORE-EQ-2")},
+				Source: RelationshipEndpoint{EntityID: "eq-1", EntityType: "Equipment", Correlation: corr("EXT-EQ-1")},
+				Target: RelationshipEndpoint{EntityID: "eq-2", EntityType: "Equipment", Correlation: corr("EXT-EQ-2")},
 			},
 			{
 				ID: "rel-2", Predicate: "feeds",
-				Source: RelationshipEndpoint{EntityID: "eq-3", EntityType: "Equipment", Correlation: corr("CORE-EQ-3")},
-				Target: RelationshipEndpoint{EntityID: "loc-1", EntityType: "rec:HVACZone", Correlation: corr("CORE-SP-1")},
+				Source: RelationshipEndpoint{EntityID: "eq-3", EntityType: "Equipment", Correlation: corr("EXT-EQ-3")},
+				Target: RelationshipEndpoint{EntityID: "loc-1", EntityType: "rec:HVACZone", Correlation: corr("EXT-SP-1")},
 			},
 		},
 	}
@@ -270,7 +270,7 @@ func TestRelationshipLane_MethodAndPathDiscipline(t *testing.T) {
 func TestRelationshipEndpoint_CorrelationRoundTrips(t *testing.T) {
 	ep := RelationshipEndpoint{
 		EntityID: "e-1", EntityType: "Equipment",
-		Correlation: &Correlation{ExternalSystem: "24k-core", ExternalRecordID: "CORE-1"},
+		Correlation: &Correlation{ExternalSystem: "ext-core", ExternalRecordID: "EXT-1"},
 	}
 	raw, err := json.Marshal(ep)
 	if err != nil {
@@ -280,7 +280,7 @@ func TestRelationshipEndpoint_CorrelationRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Correlation == nil || got.Correlation.ExternalRecordID != "CORE-1" {
-		t.Errorf("round-tripped correlation = %+v, want ExternalRecordID CORE-1", got.Correlation)
+	if got.Correlation == nil || got.Correlation.ExternalRecordID != "EXT-1" {
+		t.Errorf("round-tripped correlation = %+v, want ExternalRecordID EXT-1", got.Correlation)
 	}
 }

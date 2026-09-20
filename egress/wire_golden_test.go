@@ -28,11 +28,11 @@ import (
 // repo, which imports this package and cross-decodes both directions.
 const (
 	platformRequestJSON = `{
-  "tenant_id": "sjcs",
-  "external_system": "24k-core",
+  "tenant_id": "tnt1",
+  "external_system": "ext-core",
   "entity_type": "Equipment",
   "mode": "bulk",
-  "batch_id": "egress-sjcs-24k-core-Equipment-bulk-0001",
+  "batch_id": "egress-tnt1-ext-core-Equipment-bulk-0001",
   "entities": [
     {
       "id": "eq-1",
@@ -50,8 +50,8 @@ const (
         "name": "AHU-2"
       },
       "correlation": {
-        "external_system": "24k-core",
-        "external_record_id": "CORE-77"
+        "external_system": "ext-core",
+        "external_record_id": "EXT-77"
       }
     },
     {
@@ -86,12 +86,12 @@ const (
     {
       "id": "eq-1",
       "outcome": "created",
-      "external_record_id": "CORE-90"
+      "external_record_id": "EXT-90"
     },
     {
       "id": "eq-2",
       "outcome": "updated",
-      "external_record_id": "CORE-77"
+      "external_record_id": "EXT-77"
     },
     {
       "id": "eq-3",
@@ -106,14 +106,14 @@ const (
       "id": "eq-5",
       "outcome": "skipped",
       "reason_code": "entity_type_excluded",
-      "reason_detail": "BMS aggregations are deliberately not Core assets"
+      "reason_detail": "BMS aggregations are deliberately not external-system assets"
     },
     {
       "id": "eq-6",
       "outcome": "failed",
-      "error": "class \"sjcs:Unregistered\" is not routable to a Core target",
+      "error": "class \"tnt1:Unregistered\" is not routable to an external-system target",
       "reason_code": "target_unroutable",
-      "reason_detail": "class \"sjcs:Unregistered\" is not routable to a Core target"
+      "reason_detail": "class \"tnt1:Unregistered\" is not routable to an external-system target"
     }
   ]
 }`
@@ -142,11 +142,11 @@ const (
 	// separate case), and an entity whose class the ontology does not define, where
 	// the field is OMITTED rather than flattened.
 	platformResolvedRefsRequestJSON = `{
-  "tenant_id": "sjcs1",
-  "external_system": "24k-core",
+  "tenant_id": "tnt2",
+  "external_system": "ext-core",
   "entity_type": "Location",
   "mode": "bulk",
-  "batch_id": "sjcs1:core-egress-sync:Location:bulk:1:abc",
+  "batch_id": "tnt2:core-egress-sync:Location:bulk:1:abc",
   "entities": [
     {
       "id": "019e38e3-room",
@@ -176,7 +176,7 @@ const (
     },
     {
       "id": "019e38e3-stale",
-      "entity_type": "sjcs:Unregistered"
+      "entity_type": "tnt1:Unregistered"
     }
   ]
 }`
@@ -191,11 +191,11 @@ func TestSyncRequest_DecodesPlatformWire(t *testing.T) {
 	if err := json.Unmarshal([]byte(platformRequestJSON), &req); err != nil {
 		t.Fatalf("decode platform request: %v", err)
 	}
-	if req.TenantID != "sjcs" {
-		t.Errorf("tenant_id = %q, want sjcs", req.TenantID)
+	if req.TenantID != "tnt1" {
+		t.Errorf("tenant_id = %q, want tnt1", req.TenantID)
 	}
-	if req.ExternalSystem != "24k-core" {
-		t.Errorf("external_system = %q, want 24k-core", req.ExternalSystem)
+	if req.ExternalSystem != "ext-core" {
+		t.Errorf("external_system = %q, want ext-core", req.ExternalSystem)
 	}
 	if req.EntityType != "Equipment" {
 		t.Errorf("entity_type = %q, want Equipment", req.EntityType)
@@ -203,7 +203,7 @@ func TestSyncRequest_DecodesPlatformWire(t *testing.T) {
 	if req.Mode != ModeBulk {
 		t.Errorf("mode = %q, want %q", req.Mode, ModeBulk)
 	}
-	if req.BatchID != "egress-sjcs-24k-core-Equipment-bulk-0001" {
+	if req.BatchID != "egress-tnt1-ext-core-Equipment-bulk-0001" {
 		t.Errorf("batch_id = %q", req.BatchID)
 	}
 	if len(req.Entities) != 3 {
@@ -230,7 +230,7 @@ func TestSyncRequest_DecodesPlatformWire(t *testing.T) {
 	if second.Correlation == nil {
 		t.Fatal("entities[1].correlation is nil: an already-correlated entity would be re-created, duplicating the external record")
 	}
-	if second.Correlation.ExternalSystem != "24k-core" || second.Correlation.ExternalRecordID != "CORE-77" {
+	if second.Correlation.ExternalSystem != "ext-core" || second.Correlation.ExternalRecordID != "EXT-77" {
 		t.Errorf("entities[1].correlation = %+v", second.Correlation)
 	}
 
@@ -270,16 +270,16 @@ func TestSyncResponse_DecodesPlatformWire(t *testing.T) {
 // cannot disagree about what the fixture means — which they could when each
 // spelled the slice out separately.
 func wireGoldenResults() []SyncResult {
-	const unroutable = `class "sjcs:Unregistered" is not routable to a Core target`
+	const unroutable = `class "tnt1:Unregistered" is not routable to an external-system target`
 	return []SyncResult{
-		{ID: "eq-1", Outcome: OutcomeCreated, ExternalRecordID: "CORE-90"},
-		{ID: "eq-2", Outcome: OutcomeUpdated, ExternalRecordID: "CORE-77"},
+		{ID: "eq-1", Outcome: OutcomeCreated, ExternalRecordID: "EXT-90"},
+		{ID: "eq-2", Outcome: OutcomeUpdated, ExternalRecordID: "EXT-77"},
 		{ID: "eq-3", Outcome: OutcomeSkipped},
 		{ID: "eq-4", Outcome: OutcomeFailed, Error: "external system rejected payload: missing site"},
 		{
 			ID: "eq-5", Outcome: OutcomeSkipped,
 			ReasonCode:   "entity_type_excluded",
-			ReasonDetail: "BMS aggregations are deliberately not Core assets",
+			ReasonDetail: "BMS aggregations are deliberately not external-system assets",
 		},
 		{
 			ID: "eq-6", Outcome: OutcomeFailed,
@@ -299,11 +299,11 @@ func wireGoldenResults() []SyncResult {
 func TestSkippedVerdicts_NeverCarryTheLegacyErrorField(t *testing.T) {
 	b := newBatch([]Entity{{ID: "a"}, {ID: "b"}})
 	b.Skipped("a")
-	b.SkippedReason("b", "predicate_unmapped", "no Core enum mapping for this predicate")
+	b.SkippedReason("b", "predicate_unmapped", "no external-system enum mapping for this predicate")
 
 	rb := newRelationshipBatch([]Relationship{{ID: "r1"}, {ID: "r2"}})
 	rb.Skipped("r1")
-	rb.SkippedReason("r2", "predicate_unmapped", "no Core enum mapping for this predicate")
+	rb.SkippedReason("r2", "predicate_unmapped", "no external-system enum mapping for this predicate")
 
 	entityResults, _ := b.Results()
 	relResults, _ := rb.Results()
@@ -386,7 +386,7 @@ func TestPaths_MatchPlatformContract(t *testing.T) {
 func TestClassID_ColonSurvivesTheWire(t *testing.T) {
 	const classID = "brick:AHU"
 
-	body := `{"tenant_id":"sjcs","external_system":"24k-core","entity_type":"brick:AHU",
+	body := `{"tenant_id":"tnt1","external_system":"ext-core","entity_type":"brick:AHU",
 	  "mode":"bulk","batch_id":"b-1","entities":[{"id":"eq-1","entity_type":"brick:AHU"}]}`
 
 	var req SyncRequest
@@ -415,7 +415,7 @@ func TestClassID_HomogeneityIsExactNotPrefixInsensitive(t *testing.T) {
 		return nil
 	}}
 	w := postSync(t, impl, SyncRequest{
-		TenantID: "sjcs", ExternalSystem: "24k-core", EntityType: "brick:Equipment",
+		TenantID: "tnt1", ExternalSystem: "ext-core", EntityType: "brick:Equipment",
 		Mode: ModeBulk, BatchID: "b-1",
 		Entities: []Entity{
 			{ID: "e1", EntityType: "brick:Equipment"},

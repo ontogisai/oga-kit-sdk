@@ -57,7 +57,7 @@ func postTo(t *testing.T, impl Component, path string, req SyncRequest) *httptes
 // ambiguity that could push type records into an asset register.
 func TestOntologyLane_RouteSelectsTheMethod(t *testing.T) {
 	req := SyncRequest{
-		TenantID: "sjcs", ExternalSystem: "24k-core",
+		TenantID: "tnt1", ExternalSystem: "ext-core",
 		// The colliding label: a kit declares this anchor in BOTH lanes, so the
 		// wire label cannot distinguish them.
 		EntityType: "Equipment",

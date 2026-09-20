@@ -177,9 +177,10 @@ const (
 	// TypeRefKey is the key an entity's own correlated ontology TYPE arrives
 	// under, when the kit sets entities_sync[].type_ref on that entity type.
 	//
-	// For 24K Core the entry's ExternalRecordID IS Asset.asset_classification_id
-	// (or AssetDataPoint.asset_datapoint_name_id) — indistinguishable in handling
-	// from the space_id an edge-resolved owner supplies.
+	// In one external core system the entry's ExternalRecordID IS
+	// Asset.asset_classification_id (or AssetDataPoint.asset_datapoint_name_id)
+	// — indistinguishable in handling from the space_id an edge-resolved owner
+	// supplies.
 	//
 	// Setting type_ref makes the entry MANDATORY, not optional: if the type was
 	// never pushed and correlated, the platform fails the batch rather than
@@ -197,7 +198,7 @@ const (
 	// OntologyParentRefKey is the key a type record's PARENT TYPE arrives under,
 	// on a batch produced by an ontology_sync anchor with include_parents: true.
 	//
-	// For 24K Core the entry's ExternalRecordID becomes
+	// In one external core system the entry's ExternalRecordID becomes
 	// asset_classification.parent_id. With include_parents: false the anchor's
 	// types are pushed as roots and this key is simply absent — the flat-catalog
 	// case, not an error.

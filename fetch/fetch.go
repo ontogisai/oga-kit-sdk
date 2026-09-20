@@ -26,7 +26,7 @@
 // # The artifact is spooled to a temp file, not buffered in memory
 //
 // Get writes the body straight to a temp file and hands back a Result the caller
-// reads from and MUST Close (SJ24K-53). It used to return the whole body as a
+// reads from and MUST Close. It used to return the whole body as a
 // []byte, which made peak memory scale with the artifact: a 210 MB customer
 // export cost 210 MB of heap per connector, per cycle, for every tenant sharing a
 // node — and every consumer that needed a second look at the bytes (a content
@@ -44,7 +44,7 @@
 //     A caller that forgets leaks both, and at these sizes a leak per failed
 //     cycle is its own outage.
 //   - Result.Reader hands out independent readers over the same spooled bytes,
-//     so a caller may make as many passes as it likes (the sj24k asset export
+//     so a caller may make as many passes as it likes (a large asset export
 //     takes three) without re-downloading and without a shared cursor to rewind.
 //
 // # Where the temp file lands, and why that is not always "off memory"
@@ -85,7 +85,7 @@ import (
 // DefaultMaxBytes caps a downloaded artifact at 64 MiB.
 //
 // It is deliberately conservative rather than generous, and it stays at 64 MiB
-// even though the artifact is now spooled to disk (SJ24K-53). Two reasons:
+// even though the artifact is now spooled to disk. Two reasons:
 //
 //   - It matches the platform ontology-snapshot intake's own body cap, so a
 //     fetch that succeeds under the default is not rejected downstream for size.
@@ -173,7 +173,7 @@ type Result struct {
 // Reader returns an independent reader over the whole artifact, positioned at
 // the start.
 //
-// Independent is the point. A caller that needs several passes — the sj24k asset
+// Independent is the point. A caller that needs several passes — a large asset
 // export is read once for its embedded class catalogue, once for vertices and
 // once for edges — gets a fresh cursor each time rather than having to rewind a
 // shared one, and forgetting to rewind is the bug this shape makes unwritable.
@@ -623,7 +623,7 @@ func (t tagWriteErrors) Write(p []byte) (int, error) {
 // scrubURLError's doc for why).
 //
 // The cap is enforced DURING the copy by reading one byte past it, which keeps
-// the pre-SJ24K-53 detection semantics: an artifact exactly at the cap is valid
+// the original detection semantics: an artifact exactly at the cap is valid
 // and one byte over is deterministically rejected, rather than inferred from a
 // truncated read. The overshoot is bounded at a single byte, so an over-cap
 // artifact costs cap+1 bytes of transfer and disk rather than its full length —

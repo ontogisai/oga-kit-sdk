@@ -1,7 +1,6 @@
 package egress
 
-// Relationship-lane wire types (OGA-875, kg-egress-sync THIRD lane; origin
-// SJ24K-31).
+// Relationship-lane wire types (OGA-875, kg-egress-sync THIRD lane).
 //
 // This lane carries EDGE records — two independently-resolved endpoints — not
 // entity instances or ontology type records. It exists because an owner
@@ -75,9 +74,8 @@ type Relationship struct {
 
 	// Correlation carries this relationship's OWN external id, when one was
 	// already recorded from a prior push. Its presence is how a component
-	// knows to report `updated` instead of attempting a `created` that Core (or
-	// any external system enforcing pair-uniqueness) may reject as a
-	// duplicate.
+	// knows to report `updated` instead of attempting a `created` that the
+	// external system (enforcing pair-uniqueness) may reject as a duplicate.
 	Correlation *Correlation `json:"correlation,omitempty"`
 }
 

@@ -12,7 +12,7 @@ import (
 //
 // The point of this surface is that needing one extra endpoint must not force a
 // kit to abandon connector.ListenAndServe and re-implement the contract by hand.
-// The sj24k ontology-sync connector did exactly that -- it needs /trigger and
+// The example-kit ontology-sync connector did exactly that -- it needs /trigger and
 // /metrics, the mux was closed, so it owns its own http.Server -- and its webhook
 // route then drifted from what the platform ingress posts to. That drift is the
 // cost this surface exists to remove.

@@ -69,12 +69,12 @@ func decodeResults(t *testing.T, w *httptest.ResponseRecorder) []SyncResult {
 
 func twoEntityRequest() SyncRequest {
 	return SyncRequest{
-		TenantID: "sjcs", ExternalSystem: "24k-core", EntityType: "Equipment",
+		TenantID: "tnt1", ExternalSystem: "ext-core", EntityType: "Equipment",
 		Mode: ModeBulk, BatchID: "b-1",
 		Entities: []Entity{
 			{ID: "e1", EntityType: "Equipment"},
 			{ID: "e2", EntityType: "Equipment",
-				Correlation: &Correlation{ExternalSystem: "24k-core", ExternalRecordID: "CORE-2"}},
+				Correlation: &Correlation{ExternalSystem: "ext-core", ExternalRecordID: "EXT-2"}},
 		},
 	}
 }
@@ -86,7 +86,7 @@ func TestSync_HappyPath(t *testing.T) {
 		}
 		for _, e := range req.Entities {
 			if e.Correlation == nil {
-				b.Created(e.ID, "CORE-NEW-"+e.ID)
+				b.Created(e.ID, "EXT-NEW-"+e.ID)
 			} else {
 				b.Updated(e.ID, e.Correlation.ExternalRecordID)
 			}
@@ -102,10 +102,10 @@ func TestSync_HappyPath(t *testing.T) {
 		t.Fatalf("results = %d, want 2", len(results))
 	}
 	// Request order is part of what the platform validates; assert it explicitly.
-	if results[0].ID != "e1" || results[0].Outcome != OutcomeCreated || results[0].ExternalRecordID != "CORE-NEW-e1" {
+	if results[0].ID != "e1" || results[0].Outcome != OutcomeCreated || results[0].ExternalRecordID != "EXT-NEW-e1" {
 		t.Errorf("results[0] = %+v", results[0])
 	}
-	if results[1].ID != "e2" || results[1].Outcome != OutcomeUpdated || results[1].ExternalRecordID != "CORE-2" {
+	if results[1].ID != "e2" || results[1].Outcome != OutcomeUpdated || results[1].ExternalRecordID != "EXT-2" {
 		t.Errorf("results[1] = %+v", results[1])
 	}
 }
@@ -114,12 +114,12 @@ func TestSync_HappyPath(t *testing.T) {
 // the whole reason failures are recorded on the Batch instead of returned.
 func TestSync_PerEntityFailureKeepsOtherCorrelations(t *testing.T) {
 	impl := &stubComponent{sync: func(_ context.Context, _ *SyncRequest, b *Batch) error {
-		b.Created("e1", "CORE-1")
+		b.Created("e1", "EXT-1")
 		b.FailedErr("e2", errors.New("rejected: missing site"))
 		return nil
 	}}
 	results := decodeResults(t, postSync(t, impl, twoEntityRequest()))
-	if results[0].Outcome != OutcomeCreated || results[0].ExternalRecordID != "CORE-1" {
+	if results[0].Outcome != OutcomeCreated || results[0].ExternalRecordID != "EXT-1" {
 		t.Errorf("results[0] = %+v, want a preserved correlation", results[0])
 	}
 	if results[1].Outcome != OutcomeFailed || !strings.Contains(results[1].Error, "missing site") {
@@ -132,7 +132,7 @@ func TestSync_PerEntityFailureKeepsOtherCorrelations(t *testing.T) {
 // skipping it is a SUCCESS that would drop the entity permanently.
 func TestSync_MissingVerdictBecomesFailureNotSkip(t *testing.T) {
 	impl := &stubComponent{sync: func(_ context.Context, _ *SyncRequest, b *Batch) error {
-		b.Created("e1", "CORE-1")
+		b.Created("e1", "EXT-1")
 		return nil // e2 forgotten
 	}}
 	w := postSync(t, impl, twoEntityRequest())
@@ -185,9 +185,9 @@ func TestSync_UnrecognizedOutcomeBecomesFailure(t *testing.T) {
 // alongside it.
 func TestSync_UnrequestedIDIsDropped(t *testing.T) {
 	impl := &stubComponent{sync: func(_ context.Context, _ *SyncRequest, b *Batch) error {
-		b.Created("e1", "CORE-1")
-		b.Created("e2", "CORE-2")
-		b.Created("ghost", "CORE-9")
+		b.Created("e1", "EXT-1")
+		b.Created("e2", "EXT-2")
+		b.Created("ghost", "EXT-9")
 		return nil
 	}}
 	results := decodeResults(t, postSync(t, impl, twoEntityRequest()))
@@ -292,7 +292,7 @@ func TestSync_EmptyBatchReturnsEmptyResults(t *testing.T) {
 // Forward compatibility: a field a newer platform adds must not break an
 // already-deployed component.
 func TestSync_UnknownWireFieldsAccepted(t *testing.T) {
-	body := []byte(`{"tenant_id":"sjcs","entity_type":"Equipment","mode":"bulk","batch_id":"b-1",
+	body := []byte(`{"tenant_id":"tnt1","entity_type":"Equipment","mode":"bulk","batch_id":"b-1",
 	  "future_knob":"x","entities":[{"id":"e1","entity_type":"Equipment","future_field":7}]}`)
 	impl := &stubComponent{sync: func(_ context.Context, _ *SyncRequest, b *Batch) error {
 		b.Skipped("e1")
@@ -501,7 +501,7 @@ func TestBatch_FailedWithoutReasonStillCarriesOne(t *testing.T) {
 }
 
 // The retired introspection endpoint is not served, and the component still
-// serves the two routes that are the contract (SJ24K-8).
+// serves the two routes that are the contract.
 //
 // Worth locking precisely BECAUSE the observable behavior did not change: the
 // endpoint previously answered 404 whenever a component did not implement the

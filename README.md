@@ -71,7 +71,7 @@ By default an artifact's edges are a **partial batch** — the platform never in
 A full-snapshot connector opts in on the writer:
 
 ```go
-w := transfer.NewDataWriter(client, "sj24k",
+w := transfer.NewDataWriter(client, "example-kit",
     transfer.WithEdgeCompleteness(transfer.EdgeCompleteness{
         Mode: transfer.EdgeCompletenessPerSource,
         GovernedPredicates: []string{
@@ -383,7 +383,7 @@ Set the allowlist whenever a fetch target arrives in a webhook body: even a vali
 
 **Pick the cap for your own downstream, not from this example.** 300 MB suits a connector that emits over the transfer wire. A connector that PUTs its artifact back to the platform's ontology-snapshot intake must stay at or below that intake's own 64 MiB body cap — which is what `DefaultMaxBytes` is — or a clear, immediate size rejection becomes a 413 that only arrives after a full download has succeeded.
 
-**The artifact is spooled to a temp file, not held in memory** (SJ24K-53). `Result` owns an open descriptor and a file on disk, so the caller **must** `Close` it — a leak per failed cycle is its own outage at these sizes. Measured on a 300 MB artifact: 317 KiB of total allocation streaming, against 616 MiB for the byte-slice version it replaced.
+**The artifact is spooled to a temp file, not held in memory**. `Result` owns an open descriptor and a file on disk, so the caller **must** `Close` it — a leak per failed cycle is its own outage at these sizes. Measured on a 300 MB artifact: 317 KiB of total allocation streaming, against 616 MiB for the byte-slice version it replaced.
 
 Three things follow from that:
 

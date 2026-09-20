@@ -20,11 +20,11 @@ import (
 // predicate>source_type>target_type). It decodes back to `>`, so the dedup key
 // round-trips exactly.
 const sharedRelationshipSyncRequestJSON = `{
-  "tenant_id": "sjcs1",
-  "external_system": "24k-core",
+  "tenant_id": "tnt2",
+  "external_system": "ext-core",
   "predicate": "feeds",
   "mode": "bulk",
-  "batch_id": "sjcs1:core-egress-sync:feeds\u003eEquipment\u003eLocation:bulk:relationships:#0",
+  "batch_id": "tnt2:core-egress-sync:feeds\u003eEquipment\u003eLocation:bulk:relationships:#0",
   "relationships": [
     {
       "id": "edge-1",
@@ -33,21 +33,21 @@ const sharedRelationshipSyncRequestJSON = `{
         "entity_id": "eq-1",
         "entity_type": "brick:AHU",
         "correlation": {
-          "external_system": "24k-core",
-          "external_record_id": "CORE-EQ-1"
+          "external_system": "ext-core",
+          "external_record_id": "EXT-EQ-1"
         }
       },
       "target": {
         "entity_id": "loc-1",
         "entity_type": "rec:HVACZone",
         "correlation": {
-          "external_system": "24k-core",
-          "external_record_id": "CORE-LOC-1"
+          "external_system": "ext-core",
+          "external_record_id": "EXT-LOC-1"
         }
       },
       "correlation": {
-        "external_system": "24k-core",
-        "external_record_id": "CORE-REL-1"
+        "external_system": "ext-core",
+        "external_record_id": "EXT-REL-1"
       }
     },
     {
@@ -60,16 +60,16 @@ const sharedRelationshipSyncRequestJSON = `{
         "entity_id": "eq-2",
         "entity_type": "brick:Fan",
         "correlation": {
-          "external_system": "24k-core",
-          "external_record_id": "CORE-EQ-2"
+          "external_system": "ext-core",
+          "external_record_id": "EXT-EQ-2"
         }
       },
       "target": {
         "entity_id": "loc-1",
         "entity_type": "rec:HVACZone",
         "correlation": {
-          "external_system": "24k-core",
-          "external_record_id": "CORE-LOC-1"
+          "external_system": "ext-core",
+          "external_record_id": "EXT-LOC-1"
         }
       }
     }
@@ -78,24 +78,24 @@ const sharedRelationshipSyncRequestJSON = `{
 
 func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 	return &RelationshipSyncRequest{
-		TenantID:       "sjcs1",
-		ExternalSystem: "24k-core",
+		TenantID:       "tnt2",
+		ExternalSystem: "ext-core",
 		Predicate:      "feeds",
 		Mode:           ModeBulk,
-		BatchID:        "sjcs1:core-egress-sync:feeds>Equipment>Location:bulk:relationships:#0",
+		BatchID:        "tnt2:core-egress-sync:feeds>Equipment>Location:bulk:relationships:#0",
 		Relationships: []Relationship{
 			{
 				ID:        "edge-1",
 				Predicate: "feeds",
 				Source: RelationshipEndpoint{
 					EntityID: "eq-1", EntityType: "brick:AHU",
-					Correlation: &Correlation{ExternalSystem: "24k-core", ExternalRecordID: "CORE-EQ-1"},
+					Correlation: &Correlation{ExternalSystem: "ext-core", ExternalRecordID: "EXT-EQ-1"},
 				},
 				Target: RelationshipEndpoint{
 					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					Correlation: &Correlation{ExternalSystem: "24k-core", ExternalRecordID: "CORE-LOC-1"},
+					Correlation: &Correlation{ExternalSystem: "ext-core", ExternalRecordID: "EXT-LOC-1"},
 				},
-				Correlation: &Correlation{ExternalSystem: "24k-core", ExternalRecordID: "CORE-REL-1"},
+				Correlation: &Correlation{ExternalSystem: "ext-core", ExternalRecordID: "EXT-REL-1"},
 			},
 			{
 				ID:         "edge-2",
@@ -103,11 +103,11 @@ func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 				Properties: map[string]any{"flow_rate": "high"},
 				Source: RelationshipEndpoint{
 					EntityID: "eq-2", EntityType: "brick:Fan",
-					Correlation: &Correlation{ExternalSystem: "24k-core", ExternalRecordID: "CORE-EQ-2"},
+					Correlation: &Correlation{ExternalSystem: "ext-core", ExternalRecordID: "EXT-EQ-2"},
 				},
 				Target: RelationshipEndpoint{
 					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					Correlation: &Correlation{ExternalSystem: "24k-core", ExternalRecordID: "CORE-LOC-1"},
+					Correlation: &Correlation{ExternalSystem: "ext-core", ExternalRecordID: "EXT-LOC-1"},
 				},
 			},
 		},
@@ -138,16 +138,16 @@ func TestRelationshipSyncRequest_DecodesTheSharedWire(t *testing.T) {
 		t.Fatalf("relationships = %d, want 2", len(req.Relationships))
 	}
 	edge1 := req.Relationships[0]
-	if edge1.Source.Correlation == nil || edge1.Source.Correlation.ExternalRecordID != "CORE-EQ-1" {
-		t.Errorf("edge-1 source correlation = %+v, want CORE-EQ-1", edge1.Source.Correlation)
+	if edge1.Source.Correlation == nil || edge1.Source.Correlation.ExternalRecordID != "EXT-EQ-1" {
+		t.Errorf("edge-1 source correlation = %+v, want EXT-EQ-1", edge1.Source.Correlation)
 	}
-	if edge1.Target.Correlation == nil || edge1.Target.Correlation.ExternalRecordID != "CORE-LOC-1" {
-		t.Errorf("edge-1 target correlation = %+v, want CORE-LOC-1", edge1.Target.Correlation)
+	if edge1.Target.Correlation == nil || edge1.Target.Correlation.ExternalRecordID != "EXT-LOC-1" {
+		t.Errorf("edge-1 target correlation = %+v, want EXT-LOC-1", edge1.Target.Correlation)
 	}
-	if edge1.Correlation == nil || edge1.Correlation.ExternalRecordID != "CORE-REL-1" {
-		t.Errorf("edge-1 own correlation = %+v, want CORE-REL-1", edge1.Correlation)
+	if edge1.Correlation == nil || edge1.Correlation.ExternalRecordID != "EXT-REL-1" {
+		t.Errorf("edge-1 own correlation = %+v, want EXT-REL-1", edge1.Correlation)
 	}
-	if req.BatchID != "sjcs1:core-egress-sync:feeds>Equipment>Location:bulk:relationships:#0" {
+	if req.BatchID != "tnt2:core-egress-sync:feeds>Equipment>Location:bulk:relationships:#0" {
 		t.Errorf("batch_id = %q; the \\u003e must decode back to > for the dedup key to round-trip", req.BatchID)
 	}
 	if edge2 := req.Relationships[1]; edge2.Correlation != nil {
