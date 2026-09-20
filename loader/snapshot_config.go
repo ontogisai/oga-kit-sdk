@@ -106,6 +106,22 @@ func invalidConfigf(format string, args ...any) error {
 func parseSnapshotAssertion(cfg map[string]any) (asserted bool, predicates []string, err error) {
 	rawFlag, hasFlag := cfg[ConfigKeyFullSnapshot]
 
+	// The flag's TYPE is checked before the predicate list is parsed, because the
+	// flag is the gating decision: with both keys malformed, reporting only the
+	// predicate error would leave the caller to fix that, retry, and discover the
+	// flag error on the next round trip. The hasPreds cross-checks below genuinely
+	// need the parse, so they still run after it.
+	flag := false
+	if hasFlag {
+		b, ok := rawFlag.(bool)
+		if !ok {
+			return false, nil, invalidConfigf(
+				"%s must be a JSON boolean, got %T (a quoted \"true\" is not accepted)",
+				ConfigKeyFullSnapshot, rawFlag)
+		}
+		flag = b
+	}
+
 	preds, hasPreds, err := parseGovernedPredicates(cfg)
 	if err != nil {
 		return false, nil, err
@@ -120,12 +136,6 @@ func parseSnapshotAssertion(cfg map[string]any) (asserted bool, predicates []str
 		return false, nil, nil
 	}
 
-	flag, ok := rawFlag.(bool)
-	if !ok {
-		return false, nil, invalidConfigf(
-			"%s must be a JSON boolean, got %T (a quoted \"true\" is not accepted)",
-			ConfigKeyFullSnapshot, rawFlag)
-	}
 	if !flag {
 		if hasPreds {
 			return false, nil, invalidConfigf(
@@ -237,6 +247,13 @@ func assertionFor(
 		preds = normalizeGovernedPredicates(declared)
 	}
 	if len(preds) == 0 {
+		// Deliberately ErrInvalidLoadConfig (HTTP 400) even though the missing piece
+		// is in the KIT's source, not the request. Two reasons, both about what the
+		// caller should do next: 400 correctly tells the platform NOT to retry —
+		// every retry of this request fails identically until a human acts — and a
+		// request-side workaround genuinely exists, so the operator can proceed now
+		// by naming predicates explicitly. The message names both remedies rather
+		// than only the one the status code implies.
 		return nil, invalidConfigf(
 			"%s=true but no governed predicates are available: this loader declares none "+
 				"(see loader.WithGovernedPredicates) and the request supplied no %s",

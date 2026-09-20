@@ -144,6 +144,13 @@ func WithWriterFactory(f WriterFactory) HandlerOption {
 	return func(c *handlerConfig) {
 		if f != nil {
 			c.writerFactory = f
+			// Options are last-one-wins, so a WithWriterFactory after a
+			// WithCommitClient replaces the standard factory entirely. Clear the
+			// bookkeeping with it: otherwise the boot check would warn about a
+			// missing predicate vocabulary for a loader whose factory never reads
+			// the reserved keys at all.
+			c.standardWriterInstalled = false
+			c.declaredPredicates = nil
 		}
 	}
 }

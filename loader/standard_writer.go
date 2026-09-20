@@ -12,7 +12,26 @@ type StandardWriterOption func(*standardWriterConfig)
 
 type standardWriterConfig struct {
 	governedPredicates []string
-	writerOptions      []transfer.WriterOption
+}
+
+// resolveStandardWriterConfig applies options once and returns the normalized
+// declaration.
+//
+// Built in ONE place deliberately. An earlier shape had WithCommitClient apply the
+// options a second time for its boot-check bookkeeping, which could not diverge
+// only because StandardWriterOption is a func over an unexported type and both
+// options happened to be stateless appends. A stateful or order-sensitive option
+// added later would have made the factory's declaration and the boot check's
+// declaration disagree silently, and the warning would then describe a vocabulary
+// the factory does not hold.
+func resolveStandardWriterConfig(opts []StandardWriterOption) []string {
+	cfg := &standardWriterConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cfg)
+		}
+	}
+	return normalizeGovernedPredicates(cfg.governedPredicates)
 }
 
 // WithGovernedPredicates declares the predicates this feed OWNS — the vocabulary
@@ -51,18 +70,26 @@ func WithGovernedPredicates(preds ...string) StandardWriterOption {
 	}
 }
 
-// WithWriterOptions passes [transfer.WriterOption] values through to every writer
-// the factory builds.
+// There is deliberately NO option for passing arbitrary [transfer.WriterOption]
+// values through to the writer.
 //
-// Do NOT pass [transfer.WithEdgeCompleteness] here. On an operator-driven import
-// the assertion is the operator's per-run decision, resolved from the request; a
-// hard-coded one would assert completeness for a partial import too, which is how
-// live edges get closed by mistake.
-func WithWriterOptions(opts ...transfer.WriterOption) StandardWriterOption {
-	return func(c *standardWriterConfig) {
-		c.writerOptions = append(c.writerOptions, opts...)
-	}
-}
+// An earlier revision had one, and it inverted the whole premise of this factory.
+// [transfer.WithEdgeCompleteness] is currently the ONLY exported constructor of a
+// transfer.WriterOption, so a pass-through option's sole possible argument was the
+// one thing it must never carry: a hard-coded assertion, which arms edge closure on
+// EVERY artifact from an entirely empty config, with no operator flag anywhere in
+// the request. Verified by probe before removal. A doc comment saying "do not pass
+// this" was the only guard, and it cannot be enforced from here — WriterOption is a
+// func over a type unexported in transfer, so an option cannot be introspected.
+//
+// It also removed the last way to hand back a writer that fails at every write: an
+// invalid kit-supplied assertion is captured by the writer and surfaces from the
+// first Write and from Close, sticky, which silently discards the operator's valid
+// assertion applied after it and then fails naming predicates the operator did
+// supply.
+//
+// If a genuinely needed WriterOption appears later, reintroduce a narrow option for
+// that specific concern rather than a general pass-through.
 
 // NewStandardWriterFactory builds the writer factory every operator-driven loader
 // should use.
@@ -91,14 +118,17 @@ func NewStandardWriterFactory(
 	kitID string,
 	opts ...StandardWriterOption,
 ) WriterFactory {
-	cfg := &standardWriterConfig{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(cfg)
-		}
-	}
-	declared := normalizeGovernedPredicates(cfg.governedPredicates)
+	return newStandardWriterFactory(client, kitID, resolveStandardWriterConfig(opts))
+}
 
+// newStandardWriterFactory is the shared core, taking the ALREADY-normalized
+// declaration so WithCommitClient can resolve the options once and use the same
+// value for both the factory and its boot check.
+func newStandardWriterFactory(
+	client transfer.CommitClient,
+	kitID string,
+	declared []string,
+) WriterFactory {
 	return func(_ context.Context, kind transfer.LoadKind, req *LoadRequest) (transfer.Writer, error) {
 		// A nil commit client is a deployment mistake, not a bad request: it must
 		// NOT be reported as 400, and it must not reach transfer.NewWriter, where
@@ -117,15 +147,14 @@ func NewStandardWriterFactory(
 			return nil, err
 		}
 
-		// Copy per request. The option slice is appended to below, and a factory
-		// is called once per /load — appending to the shared slice would leak one
-		// request's assertion into the next.
-		wopts := make([]transfer.WriterOption, 0, len(cfg.writerOptions)+1)
-		wopts = append(wopts, cfg.writerOptions...)
-		if ec != nil {
-			wopts = append(wopts, transfer.WithEdgeCompleteness(*ec))
+		// Built fresh per request. A factory is called once per /load, so a slice
+		// shared across calls would leak one request's assertion into the next —
+		// a request that asserted nothing would inherit the previous request's
+		// governed predicates and start closing edges.
+		if ec == nil {
+			return transfer.NewWriter(client, kind, kitID), nil
 		}
-		return transfer.NewWriter(client, kind, kitID, wopts...), nil
+		return transfer.NewWriter(client, kind, kitID, transfer.WithEdgeCompleteness(*ec)), nil
 	}
 }
 
@@ -149,14 +178,10 @@ func WithCommitClient(
 	kitID string,
 	opts ...StandardWriterOption,
 ) HandlerOption {
-	factory := NewStandardWriterFactory(client, kitID, opts...)
-	cfg := &standardWriterConfig{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(cfg)
-		}
-	}
-	declared := normalizeGovernedPredicates(cfg.governedPredicates)
+	// Resolved ONCE and shared, so the factory's declaration and the boot check's
+	// declaration cannot drift apart.
+	declared := resolveStandardWriterConfig(opts)
+	factory := newStandardWriterFactory(client, kitID, declared)
 
 	return func(c *handlerConfig) {
 		c.writerFactory = factory

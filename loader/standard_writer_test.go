@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -213,15 +214,45 @@ func TestStandardWriterFactory_AssertionDoesNotLeakBetweenRequests(t *testing.T)
 	}
 }
 
-func TestStandardWriterFactory_PassesThroughWriterOptions(t *testing.T) {
+// A nil option must be ignored rather than panicking — HandlerOption slices are
+// often built conditionally.
+func TestStandardWriterFactory_NilOptionIsIgnored(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	// A nil WriterOption is ignored by NewWriter; passing one proves the
-	// pass-through slice is actually threaded rather than dropped.
-	f := loader.NewStandardWriterFactory(fc, "example-kit",
-		loader.WithWriterOptions(nil))
+	f := loader.NewStandardWriterFactory(fc, "example-kit", nil)
 	if _, err := f(context.Background(), transfer.KindData, &loader.LoadRequest{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// The ONLY way an assertion reaches a header through this factory is the operator's
+// config flag. There is deliberately no pass-through for arbitrary
+// transfer.WriterOption values, because transfer.WithEdgeCompleteness is currently
+// the only exported one — so such an option's sole possible argument would be a
+// hard-coded assertion that fires on every artifact regardless of the request.
+//
+// Pinned as a behavioral property rather than by asserting the API surface: a kit
+// declaring its full vocabulary, with no flag on the request, must produce a clean
+// header.
+func TestStandardWriterFactory_DeclarationAloneNeverAsserts(t *testing.T) {
+	t.Parallel()
+	fc := &transfer.FakeCommitClient{}
+	f := loader.NewStandardWriterFactory(fc, "example-kit",
+		loader.WithGovernedPredicates("feeds", "hasPoint", "hasPart"))
+	ctx := context.Background()
+
+	w, err := f(ctx, transfer.KindData, &loader.LoadRequest{Config: map[string]any{}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := w.WriteVertex(ctx, transfer.Vertex{ID: "a", EntityType: "T"}); err != nil {
+		t.Fatalf("WriteVertex: %v", err)
+	}
+	if _, err := w.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if h := artifactHeader(t, fc.LastBody()); h.EdgeCompleteness != nil {
+		t.Fatalf("a declared vocabulary asserted on its own: %+v", h.EdgeCompleteness)
 	}
 }
 
@@ -395,8 +426,12 @@ func TestLoad_MissingWriterFactoryStillAnswers500(t *testing.T) {
 	}
 }
 
-// isInvalidLoadConfig mirrors what the chassis checks, without re-exporting
-// errors.Is at every call site.
+// isInvalidLoadConfig classifies exactly as the chassis does.
+//
+// Uses errors.Is, not a substring check on the message: the two are not equivalent,
+// and the difference matters in the unsafe direction. An unwrapped error whose text
+// merely contained the sentinel's message would satisfy a substring check while the
+// chassis answered 500 — so the test would assert a status the server does not send.
 func isInvalidLoadConfig(err error) bool {
-	return err != nil && strings.Contains(err.Error(), loader.ErrInvalidLoadConfig.Error())
+	return errors.Is(err, loader.ErrInvalidLoadConfig)
 }

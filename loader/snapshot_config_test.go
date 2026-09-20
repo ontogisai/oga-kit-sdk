@@ -2,6 +2,7 @@ package loader
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -440,5 +441,73 @@ func TestWithCommitClient_RecordsDeclarationForTheBootCheck(t *testing.T) {
 	// whitespace-only declaration.
 	if want := []string{"feeds", "hasPoint"}; !reflect.DeepEqual(c.declaredPredicates, want) {
 		t.Errorf("declaredPredicates = %v, want %v", c.declaredPredicates, want)
+	}
+}
+
+// With BOTH reserved keys malformed, the FLAG's error must be the one reported. The
+// flag is the gating decision; reporting only the predicate error would have the
+// caller fix that, retry, and discover the flag error on the next round trip.
+func TestParseSnapshotAssertion_FlagErrorTakesPrecedence(t *testing.T) {
+	t.Parallel()
+	_, _, err := parseSnapshotAssertion(map[string]any{
+		ConfigKeyFullSnapshot:       "true",  // wrong type
+		ConfigKeyGovernedPredicates: "feeds", // also wrong type
+	})
+	if !errors.Is(err, ErrInvalidLoadConfig) {
+		t.Fatalf("err = %v, want ErrInvalidLoadConfig", err)
+	}
+	if !strings.Contains(err.Error(), ConfigKeyFullSnapshot) {
+		t.Errorf("the flag error should be reported first, got: %v", err)
+	}
+	if strings.Contains(err.Error(), ConfigKeyGovernedPredicates) {
+		t.Errorf("the predicate error should not mask the flag error, got: %v", err)
+	}
+}
+
+// HandlerOptions are last-one-wins. A WithWriterFactory after a WithCommitClient
+// replaces the standard factory entirely, so the boot-check bookkeeping must be
+// cleared with it — otherwise the warning describes a missing vocabulary for a
+// loader whose factory never reads the reserved keys.
+func TestWithWriterFactory_ClearsStandardWriterBookkeeping(t *testing.T) {
+	t.Parallel()
+	c := &handlerConfig{kind: transfer.KindData}
+
+	WithCommitClient(&transfer.FakeCommitClient{}, "example-kit")(c)
+	if !c.standardWriterInstalled {
+		t.Fatal("precondition: WithCommitClient should have set the flag")
+	}
+
+	WithWriterFactory(func(context.Context, transfer.LoadKind, *LoadRequest) (transfer.Writer, error) {
+		return transfer.NewNopWriter(""), nil
+	})(c)
+
+	if c.standardWriterInstalled {
+		t.Error("standardWriterInstalled survived a later WithWriterFactory")
+	}
+	if c.declaredPredicates != nil {
+		t.Errorf("declaredPredicates survived: %v", c.declaredPredicates)
+	}
+
+	var buf bytes.Buffer
+	warnIfNoGovernedPredicates(c, slog.New(slog.NewTextHandler(&buf, nil)))
+	if buf.Len() != 0 {
+		t.Errorf("warned about a hand-rolled factory: %q", buf.String())
+	}
+}
+
+// A nil factory must not clear the bookkeeping either — WithWriterFactory ignores
+// nil, so the standard factory installed before it is still the live one.
+func TestWithWriterFactory_NilDoesNotClearBookkeeping(t *testing.T) {
+	t.Parallel()
+	c := &handlerConfig{kind: transfer.KindData}
+	WithCommitClient(&transfer.FakeCommitClient{}, "example-kit",
+		WithGovernedPredicates("feeds"))(c)
+	WithWriterFactory(nil)(c)
+
+	if !c.standardWriterInstalled {
+		t.Error("a nil WithWriterFactory cleared bookkeeping for a still-live standard factory")
+	}
+	if len(c.declaredPredicates) != 1 {
+		t.Errorf("declaredPredicates = %v, want the declaration to survive", c.declaredPredicates)
 	}
 }
