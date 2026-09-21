@@ -375,14 +375,33 @@ type Header struct {
 	KitID string `json:"kit_id,omitempty"`
 
 	// EdgeCompleteness is the connector's assertion about how complete
-	// the edge set in this artifact is (OGA-914). Absent — the default
-	// for every artifact written before this field existed — means the
-	// edges are a partial batch and their absence asserts nothing.
+	// the edge set in this artifact is (OGA-914).
 	//
-	// Additive and back-compatible: FormatVersion is deliberately NOT
-	// bumped for it. A platform that predates the field ignores it,
-	// which is the safe direction (no edge is closed); bumping the
-	// version would instead reject every existing kit's artifact.
+	// DEPRECATED (OGA-930), and already INERT against a current platform:
+	// the platform no longer reads it. It logs a warning if present and
+	// resolves the assertion from its OWN state instead, keyed on the
+	// gateway-verified submitter identity — so the claim never travels
+	// through the artifact and a kit image built before the feature still
+	// converges.
+	//
+	// Declare completeness in the kit MANIFEST instead:
+	//
+	//	source_connectors:
+	//	  - name: asset-sync
+	//	    edge_completeness:
+	//	      mode: per_source
+	//	      governed_predicates_file: predicates/forward.json
+	//
+	// A data loader driven by an operator import needs nothing here at
+	// all: the operator asserts per run (the full_snapshot flag on the
+	// import), and the vocabulary comes from the manifest's
+	// loaders[].governed_predicates_file.
+	//
+	// Kept for one release so a kit still setting it compiles. Setting it
+	// is harmless but achieves nothing. Removal tracked with the platform
+	// cut.
+	//
+	// Deprecated: declare edge completeness in the kit manifest.
 	EdgeCompleteness *EdgeCompleteness `json:"edge_completeness,omitempty"`
 }
 

@@ -64,6 +64,31 @@ func resolveSnapshotWriterFactoryConfig(opts []SnapshotWriterFactoryOption) []st
 // the two drift. A predicate the feed emits but does not declare here is silently
 // ungoverned: its stale edges are never closed. That is the safe direction, and
 // the platform now reports it as predicate drift — but it is still a bug.
+// # Deprecated (OGA-930)
+//
+// The platform no longer reads the assertion off the artifact, so a vocabulary
+// declared here reaches nothing. Declare it in the kit MANIFEST instead, where the
+// platform reads it at install:
+//
+//	loaders:
+//	  - name: asset-loader
+//	    kind: data
+//	    governed_predicates_file: predicates/forward.json
+//
+//	source_connectors:
+//	  - name: asset-sync
+//	    edge_completeness:
+//	      mode: per_source
+//	      governed_predicates_file: predicates/forward.json
+//
+// The "derive this list, do not retype it" guidance above still applies — it just
+// applies to generating that FILE from the feed's predicate map at build time, which
+// is the same discipline with a CI diff instead of a unit test.
+//
+// Kept for one release so a kit still passing it compiles; it is inert. Removed once
+// the kits have migrated.
+//
+// Deprecated: declare governed predicates in the kit manifest.
 func WithGovernedPredicates(preds ...string) SnapshotWriterFactoryOption {
 	return func(c *snapshotWriterFactoryConfig) {
 		c.governedPredicates = append(c.governedPredicates, preds...)

@@ -1,3 +1,14 @@
+// Every assertion in this file reads transfer.Header.EdgeCompleteness, which is
+// DEPRECATED (OGA-930): the platform no longer reads it, and completeness is declared
+// in the kit manifest instead.
+//
+// The reads are deliberate. The field is retained for one release so a kit still on
+// the old path compiles, and these tests are what prove the deprecation did not
+// quietly change what such a kit emits — the header is the factory's only observable
+// output, so there is no non-deprecated way to assert it. The file goes when the
+// field does.
+//
+//nolint:staticcheck // SA1019: the whole file exercises the retained deprecated field, by design
 package loader_test
 
 import (
