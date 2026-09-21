@@ -92,6 +92,30 @@ This asserts: *for every vertex this artifact carries, the edges it carries from
 
 The platform applies a **volume guard**: a publish that would close an implausible number of edges is refused whole (nothing applied) and alerts an operator, who can clear a genuinely large removal. Expect a refused sync if your export truncates.
 
+#### Operator-driven imports: declare the vocabulary, let the operator assert
+
+The writer option above is right for a **connector**, whose author knows every cycle is a full export. It is wrong for a **loader driven by an operator data import**, where the same loader handles a complete export one day and a partial top-up the next — only the person who chose the file knows which, and hard-coding the assertion would close live edges on the partial run.
+
+So the two halves are split by who knows the answer. The kit declares the predicates its feed **owns**; the operator asserts, per run, whether **this** artifact is complete (a checkbox in the console, `--full-snapshot` on `oga-admin import`). Wire it with `WithCommitClient`:
+
+```go
+cfg := &loader.ServerConfig{
+    Port: "8400",
+    HandlerOptions: []loader.HandlerOption{
+        loader.WithCommitClient(commitClient, "my-kit",
+            loader.WithGovernedPredicates(myFeedPredicates()...)),
+        loader.WithLoaderKind(transfer.KindData),
+    },
+}
+```
+
+The chassis reads the operator's assertion off the reserved `config` keys (`oga.full_snapshot`, and an optional `oga.governed_predicates` to scope tighter for one run) and stamps the header for you. With no assertion the artifact is byte-identical to one written without any of this, so nothing changes for an ordinary incremental import.
+
+Two things worth knowing:
+
+- **Derive your predicate list, do not retype it.** Build it from whatever already defines your feed's vocabulary and add a test that fails when the two drift. A predicate you emit but do not declare is silently ungoverned — its stale edges are never closed. Safe, but a bug, and the platform will report it as predicate drift.
+- **Declaring a vocabulary asserts nothing on its own.** Without `oga.full_snapshot=true` on the request, no assertion is written. A loader that declares none refuses every assertion and says so with a WARN at startup.
+
 ## Single-pass loader (most kits)
 
 For source files under 5 MiB or formats that don't need cross-pass state, implement `loader.LoaderHandler` and stream every record in one pass:
@@ -148,13 +172,13 @@ func main() {
         os.Getenv("OGA_TENANT_ID"),
         "my-kit",
     )
-    factory := func(_ context.Context, kind transfer.LoadKind, _ *loader.LoadRequest) (transfer.Writer, error) {
-        return transfer.NewWriter(cc, kind, "my-kit"), nil
-    }
     cfg := &loader.ServerConfig{
         Port: "8400",
         HandlerOptions: []loader.HandlerOption{
-            loader.WithWriterFactory(factory),
+            // Builds the writer for you. Add
+            // loader.WithGovernedPredicates(...) if this loader serves
+            // full-snapshot imports (see "Operator-driven imports" above).
+            loader.WithCommitClient(cc, "my-kit"),
             loader.WithLoaderKind(transfer.KindData),
         },
     }
