@@ -144,13 +144,6 @@ func WithWriterFactory(f WriterFactory) HandlerOption {
 	return func(c *handlerConfig) {
 		if f != nil {
 			c.writerFactory = f
-			// Options are last-one-wins, so a WithWriterFactory after a
-			// WithCommitClient replaces the snapshot writer factory entirely. Clear the
-			// bookkeeping with it: otherwise the boot check would warn about a
-			// missing predicate vocabulary for a loader whose factory never reads
-			// the reserved keys at all.
-			c.readsSnapshotConfig = false
-			c.declaredPredicates = nil
 		}
 	}
 }
@@ -170,22 +163,6 @@ func WithLoaderKind(kind transfer.LoadKind) HandlerOption {
 type handlerConfig struct {
 	writerFactory WriterFactory
 	kind          transfer.LoadKind
-
-	// readsSnapshotConfig reports whether the LIVE writer factory reads the
-	// reserved snapshot keys off the request (see [ConfigKeyFullSnapshot]) — that
-	// is, whether it is the snapshot writer factory rather than a hand-rolled one.
-	// It is the precondition for the boot-time vocabulary check: warning a handler
-	// that never reads those keys about a missing vocabulary would be nonsense.
-	//
-	// Present tense on purpose. Options are last-one-wins, so this has to describe
-	// the factory that is live NOW, not one that was installed at some point.
-	//
-	// Set with declaredPredicates by [WithCommitClient] and cleared with it by
-	// [WithWriterFactory]; the two must always move together. "Reads the config but
-	// has no declaration" is the state the warning exists for; "does not read it yet
-	// a declaration lingers" is nonsense. Neither is read on the request path.
-	readsSnapshotConfig bool
-	declaredPredicates  []string
 }
 
 func newHandlerConfig(opts []HandlerOption) *handlerConfig {
@@ -199,37 +176,7 @@ func newHandlerConfig(opts []HandlerOption) *handlerConfig {
 	for _, opt := range opts {
 		opt(c)
 	}
-	warnIfNoGovernedPredicates(c, kitlog.Default())
 	return c
-}
-
-// warnIfNoGovernedPredicates reports a data loader that can never honor an
-// operator's full-snapshot assertion.
-//
-// Such a loader REFUSES every assertion, which is fail-closed and correct but
-// silent: the operator ticks the box, the import fails with a message about the
-// kit's source code, and nothing said so at startup. Without this, a kit that
-// forgot to declare a vocabulary reproduces the very defect the snapshot writer factory
-// exists to remove — an operator control that quietly does nothing.
-//
-// Called after every option is applied, so the loader kind is known. Only KindData
-// is checked: an ontology loader can never carry an assertion, so warning it about
-// a predicate vocabulary it cannot use is noise.
-//
-// Takes the logger as an argument rather than reaching for kitlog.Default() so the
-// policy is testable without capturing process stderr.
-func warnIfNoGovernedPredicates(c *handlerConfig, lg *slog.Logger) {
-	if c == nil || lg == nil {
-		return
-	}
-	if !c.readsSnapshotConfig || c.kind != transfer.KindData || len(c.declaredPredicates) > 0 {
-		return
-	}
-	lg.Warn(
-		"loader: no governed predicates declared; operator full-snapshot imports will be refused",
-		"remedy", "pass loader.WithGovernedPredicates(...) to loader.WithCommitClient",
-		"config_key", ConfigKeyFullSnapshot,
-	)
 }
 
 // ServerConfig tunes the [ListenAndServe] HTTP server. Zero values
