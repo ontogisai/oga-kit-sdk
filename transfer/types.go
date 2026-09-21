@@ -1,7 +1,6 @@
 package transfer
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -373,131 +372,6 @@ type Header struct {
 	// KitID is informational; tenant_id and the authoritative kit
 	// identity come from the gateway auth context.
 	KitID string `json:"kit_id,omitempty"`
-
-	// EdgeCompleteness is the connector's assertion about how complete
-	// the edge set in this artifact is (OGA-914).
-	//
-	// DEPRECATED (OGA-930), and already INERT against a current platform:
-	// the platform no longer reads it. It logs a warning if present and
-	// resolves the assertion from its OWN state instead, keyed on the
-	// gateway-verified submitter identity — so the claim never travels
-	// through the artifact and a kit image built before the feature still
-	// converges.
-	//
-	// Declare completeness in the kit MANIFEST instead:
-	//
-	//	source_connectors:
-	//	  - name: asset-sync
-	//	    edge_completeness:
-	//	      mode: per_source
-	//	      governed_predicates_file: predicates/forward.json
-	//
-	// A data loader driven by an operator import needs nothing here at
-	// all: the operator asserts per run (the full_snapshot flag on the
-	// import), and the vocabulary comes from the manifest's
-	// loaders[].governed_predicates_file.
-	//
-	// Kept for one release so a kit still setting it compiles. Setting it
-	// is harmless but achieves nothing. Removal tracked with the platform
-	// cut.
-	//
-	// Deprecated: declare edge completeness in the kit manifest.
-	EdgeCompleteness *EdgeCompleteness `json:"edge_completeness,omitempty"`
-}
-
-// EdgeCompletenessMode names how complete the edge set in an artifact
-// is. The zero value is the pre-existing behaviour, so a kit that
-// never sets it is unaffected.
-type EdgeCompletenessMode string
-
-const (
-	// EdgeCompletenessPartial (the zero value) — the artifact's edges
-	// are a partial batch. Absence of an edge asserts NOTHING, so the
-	// platform closes nothing. Every loader, NGSI-LD feed and MCP
-	// caller is in this mode.
-	EdgeCompletenessPartial EdgeCompletenessMode = ""
-
-	// EdgeCompletenessPerSource — for EVERY vertex this artifact
-	// carries, the edges it carries FROM that vertex under
-	// GovernedPredicates are the COMPLETE set, INCLUDING the empty
-	// set. The platform closes a live edge whose source is one of
-	// those vertices, whose predicate is governed, and which the
-	// artifact does not carry.
-	//
-	// ⚠️ Two obligations come with this mode, and the platform can
-	// verify neither:
-	//
-	//  1. COLLAPSE INVERSE PAIRS FIRST. If the upstream declares a
-	//     relationship from both ends (`feeds` on the damper,
-	//     `isFedBy` on the AHU), those are ONE canonical edge and the
-	//     connector must emit it under one canonical source whichever
-	//     end declared it. The platform honours the submitted set
-	//     verbatim and never re-derives an owner, so a connector that
-	//     asserts this mode without collapsing WILL close edges the
-	//     other endpoint still declares.
-	//  2. ONE ARTIFACT PER SNAPSHOT. A source's edges must be in the
-	//     SAME artifact as its vertex. Splitting one logical export
-	//     across two artifacts makes each one's vertex set partial,
-	//     and the first would close the edges the second carries.
-	EdgeCompletenessPerSource EdgeCompletenessMode = "per_source"
-)
-
-// EdgeCompleteness is the assertion carried on the artifact header.
-type EdgeCompleteness struct {
-	// Mode is how complete the edge set is. See the mode constants.
-	Mode EdgeCompletenessMode `json:"mode"`
-
-	// GovernedPredicates bounds which relationship types the assertion
-	// covers — the feed's own vocabulary. A live edge under a
-	// predicate NOT listed here is never closed, however complete the
-	// source's other edges are.
-	//
-	// Required (non-empty) in EdgeCompletenessPerSource. An empty list
-	// is REFUSED rather than read as "governs everything": a
-	// connector's export routinely shares a source with edges written
-	// by another feed, the MCP tools or the platform itself, and
-	// closing those is not a mistake anything downstream could
-	// review. Values are the source-native predicate names, verbatim.
-	GovernedPredicates []string `json:"governed_predicates,omitempty"`
-}
-
-// Validate reports whether the assertion is well formed. A nil
-// receiver is valid (no assertion).
-func (e *EdgeCompleteness) Validate() error {
-	if e == nil {
-		return nil
-	}
-	switch e.Mode {
-	case EdgeCompletenessPartial:
-		// No assertion. Governed predicates are meaningless here, and
-		// silently accepting them would let a kit believe it had opted
-		// in when it had only named a vocabulary.
-		if len(e.GovernedPredicates) > 0 {
-			return errors.New("transfer: edge_completeness.governed_predicates set without a mode; " +
-				"set mode to \"per_source\" to assert completeness")
-		}
-		return nil
-	case EdgeCompletenessPerSource:
-		for _, p := range e.GovernedPredicates {
-			if strings.TrimSpace(p) == "" {
-				return errors.New("transfer: edge_completeness.governed_predicates contains an empty predicate")
-			}
-		}
-		if len(e.GovernedPredicates) == 0 {
-			return fmt.Errorf("transfer: edge_completeness mode %q requires at least one governed_predicate",
-				EdgeCompletenessPerSource)
-		}
-		return nil
-	default:
-		return fmt.Errorf("transfer: unsupported edge_completeness mode %q (supported: %q)",
-			e.Mode, EdgeCompletenessPerSource)
-	}
-}
-
-// Asserted reports whether the header carries an assertion the
-// platform should act on. Nil-safe.
-func (e *EdgeCompleteness) Asserted() bool {
-	return e != nil && e.Mode == EdgeCompletenessPerSource
 }
 
 // EntryKind classifies a single record in the body. Each line after

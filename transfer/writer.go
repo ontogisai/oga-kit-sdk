@@ -138,45 +138,14 @@ type CompleteResponse struct {
 	AcceptedAt string `json:"accepted_at,omitempty"`
 }
 
-// WriterOption configures a writer at construction. Variadic so every
-// existing NewWriter / NewDataWriter / NewOntologyWriter call site
-// compiles unchanged.
-type WriterOption func(*bufferedWriter)
-
-// WithEdgeCompleteness declares how complete the edge set in this
-// artifact is (OGA-914). Use [EdgeCompletenessPerSource] for a
-// full-snapshot feed whose export is the system of record for the
-// assets it carries — read that constant's doc first, it carries two
-// obligations the platform cannot verify.
+// WriterOption configures a writer at construction.
 //
-// An invalid assertion is captured and returned from every subsequent
-// Write* call and from Close, rather than panicking or being dropped:
-// NewWriter has no error to return, and silently ignoring it would
-// ship an artifact the kit author believes asserts completeness when
-// it does not.
-func WithEdgeCompleteness(ec EdgeCompleteness) WriterOption {
-	return func(w *bufferedWriter) {
-		if err := ec.Validate(); err != nil {
-			w.optErr = err
-			return
-		}
-		if ec.Mode == EdgeCompletenessPartial {
-			// Nothing asserted — leave the header field absent rather
-			// than emitting an empty object.
-			return
-		}
-		if w.header.Kind == KindOntology {
-			w.optErr = errors.New("transfer: edge_completeness is not valid on an ontology writer " +
-				"(an ontology artifact carries no edge instances to scope)")
-			return
-		}
-		copied := EdgeCompleteness{
-			Mode:               ec.Mode,
-			GovernedPredicates: append([]string(nil), ec.GovernedPredicates...),
-		}
-		w.header.EdgeCompleteness = &copied
-	}
-}
+// There are currently NO exported constructors — the only one there has ever been
+// was WithEdgeCompleteness, removed in OGA-930 when the platform stopped reading the
+// artifact's assertion (it is declared in the kit manifest now). The variadic is
+// retained on NewWriter / NewDataWriter / NewOntologyWriter so a genuine option can
+// be added later without breaking those three signatures.
+type WriterOption func(*bufferedWriter)
 
 // NewWriter constructs the default in-process writer. Production
 // callers use this with an [HTTPCommitClient]; tests can substitute a

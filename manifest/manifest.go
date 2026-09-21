@@ -348,7 +348,8 @@ type SourceConnectorSpec struct {
 	// carrying it. That is what lets a connector image built before the feature
 	// converge without a rebuild.
 	//
-	// Replaces transfer.Header.EdgeCompleteness, which the platform no longer reads.
+	// Replaces the artifact-header assertion that the platform used to read
+	// (transfer.Header.edge_completeness, removed in OGA-930).
 	EdgeCompleteness *EdgeCompletenessSpec `yaml:"edge_completeness,omitempty"`
 }
 
@@ -367,8 +368,8 @@ type EdgeCompletenessSpec struct {
 	// each asset the artifact carries, the edges it declares under the governed
 	// predicates are ALL of that asset's edges under them.
 	//
-	// Spelled exactly as the retired transfer.EdgeCompletenessPerSource wire value,
-	// so moving off the artifact header is a relocation rather than a rename.
+	// Spelled exactly as the retired artifact-header wire value ("per_source"), so
+	// moving off the header is a relocation rather than a rename.
 	Mode string `yaml:"mode"`
 
 	// GovernedPredicatesFile is a bundle-relative path to the predicate list this
