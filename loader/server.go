@@ -145,11 +145,11 @@ func WithWriterFactory(f WriterFactory) HandlerOption {
 		if f != nil {
 			c.writerFactory = f
 			// Options are last-one-wins, so a WithWriterFactory after a
-			// WithCommitClient replaces the standard factory entirely. Clear the
+			// WithCommitClient replaces the snapshot writer factory entirely. Clear the
 			// bookkeeping with it: otherwise the boot check would warn about a
 			// missing predicate vocabulary for a loader whose factory never reads
 			// the reserved keys at all.
-			c.standardWriterInstalled = false
+			c.readsSnapshotConfig = false
 			c.declaredPredicates = nil
 		}
 	}
@@ -171,11 +171,21 @@ type handlerConfig struct {
 	writerFactory WriterFactory
 	kind          transfer.LoadKind
 
-	// standardWriterInstalled and declaredPredicates are set by
-	// [WithCommitClient] so the boot-time vocabulary check below can run. They
-	// are not read on the request path.
-	standardWriterInstalled bool
-	declaredPredicates      []string
+	// readsSnapshotConfig reports whether the LIVE writer factory reads the
+	// reserved snapshot keys off the request (see [ConfigKeyFullSnapshot]) — that
+	// is, whether it is the snapshot writer factory rather than a hand-rolled one.
+	// It is the precondition for the boot-time vocabulary check: warning a handler
+	// that never reads those keys about a missing vocabulary would be nonsense.
+	//
+	// Present tense on purpose. Options are last-one-wins, so this has to describe
+	// the factory that is live NOW, not one that was installed at some point.
+	//
+	// Set with declaredPredicates by [WithCommitClient] and cleared with it by
+	// [WithWriterFactory]; the two must always move together. "Reads the config but
+	// has no declaration" is the state the warning exists for; "does not read it yet
+	// a declaration lingers" is nonsense. Neither is read on the request path.
+	readsSnapshotConfig bool
+	declaredPredicates  []string
 }
 
 func newHandlerConfig(opts []HandlerOption) *handlerConfig {
@@ -199,7 +209,7 @@ func newHandlerConfig(opts []HandlerOption) *handlerConfig {
 // Such a loader REFUSES every assertion, which is fail-closed and correct but
 // silent: the operator ticks the box, the import fails with a message about the
 // kit's source code, and nothing said so at startup. Without this, a kit that
-// forgot to declare a vocabulary reproduces the very defect the standard factory
+// forgot to declare a vocabulary reproduces the very defect the snapshot writer factory
 // exists to remove — an operator control that quietly does nothing.
 //
 // Called after every option is applied, so the loader kind is known. Only KindData
@@ -212,7 +222,7 @@ func warnIfNoGovernedPredicates(c *handlerConfig, lg *slog.Logger) {
 	if c == nil || lg == nil {
 		return
 	}
-	if !c.standardWriterInstalled || c.kind != transfer.KindData || len(c.declaredPredicates) > 0 {
+	if !c.readsSnapshotConfig || c.kind != transfer.KindData || len(c.declaredPredicates) > 0 {
 		return
 	}
 	lg.Warn(

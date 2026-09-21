@@ -7,25 +7,25 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
 
-// StandardWriterOption tunes [NewStandardWriterFactory].
-type StandardWriterOption func(*standardWriterConfig)
+// SnapshotWriterFactoryOption tunes [NewSnapshotWriterFactory].
+type SnapshotWriterFactoryOption func(*snapshotWriterFactoryConfig)
 
-type standardWriterConfig struct {
+type snapshotWriterFactoryConfig struct {
 	governedPredicates []string
 }
 
-// resolveStandardWriterConfig applies options once and returns the normalized
+// resolveSnapshotWriterFactoryConfig applies options once and returns the normalized
 // declaration.
 //
 // Built in ONE place deliberately. An earlier shape had WithCommitClient apply the
 // options a second time for its boot-check bookkeeping, which could not diverge
-// only because StandardWriterOption is a func over an unexported type and both
+// only because SnapshotWriterFactoryOption is a func over an unexported type and both
 // options happened to be stateless appends. A stateful or order-sensitive option
 // added later would have made the factory's declaration and the boot check's
 // declaration disagree silently, and the warning would then describe a vocabulary
 // the factory does not hold.
-func resolveStandardWriterConfig(opts []StandardWriterOption) []string {
-	cfg := &standardWriterConfig{}
+func resolveSnapshotWriterFactoryConfig(opts []SnapshotWriterFactoryOption) []string {
+	cfg := &snapshotWriterFactoryConfig{}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(cfg)
@@ -64,8 +64,8 @@ func resolveStandardWriterConfig(opts []StandardWriterOption) []string {
 // the two drift. A predicate the feed emits but does not declare here is silently
 // ungoverned: its stale edges are never closed. That is the safe direction, and
 // the platform now reports it as predicate drift — but it is still a bug.
-func WithGovernedPredicates(preds ...string) StandardWriterOption {
-	return func(c *standardWriterConfig) {
+func WithGovernedPredicates(preds ...string) SnapshotWriterFactoryOption {
+	return func(c *snapshotWriterFactoryConfig) {
 		c.governedPredicates = append(c.governedPredicates, preds...)
 	}
 }
@@ -91,7 +91,7 @@ func WithGovernedPredicates(preds ...string) StandardWriterOption {
 // If a genuinely needed WriterOption appears later, reintroduce a narrow option for
 // that specific concern rather than a general pass-through.
 
-// NewStandardWriterFactory builds the writer factory every operator-driven loader
+// NewSnapshotWriterFactory builds the writer factory every operator-driven loader
 // should use.
 //
 // It replaces the closure each kit used to hand-write, which was byte-identical
@@ -113,18 +113,18 @@ func WithGovernedPredicates(preds ...string) StandardWriterOption {
 // writer is byte-identical to the boilerplate one above.
 //
 // Prefer [WithCommitClient], which installs this in one line.
-func NewStandardWriterFactory(
+func NewSnapshotWriterFactory(
 	client transfer.CommitClient,
 	kitID string,
-	opts ...StandardWriterOption,
+	opts ...SnapshotWriterFactoryOption,
 ) WriterFactory {
-	return newStandardWriterFactory(client, kitID, resolveStandardWriterConfig(opts))
+	return newSnapshotWriterFactory(client, kitID, resolveSnapshotWriterFactoryConfig(opts))
 }
 
-// newStandardWriterFactory is the shared core, taking the ALREADY-normalized
+// newSnapshotWriterFactory is the shared core, taking the ALREADY-normalized
 // declaration so WithCommitClient can resolve the options once and use the same
 // value for both the factory and its boot check.
-func newStandardWriterFactory(
+func newSnapshotWriterFactory(
 	client transfer.CommitClient,
 	kitID string,
 	declared []string,
@@ -135,7 +135,7 @@ func newStandardWriterFactory(
 		// it would survive construction and panic at Close after the kit had
 		// already done the whole load.
 		if client == nil {
-			return nil, errors.New("loader: standard writer factory has no commit client")
+			return nil, errors.New("loader: snapshot writer factory has no commit client")
 		}
 
 		var cfgMap map[string]any
@@ -159,7 +159,7 @@ func newStandardWriterFactory(
 }
 
 // WithCommitClient is the production wiring for a loader sidecar: it installs the
-// standard writer factory so the kit never writes a factory closure.
+// snapshot writer factory so the kit never writes a factory closure.
 //
 //	cfg := &loader.ServerConfig{
 //	    Port: port,
@@ -176,12 +176,12 @@ func newStandardWriterFactory(
 func WithCommitClient(
 	client transfer.CommitClient,
 	kitID string,
-	opts ...StandardWriterOption,
+	opts ...SnapshotWriterFactoryOption,
 ) HandlerOption {
 	// Resolved ONCE and shared, so the factory's declaration and the boot check's
 	// declaration cannot drift apart.
-	declared := resolveStandardWriterConfig(opts)
-	factory := newStandardWriterFactory(client, kitID, declared)
+	declared := resolveSnapshotWriterFactoryConfig(opts)
+	factory := newSnapshotWriterFactory(client, kitID, declared)
 
 	return func(c *handlerConfig) {
 		c.writerFactory = factory
@@ -189,7 +189,7 @@ func WithCommitClient(
 		// declared vocabulary. It is deliberately checked THERE and not here:
 		// the loader kind arrives from a separate option, and warning an ontology
 		// loader about a predicate vocabulary it can never use is noise.
-		c.standardWriterInstalled = true
+		c.readsSnapshotConfig = true
 		c.declaredPredicates = declared
 	}
 }

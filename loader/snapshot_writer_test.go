@@ -94,7 +94,7 @@ func runLoad(t *testing.T, cfgMap map[string]any, opts ...loader.HandlerOption) 
 // decoded header: a header field that serializes as an empty object rather than
 // being omitted would satisfy a field-by-field comparison while changing the
 // content hash the platform records.
-func TestStandardWriterFactory_NoAssertionIsByteIdentical(t *testing.T) {
+func TestSnapshotWriterFactory_NoAssertionIsByteIdentical(t *testing.T) {
 	t.Parallel()
 
 	write := func(w transfer.Writer) {
@@ -118,35 +118,35 @@ func TestStandardWriterFactory_NoAssertionIsByteIdentical(t *testing.T) {
 	}
 	write(lw)
 
-	// The standard factory, with a declared vocabulary present but no operator
+	// The snapshot writer factory, with a declared vocabulary present but no operator
 	// assertion — the declaration alone must change nothing on the wire.
 	stdFC := &transfer.FakeCommitClient{}
-	std := loader.NewStandardWriterFactory(stdFC, "example-kit",
+	std := loader.NewSnapshotWriterFactory(stdFC, "example-kit",
 		loader.WithGovernedPredicates("feeds", "hasPoint"))
 	sw, err := std(context.Background(), transfer.KindData, &loader.LoadRequest{
 		Config: map[string]any{"batch_size": 100},
 	})
 	if err != nil {
-		t.Fatalf("standard factory: %v", err)
+		t.Fatalf("snapshot writer factory: %v", err)
 	}
 	write(sw)
 
 	if !bytes.Equal(legacyFC.LastBody(), stdFC.LastBody()) {
-		t.Fatalf("artifact bytes differ.\nlegacy:   %q\nstandard: %q",
+		t.Fatalf("artifact bytes differ.\nlegacy:   %q\nsnapshot: %q",
 			legacyFC.LastBody(), stdFC.LastBody())
 	}
 	if legacyFC.LastBodyHash() != stdFC.LastBodyHash() {
-		t.Errorf("content hash differs: legacy=%s standard=%s",
+		t.Errorf("content hash differs: legacy=%s snapshot=%s",
 			legacyFC.LastBodyHash(), stdFC.LastBodyHash())
 	}
 }
 
 // --- factory behavior ----------------------------------------------------
 
-func TestStandardWriterFactory_NilRequestIsTolerated(t *testing.T) {
+func TestSnapshotWriterFactory_NilRequestIsTolerated(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	f := loader.NewStandardWriterFactory(fc, "example-kit")
+	f := loader.NewSnapshotWriterFactory(fc, "example-kit")
 	if _, err := f(context.Background(), transfer.KindData, nil); err != nil {
 		t.Fatalf("nil request should not error: %v", err)
 	}
@@ -155,9 +155,9 @@ func TestStandardWriterFactory_NilRequestIsTolerated(t *testing.T) {
 // A nil commit client is a DEPLOYMENT fault, not a bad request: it must not be
 // reported as 400, and it must not reach transfer.NewWriter, where it would
 // survive construction and panic at Close after the kit had done the whole load.
-func TestStandardWriterFactory_NilCommitClientIsNotAClientError(t *testing.T) {
+func TestSnapshotWriterFactory_NilCommitClientIsNotAClientError(t *testing.T) {
 	t.Parallel()
-	f := loader.NewStandardWriterFactory(nil, "example-kit")
+	f := loader.NewSnapshotWriterFactory(nil, "example-kit")
 	w, err := f(context.Background(), transfer.KindData, &loader.LoadRequest{})
 	if err == nil {
 		t.Fatal("expected an error for a nil commit client")
@@ -174,10 +174,10 @@ func TestStandardWriterFactory_NilCommitClientIsNotAClientError(t *testing.T) {
 // the backing array would leak one request's assertion into the next — a request
 // that asserted nothing would inherit the previous request's governed predicates
 // and start closing edges.
-func TestStandardWriterFactory_AssertionDoesNotLeakBetweenRequests(t *testing.T) {
+func TestSnapshotWriterFactory_AssertionDoesNotLeakBetweenRequests(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	f := loader.NewStandardWriterFactory(fc, "example-kit",
+	f := loader.NewSnapshotWriterFactory(fc, "example-kit",
 		loader.WithGovernedPredicates("feeds"))
 	ctx := context.Background()
 
@@ -216,10 +216,10 @@ func TestStandardWriterFactory_AssertionDoesNotLeakBetweenRequests(t *testing.T)
 
 // A nil option must be ignored rather than panicking — HandlerOption slices are
 // often built conditionally.
-func TestStandardWriterFactory_NilOptionIsIgnored(t *testing.T) {
+func TestSnapshotWriterFactory_NilOptionIsIgnored(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	f := loader.NewStandardWriterFactory(fc, "example-kit", nil)
+	f := loader.NewSnapshotWriterFactory(fc, "example-kit", nil)
 	if _, err := f(context.Background(), transfer.KindData, &loader.LoadRequest{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -234,10 +234,10 @@ func TestStandardWriterFactory_NilOptionIsIgnored(t *testing.T) {
 // Pinned as a behavioral property rather than by asserting the API surface: a kit
 // declaring its full vocabulary, with no flag on the request, must produce a clean
 // header.
-func TestStandardWriterFactory_DeclarationAloneNeverAsserts(t *testing.T) {
+func TestSnapshotWriterFactory_DeclarationAloneNeverAsserts(t *testing.T) {
 	t.Parallel()
 	fc := &transfer.FakeCommitClient{}
-	f := loader.NewStandardWriterFactory(fc, "example-kit",
+	f := loader.NewSnapshotWriterFactory(fc, "example-kit",
 		loader.WithGovernedPredicates("feeds", "hasPoint", "hasPart"))
 	ctx := context.Background()
 

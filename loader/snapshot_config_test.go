@@ -367,8 +367,8 @@ func TestWarnIfNoGovernedPredicates(t *testing.T) {
 	t.Run("data loader with no declaration warns", func(t *testing.T) {
 		t.Parallel()
 		out := capture(&handlerConfig{
-			standardWriterInstalled: true,
-			kind:                    transfer.KindData,
+			readsSnapshotConfig: true,
+			kind:                transfer.KindData,
 		})
 		if !strings.Contains(out, "no governed predicates declared") {
 			t.Fatalf("expected a warning, got %q", out)
@@ -383,9 +383,9 @@ func TestWarnIfNoGovernedPredicates(t *testing.T) {
 	t.Run("data loader with a declaration is silent", func(t *testing.T) {
 		t.Parallel()
 		out := capture(&handlerConfig{
-			standardWriterInstalled: true,
-			kind:                    transfer.KindData,
-			declaredPredicates:      []string{"feeds"},
+			readsSnapshotConfig: true,
+			kind:                transfer.KindData,
+			declaredPredicates:  []string{"feeds"},
 		})
 		if out != "" {
 			t.Fatalf("expected silence, got %q", out)
@@ -397,8 +397,8 @@ func TestWarnIfNoGovernedPredicates(t *testing.T) {
 	t.Run("ontology loader is silent", func(t *testing.T) {
 		t.Parallel()
 		out := capture(&handlerConfig{
-			standardWriterInstalled: true,
-			kind:                    transfer.KindOntology,
+			readsSnapshotConfig: true,
+			kind:                transfer.KindOntology,
 		})
 		if out != "" {
 			t.Fatalf("expected silence for an ontology loader, got %q", out)
@@ -431,8 +431,8 @@ func TestWithCommitClient_RecordsDeclarationForTheBootCheck(t *testing.T) {
 	WithCommitClient(&transfer.FakeCommitClient{}, "example-kit",
 		WithGovernedPredicates(" feeds ", "feeds", "hasPoint"))(c)
 
-	if !c.standardWriterInstalled {
-		t.Error("standardWriterInstalled not set")
+	if !c.readsSnapshotConfig {
+		t.Error("readsSnapshotConfig not set")
 	}
 	if c.writerFactory == nil {
 		t.Error("writerFactory not set")
@@ -465,15 +465,15 @@ func TestParseSnapshotAssertion_FlagErrorTakesPrecedence(t *testing.T) {
 }
 
 // HandlerOptions are last-one-wins. A WithWriterFactory after a WithCommitClient
-// replaces the standard factory entirely, so the boot-check bookkeeping must be
+// replaces the snapshot writer factory entirely, so the boot-check bookkeeping must be
 // cleared with it — otherwise the warning describes a missing vocabulary for a
 // loader whose factory never reads the reserved keys.
-func TestWithWriterFactory_ClearsStandardWriterBookkeeping(t *testing.T) {
+func TestWithWriterFactory_ClearsSnapshotWriterBookkeeping(t *testing.T) {
 	t.Parallel()
 	c := &handlerConfig{kind: transfer.KindData}
 
 	WithCommitClient(&transfer.FakeCommitClient{}, "example-kit")(c)
-	if !c.standardWriterInstalled {
+	if !c.readsSnapshotConfig {
 		t.Fatal("precondition: WithCommitClient should have set the flag")
 	}
 
@@ -481,8 +481,8 @@ func TestWithWriterFactory_ClearsStandardWriterBookkeeping(t *testing.T) {
 		return transfer.NewNopWriter(""), nil
 	})(c)
 
-	if c.standardWriterInstalled {
-		t.Error("standardWriterInstalled survived a later WithWriterFactory")
+	if c.readsSnapshotConfig {
+		t.Error("readsSnapshotConfig survived a later WithWriterFactory")
 	}
 	if c.declaredPredicates != nil {
 		t.Errorf("declaredPredicates survived: %v", c.declaredPredicates)
@@ -496,7 +496,7 @@ func TestWithWriterFactory_ClearsStandardWriterBookkeeping(t *testing.T) {
 }
 
 // A nil factory must not clear the bookkeeping either — WithWriterFactory ignores
-// nil, so the standard factory installed before it is still the live one.
+// nil, so the snapshot writer factory installed before it is still the live one.
 func TestWithWriterFactory_NilDoesNotClearBookkeeping(t *testing.T) {
 	t.Parallel()
 	c := &handlerConfig{kind: transfer.KindData}
@@ -504,8 +504,8 @@ func TestWithWriterFactory_NilDoesNotClearBookkeeping(t *testing.T) {
 		WithGovernedPredicates("feeds"))(c)
 	WithWriterFactory(nil)(c)
 
-	if !c.standardWriterInstalled {
-		t.Error("a nil WithWriterFactory cleared bookkeeping for a still-live standard factory")
+	if !c.readsSnapshotConfig {
+		t.Error("a nil WithWriterFactory cleared bookkeeping for a still-live snapshot writer factory")
 	}
 	if len(c.declaredPredicates) != 1 {
 		t.Errorf("declaredPredicates = %v, want the declaration to survive", c.declaredPredicates)

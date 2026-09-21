@@ -24,7 +24,7 @@ import (
 //
 // So the intent travels THROUGH the loader. The platform puts it in the `config`
 // map that DataImportRequest.Config → DataImportInput.Config → SubmitLoad already
-// forwards to POST /load, and [NewStandardWriterFactory] reflects it into the
+// forwards to POST /load, and [NewSnapshotWriterFactory] reflects it into the
 // header.
 //
 // # Namespacing
