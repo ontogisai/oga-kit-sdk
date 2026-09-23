@@ -145,7 +145,46 @@ type Vertex struct {
 	// (id, tenant_id) as before. Additive and back-compatible: loaders and
 	// existing kits that never set it are unaffected.
 	CorrelationKey *CorrelationKey `json:"correlation_key,omitempty"`
+
+	// Lifecycle is the source's assertion of whether this entity still exists
+	// (OGA-916). When "removed", the platform tombstones the entity and closes
+	// every edge incident on it in one transaction; when empty or "present" the
+	// record ingests as ordinary content, and re-asserts a previously removed
+	// entity back into existence.
+	//
+	// The empty value reads as present, so loaders and existing kits that never
+	// set it are unaffected by construction.
+	//
+	// A kit MUST MAP its source's own removal flag onto this value rather than
+	// forwarding the raw source property. The platform's vocabulary was chosen
+	// independently and merely coincides with what some sources send, so a
+	// pass-through happens to work while silently coupling the kit's wire shape
+	// to its source's — which breaks the moment either changes.
+	Lifecycle Lifecycle `json:"lifecycle,omitempty"`
 }
+
+// Lifecycle is a source's per-record assertion of whether an entity still
+// exists (OGA-916). It follows the same recognised-value alias shape as
+// [Materialization] on the same struct: the empty value is the default, so a
+// kit that never sets it is unaffected.
+//
+// The platform validates against the recognised set below and FAILS CLOSED
+// TOWARD INACTION: an unrecognised value ingests the record as ordinary
+// content and tombstones nothing, so a typo can never delete a live entity.
+type Lifecycle = string
+
+// Recognized lifecycle values.
+const (
+	// LifecyclePresent asserts the entity exists. Default — an empty Lifecycle
+	// is treated as present.
+	LifecyclePresent Lifecycle = "present"
+
+	// LifecycleRemoved asserts the source no longer has this entity. The
+	// platform tombstones it (soft, recoverable) and closes its edges. Honouring
+	// is subject to a per-tenant switch, so a kit asserting this is necessary
+	// but not sufficient for the removal to be applied.
+	LifecycleRemoved Lifecycle = "removed"
+)
 
 // CorrelationKey is the external reference an inbound record carries so the
 // platform can locate the existing KG entity it corresponds to. It is the
