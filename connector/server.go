@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/kitlog"
+	"github.com/ontogisai/oga-kit-sdk/outcomereport"
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
 
@@ -38,6 +39,23 @@ type Config struct {
 	// Sink is the Tier-C timeseries emit surface. Optional; when nil, a
 	// connector that emits points fails loudly (no silent drop).
 	Sink TimeseriesSink
+
+	// OutcomeReceiver accepts the platform's sync-outcome report for the
+	// submissions THIS connector made (OGA-917), served at
+	// [outcomereport.Path].
+	//
+	// Set it when the kit's manifest declares receives_outcome_report on this
+	// connector; the two go together. With the manifest flag set and this nil the
+	// route still exists and answers 501, which the platform reads as "does not
+	// receive" and dead-letters — a loud deployment-mismatch signal rather than a
+	// silent drop.
+	//
+	// Receipt is per SIDECAR: a report reaches the connector that submitted the
+	// artifact, so a kit can run a receiving connector beside a non-receiving
+	// loader and only the connector is fed.
+	//
+	// Optional: nil with no manifest flag means the platform never delivers here.
+	OutcomeReceiver outcomereport.Receiver
 
 	// WebhookMode selects how an inbound webhook delivery is processed.
 	// Zero value is WebhookSync — the long-standing behaviour, unchanged.
@@ -471,6 +489,7 @@ var reservedPaths = map[string]bool{
 	"/healthz":           true,
 	PathLivez:            true,
 	PathTestConnection:   true,
+	outcomereport.Path:   true,
 }
 
 // patternPath strips the optional leading METHOD from a ServeMux pattern, so
@@ -514,6 +533,18 @@ func (s *server) mux() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET "+PathLivez, s.handleLivez)
 	mux.HandleFunc("POST "+PathTestConnection, s.handleTestConnection)
+	// Registered UNCONDITIONALLY, even with a nil receiver: the shared handler
+	// answers 501 in that case, which the platform reads as "does not receive"
+	// and dead-letters. Registering it only when a receiver is present would
+	// yield 404 instead, which is indistinguishable from a misdeployed sidecar
+	// (OGA-917 D6).
+	// MaxRequestBytes is left to the handler's own default: this Config has no
+	// body-cap field (the webhook path hardcodes its own), and a report is
+	// bounded by construction anyway.
+	mux.HandleFunc("POST "+outcomereport.Path, outcomereport.Handler(outcomereport.Config{
+		Receiver: s.cfg.OutcomeReceiver,
+		Logger:   s.cfg.Logger,
+	}))
 
 	// Kit-supplied routes last. Pre-validated by validateExtraRoutes on the
 	// ListenAndServe path, so a reserved-path collision cannot reach the

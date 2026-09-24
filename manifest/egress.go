@@ -285,6 +285,28 @@ type EgressSyncSpec struct {
 	// resolved per tenant from the SecretStore at container start, which is how
 	// a kit delivers non-baked config such as the external system's base URL.
 	Container SidecarContainerSpec `yaml:"container,omitempty"`
+
+	// ReceivesOutcomeReport opts this component in to receiving a sync-outcome
+	// report for each Day-1 bulk RUN it performs — the run's counts, reason
+	// tallies, bounded failed-record sample, and the truncation flags carried
+	// verbatim from the run report (OGA-917). The platform POSTs it to the
+	// component's [outcomereport.Path] endpoint.
+	//
+	// A run is NOT keyed to an ingestion submission and the report does not
+	// pretend otherwise: it covers whatever changed since the last run, so it may
+	// span several submissions or none.
+	//
+	// Delivered for a `completed` and a `failed` run. A CANCELLED run currently
+	// delivers nothing — the workflow context is already done on that path, so the
+	// publish needs separate handling (tracked as OGA-939). `cancelled` is in the
+	// declared status vocabulary so a receiver's parser needs no change when it
+	// arrives.
+	//
+	// A component that sets this MUST serve the endpoint (mount
+	// [outcomereport.Handler] — egress.ListenAndServe does it for you when a
+	// Receiver is supplied). Answering 501 dead-letters the report rather than
+	// retrying it.
+	ReceivesOutcomeReport bool `yaml:"receives_outcome_report,omitempty"`
 }
 
 // EgressEntityTypeSpec is one entity type an egress component pushes.

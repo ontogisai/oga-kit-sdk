@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/kitlog"
+	"github.com/ontogisai/oga-kit-sdk/outcomereport"
 )
 
 // Endpoint paths. Everything the egress contract owns is namespaced under
@@ -79,6 +80,20 @@ type Config struct {
 
 	// MaxRequestBytes caps the push body. Zero ⇒ DefaultMaxRequestBytes.
 	MaxRequestBytes int64
+
+	// OutcomeReceiver accepts the platform's sync-outcome report for each Day-1
+	// bulk RUN this component performs (OGA-917), served at
+	// [outcomereport.Path].
+	//
+	// Set it when the kit's manifest declares receives_outcome_report on this
+	// component; the two go together. With the manifest flag set and this nil
+	// the route still exists and answers 501, which the platform reads as "does
+	// not receive" and dead-letters — a loud deployment-mismatch signal rather
+	// than a silent drop.
+	//
+	// Optional: nil with no manifest flag means the platform never delivers here
+	// and nothing changes.
+	OutcomeReceiver outcomereport.Receiver
 
 	// Logger for lifecycle and component-defect messages. Defaults to
 	// kitlog.Default() (the identity-seeded logger kitlog.Init installs).
@@ -293,6 +308,16 @@ func (s *server) mux() http.Handler {
 	mux.HandleFunc("GET "+PathHealthz, s.handleHealth)
 	mux.HandleFunc("GET "+PathLivez, s.handleLivez)
 	mux.HandleFunc("POST "+PathTestConnection, s.handleTestConnection)
+	// Registered UNCONDITIONALLY, even with a nil receiver: the shared handler
+	// answers 501 in that case, which the platform reads as "does not receive"
+	// and dead-letters. Registering it only when a receiver is present would
+	// yield 404 instead, which is indistinguishable from a misdeployed sidecar
+	// (OGA-917 D6).
+	mux.HandleFunc("POST "+outcomereport.Path, outcomereport.Handler(outcomereport.Config{
+		Receiver:        s.cfg.OutcomeReceiver,
+		MaxRequestBytes: s.cfg.MaxRequestBytes,
+		Logger:          s.cfg.Logger,
+	}))
 	return mux
 }
 
