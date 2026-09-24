@@ -351,6 +351,26 @@ type SourceConnectorSpec struct {
 	// Replaces the artifact-header assertion that the platform used to read
 	// (transfer.Header.edge_completeness, removed in OGA-930).
 	EdgeCompleteness *EdgeCompletenessSpec `yaml:"edge_completeness,omitempty"`
+
+	// ReceivesOutcomeReport opts this connector in to receiving a sync-outcome
+	// report for the submissions IT made — what the platform did with each
+	// artifact: counts, divergences, and a bounded list of rejected records
+	// (OGA-917). The platform POSTs the report to the connector's
+	// [outcomereport.Path] endpoint.
+	//
+	// Receipt is per SIDECAR, not per kit. A kit may run a receiving connector
+	// alongside a non-receiving loader, and only the submitter that declares this
+	// is fed — so a bulk-load path stays operator-facing while a continuous feed
+	// closes the loop with its upstream.
+	//
+	// A connector that sets this MUST serve the endpoint (mount
+	// [outcomereport.Handler] — connector.ListenAndServe does it for you when a
+	// Receiver is supplied). Answering 501 tells the platform the receiver is
+	// not implemented and the report is dead-lettered rather than retried.
+	//
+	// Absent means no report is delivered, and nothing else changes: the platform
+	// still records the outcome for `loader.status` and the operator surfaces.
+	ReceivesOutcomeReport bool `yaml:"receives_outcome_report,omitempty"`
 }
 
 // EdgeCompletenessSpec is a continuous feed's standing declaration that it submits

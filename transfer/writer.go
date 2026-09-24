@@ -121,7 +121,36 @@ type CompleteRequest struct {
 	// EntryCount is the record count in the body, included for the
 	// platform's audit trail.
 	EntryCount int `json:"entry_count"`
+
+	// UpstreamRef is an OPAQUE correlation handle the submitter chooses, which
+	// the platform stores with the job and echoes back verbatim on the
+	// sync-outcome report and on loader.status (OGA-917).
+	//
+	// It exists so a connector can tie a report back to the upstream version
+	// that produced it — an export timestamp, a changeset id, a content
+	// revision. The platform NEVER parses, validates, interprets or branches on
+	// the content: whatever bytes go in come back out.
+	//
+	// Bounded at [UpstreamRefMaxBytes]. Over-length is REJECTED by the platform,
+	// never truncated — a silently shortened correlation handle is worse than a
+	// refused submission, because it correlates to the wrong thing.
+	//
+	// Optional. Absent stays absent; the platform never synthesises a value. A
+	// platform predating OGA-917 ignores the field, so setting it is safe
+	// against an older deployment.
+	//
+	// One submission is one artifact, so several artifacts that belong to one
+	// logical upstream version each carry the SAME UpstreamRef and produce
+	// SEPARATE reports; grouping them is the kit's choice.
+	UpstreamRef string `json:"upstream_ref,omitempty"`
 }
+
+// UpstreamRefMaxBytes bounds [CompleteRequest.UpstreamRef].
+//
+// Declared here so a kit author can check before submitting rather than
+// discovering the limit as a rejected load. The platform enforces the same
+// bound and refuses anything longer.
+const UpstreamRefMaxBytes = 512
 
 // CompleteResponse is the decoded body of loader.complete.
 type CompleteResponse struct {
@@ -140,12 +169,36 @@ type CompleteResponse struct {
 
 // WriterOption configures a writer at construction.
 //
-// There are currently NO exported constructors — the only one there has ever been
-// was WithEdgeCompleteness, removed in OGA-930 when the platform stopped reading the
-// artifact's assertion (it is declared in the kit manifest now). The variadic is
-// retained on NewWriter / NewDataWriter / NewOntologyWriter so a genuine option can
-// be added later without breaking those three signatures.
+// The variadic is retained on NewWriter / NewDataWriter / NewOntologyWriter so an
+// option can be added without breaking those three signatures. (An earlier
+// WithEdgeCompleteness was removed in OGA-930 when the platform stopped reading the
+// artifact's assertion — it is declared in the kit manifest now.)
 type WriterOption func(*bufferedWriter)
+
+// WithUpstreamRef sets the opaque correlation handle carried on every artifact
+// this writer commits, echoed back on the sync-outcome report and on
+// loader.status (OGA-917). See [CompleteRequest.UpstreamRef].
+//
+// Set it per upstream version, which is why it belongs on the writer rather than
+// on a single Commit: a connector that spreads one version across several
+// artifacts constructs one writer per version and every artifact it commits
+// carries the same handle.
+//
+// An over-length value fails the writer at construction — every write and Close
+// return the error and NOTHING is committed — rather than being refused by the
+// platform after the body has been uploaded. The bound is [UpstreamRefMaxBytes],
+// measured in BYTES, not runes, because that is what the platform enforces.
+func WithUpstreamRef(ref string) WriterOption {
+	return func(w *bufferedWriter) {
+		if len(ref) > UpstreamRefMaxBytes {
+			w.optErr = fmt.Errorf(
+				"transfer: upstream_ref is %d bytes, limit is %d (the platform rejects rather than truncates)",
+				len(ref), UpstreamRefMaxBytes)
+			return
+		}
+		w.upstreamRef = ref
+	}
+}
 
 // NewWriter constructs the default in-process writer. Production
 // callers use this with an [HTTPCommitClient]; tests can substitute a
@@ -198,6 +251,9 @@ type bufferedWriter struct {
 	buf    bytes.Buffer
 	count  int
 	closed bool
+	// upstreamRef is the opaque correlation handle set by WithUpstreamRef and
+	// carried on every CompleteRequest this writer commits. Empty ⇒ omitted.
+	upstreamRef string
 	// optErr holds a construction-time option failure. NewWriter returns
 	// a bare Writer, so there is nowhere to surface it at construction;
 	// it is returned from every write and from Close instead, which is
@@ -300,6 +356,7 @@ func (w *bufferedWriter) commitInline(ctx context.Context, body []byte, hashHex 
 		Format:      FormatNDJSON,
 		ContentHash: hashHex,
 		EntryCount:  w.count,
+		UpstreamRef: w.upstreamRef,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("loader.complete (inline): %w", err)
@@ -324,6 +381,7 @@ func (w *bufferedWriter) commitPresigned(ctx context.Context, body []byte, hashH
 		Format:      FormatNDJSON,
 		ContentHash: hashHex,
 		EntryCount:  w.count,
+		UpstreamRef: w.upstreamRef,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("loader.complete (presigned): %w", err)
