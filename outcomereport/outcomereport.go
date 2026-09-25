@@ -172,12 +172,45 @@ type Report struct {
 	// report counts vertices and edges, an egress report counts pushed records —
 	// so this is a map rather than two structs: a receiver reads the keys its
 	// stage defines and the platform can add a bucket without a schema break.
+	//
+	// TREAT AN ABSENT KEY AS ZERO. The two stages populate this differently and a
+	// receiver must not read meaning into absence:
+	//
+	//	ingestion  SPARSE — a bucket that measured zero is OMITTED, and a bucket
+	//	                    the dispatch does not measure at all (types_registered
+	//	                    on a data dispatch) is also absent. The two are
+	//	                    INDISTINGUISHABLE.
+	//	egress     DENSE  — its six buckets (pushed, created, updated, skipped,
+	//	                    failed, correlated) are ALWAYS present, including zero,
+	//	                    because every run measures all six.
+	//
+	// So absence never means "not applicable"; on the ingestion lane it usually
+	// just means zero. See [Report.Count].
 	Counts map[string]int `json:"counts,omitempty"`
 
-	// QuarantinedByType breaks the ingestion quarantine down per attempted
-	// entity type, so a receiver sees WHICH types were rejected rather than only
-	// how many records were.
+	// QuarantinedByType breaks the VERTEX-stage ingestion quarantine down per
+	// attempted ENTITY TYPE, so a receiver sees WHICH types were rejected rather
+	// than only how many records were.
+	//
+	// Keyed by entity type. Its edge-stage counterpart is
+	// [Report.QuarantinedEdgesByReason], which is keyed by ERROR CODE — a
+	// different key space, so the two must never be merged into one tally.
 	QuarantinedByType map[string]int `json:"quarantined_by_type,omitempty"`
+
+	// QuarantinedEdgesByReason breaks the EDGE-stage ingestion quarantine down per
+	// platform error code (an unresolvable endpoint, a cross-tenant endpoint, a
+	// non-materializable relationship type).
+	//
+	// It exists because the vertex breakdown alone leaves an operator able to see
+	// THAT relationships were set aside but not WHY — and a submission can fail
+	// entirely at the edge stage, so a receiver reading only QuarantinedByType
+	// would find it empty and conclude nothing was wrong.
+	//
+	// Keyed by ERROR CODE, unlike QuarantinedByType's entity types. Both are
+	// complete tallies over their own stage; together they sum to the
+	// records_quarantined count, with the edge stage's total also available
+	// directly as the edges_quarantined count.
+	QuarantinedEdgesByReason map[string]int `json:"quarantined_edges_by_reason,omitempty"`
 
 	// RejectedRecords itemises ingestion records the platform did not persist.
 	// Bounded — see RejectedRecordsTruncated and RejectedRecordsCap.
@@ -361,9 +394,11 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// ErrNotImplemented is returned by [Handler] construction paths that need to
-// report the absence of a receiver to a caller rather than over HTTP.
-var ErrNotImplemented = errors.New("outcomereport: component does not implement outcomereport.Receiver")
+// (An exported ErrNotImplemented was declared here in v0.93.0-beta and REMOVED:
+// nothing ever returned it. The absence of a receiver is reported over HTTP as
+// 501 — see [Handler] — so there was no construction path to carry an error, and
+// a kit matching on it with errors.Is would have been writing dead code against a
+// doc comment that described behaviour the package did not have.)
 
 // Handler returns the HTTP handler for [Path].
 //
@@ -473,17 +508,43 @@ func (r *Report) Validate() error {
 // worked, whereas a failed report's counts should not be read at all.
 func (r *Report) IsTerminalFailure() bool { return r.Status == StatusFailed }
 
-// Count returns a named count and whether it was present.
+// Count returns a named count and whether the key was PRESENT.
 //
-// Prefer this over indexing [Report.Counts] directly: the keys differ by stage,
-// so a missing key means "this stage does not report that bucket", which is a
-// different thing from a bucket that is genuinely zero.
+// ⚠️ `false` does NOT mean "this stage does not measure that bucket". On the
+// ingestion lane the platform omits a bucket that measured zero, so a present-zero
+// and a not-measured bucket are indistinguishable here — `Count("edges_updated")`
+// and `Count("types_registered")` both report `(0, false)` on a data dispatch
+// whose edges happened not to change. Only the egress lane is dense enough for
+// presence to carry information, and there every documented bucket is always
+// present anyway.
+//
+// Use the bool to tell "the platform said zero" from "the platform said nothing"
+// for LOGGING or diagnostics. Do NOT branch business logic on it, and do not read
+// absence as "not applicable to this stage". For arithmetic, prefer
+// [Report.CountOrZero].
+//
+// (An earlier release documented the opposite — that absence distinguished
+// not-reported from zero. It never held for the ingestion lane, which is the lane
+// that reports per-record detail, so the claim was withdrawn rather than the
+// producer changed: emitting a dense ingestion map would mean asserting
+// `vertices_created: 0` on an ontology dispatch, which measures no vertices at
+// all.)
 func (r *Report) Count(name string) (int, bool) {
 	if r.Counts == nil {
 		return 0, false
 	}
 	v, ok := r.Counts[name]
 	return v, ok
+}
+
+// CountOrZero returns a named count, treating an absent key as zero.
+//
+// This is the right accessor for arithmetic and for display, because absence
+// carries no information on the ingestion lane (see [Report.Count]). Reach for
+// [Report.Count] only when the distinction between "said zero" and "said nothing"
+// is itself what you are reporting.
+func (r *Report) CountOrZero(name string) int {
+	return r.Counts[name]
 }
 
 // String renders a one-line summary for logs.

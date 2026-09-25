@@ -327,9 +327,17 @@ func writeJSONLine(buf *bytes.Buffer, v any) error {
 
 func (w *bufferedWriter) Close(ctx context.Context) (*Receipt, error) {
 	if w.optErr != nil {
-		// Refuse to commit rather than shipping an artifact whose header
-		// does not carry the assertion the caller asked for. Marked closed
-		// so a caller that ignores the error cannot retry into a commit.
+		// A WriterOption was rejected at construction, so refuse to commit rather
+		// than shipping an artifact that does not carry what the caller asked for.
+		// Marked closed so a caller that ignores the error cannot retry into a
+		// commit.
+		//
+		// [WithUpstreamRef] is the only producer of optErr today: an over-length
+		// correlation handle fails here rather than after the body has been
+		// uploaded, because the platform rejects it too and truncating a
+		// correlation handle is worse than refusing one. (The mechanism predates
+		// it — WithEdgeCompleteness used it before OGA-930 moved that assertion
+		// into the kit manifest.)
 		w.closed = true
 		return nil, w.optErr
 	}

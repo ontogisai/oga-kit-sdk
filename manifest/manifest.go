@@ -363,10 +363,12 @@ type SourceConnectorSpec struct {
 	// is fed — so a bulk-load path stays operator-facing while a continuous feed
 	// closes the loop with its upstream.
 	//
-	// A connector that sets this MUST serve the endpoint (mount
-	// [outcomereport.Handler] — connector.ListenAndServe does it for you when a
-	// Receiver is supplied). Answering 501 tells the platform the receiver is
-	// not implemented and the report is dead-lettered rather than retried.
+	// A connector that sets this MUST supply a connector.Config.OutcomeReceiver.
+	// connector.ListenAndServe mounts the route UNCONDITIONALLY — with no receiver
+	// it answers 501, which tells the platform the receiver is not implemented so
+	// the report is dead-lettered rather than retried. That is deliberate: a route
+	// mounted only when a receiver exists would 404 instead, and a 404 is
+	// indistinguishable from a misdeployed sidecar.
 	//
 	// Absent means no report is delivered, and nothing else changes: the platform
 	// still records the outcome for `loader.status` and the operator surfaces.
