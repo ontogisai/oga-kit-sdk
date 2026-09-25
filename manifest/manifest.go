@@ -363,7 +363,7 @@ type SourceConnectorSpec struct {
 	// is fed — so a bulk-load path stays operator-facing while a continuous feed
 	// closes the loop with its upstream.
 	//
-	// A connector that sets this MUST supply a connector.Config.OutcomeReceiver.
+	// A connector that sets this MUST supply a connector.Config.OutcomeReportReceiver.
 	// connector.ListenAndServe mounts the route UNCONDITIONALLY — with no receiver
 	// it answers 501, which tells the platform the receiver is not implemented so
 	// the report is dead-lettered rather than retried. That is deliberate: a route

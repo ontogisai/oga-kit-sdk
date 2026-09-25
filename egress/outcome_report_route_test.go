@@ -9,7 +9,7 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/outcomereport"
 )
 
-// The route is mounted UNCONDITIONALLY — with a nil OutcomeReceiver it answers
+// The route is mounted UNCONDITIONALLY — with a nil OutcomeReportReceiver it answers
 // 501, never 404.
 //
 // The egress twin of the connector's test of the same name, and it exists for the
@@ -24,7 +24,7 @@ import (
 // only one of them would not catch.
 func TestServer_OutcomeReportRouteIsMountedWithoutAReceiver(t *testing.T) {
 	t.Parallel()
-	s := &server{cfg: &Config{}} // deliberately no OutcomeReceiver
+	s := &server{cfg: &Config{}} // deliberately no OutcomeReportReceiver
 	h := s.mux()
 
 	req := httptest.NewRequest(http.MethodPost, outcomereport.Path, strings.NewReader("{}"))

@@ -81,7 +81,7 @@ type Config struct {
 	// MaxRequestBytes caps the push body. Zero ⇒ DefaultMaxRequestBytes.
 	MaxRequestBytes int64
 
-	// OutcomeReceiver accepts the platform's sync-outcome report for each Day-1
+	// OutcomeReportReceiver accepts the platform's sync-outcome report for each Day-1
 	// bulk RUN this component performs (OGA-917), served at
 	// [outcomereport.Path].
 	//
@@ -93,7 +93,7 @@ type Config struct {
 	//
 	// Optional: nil with no manifest flag means the platform never delivers here
 	// and nothing changes.
-	OutcomeReceiver outcomereport.Receiver
+	OutcomeReportReceiver outcomereport.Receiver
 
 	// Logger for lifecycle and component-defect messages. Defaults to
 	// kitlog.Default() (the identity-seeded logger kitlog.Init installs).
@@ -314,7 +314,7 @@ func (s *server) mux() http.Handler {
 	// yield 404 instead, which is indistinguishable from a misdeployed sidecar
 	// (OGA-917 D6).
 	mux.HandleFunc("POST "+outcomereport.Path, outcomereport.Handler(outcomereport.Config{
-		Receiver:        s.cfg.OutcomeReceiver,
+		Receiver:        s.cfg.OutcomeReportReceiver,
 		MaxRequestBytes: s.cfg.MaxRequestBytes,
 		Logger:          s.cfg.Logger,
 	}))
