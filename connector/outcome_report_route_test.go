@@ -2,6 +2,8 @@ package connector
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ontogisai/oga-kit-sdk/outcomereport"
@@ -35,5 +37,34 @@ func TestValidateExtraRoutes_RejectsShadowingTheOutcomeReportPath(t *testing.T) 
 		if err == nil {
 			t.Errorf("ExtraRoutes[%q] was accepted; it shadows the outcome-report contract path", pattern)
 		}
+	}
+}
+
+// The route is mounted UNCONDITIONALLY — with a nil OutcomeReceiver it answers
+// 501, never 404.
+//
+// This is the behaviour the manifest field's documentation now describes, and it
+// is load-bearing rather than incidental: the platform reads 501 as "this
+// component does not receive reports" and dead-letters immediately, whereas a 404
+// is indistinguishable from a misdeployed sidecar and would burn the whole retry
+// budget before reporting a misleading transient failure.
+//
+// Pinned here because the natural implementation is the wrong one — registering
+// the route only when a receiver is supplied looks tidier and silently produces
+// the 404.
+func TestServer_OutcomeReportRouteIsMountedWithoutAReceiver(t *testing.T) {
+	t.Parallel()
+	s := &server{cfg: &Config{}} // deliberately no OutcomeReceiver
+	h := s.mux()
+
+	req := httptest.NewRequest(http.MethodPost, outcomereport.Path, strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("%s answered 404 with a nil receiver; the platform would retry to "+
+			"exhaustion instead of dead-lettering", outcomereport.Path)
+	}
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("status = %d, want 501 so the platform dead-letters rather than retrying", rec.Code)
 	}
 }

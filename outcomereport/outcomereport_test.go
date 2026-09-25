@@ -284,18 +284,109 @@ func TestReport_IsTerminalFailure(t *testing.T) {
 	}
 }
 
-// A missing count key means "this stage does not report that bucket", which is
-// a different thing from a bucket that is genuinely zero.
-func TestReport_CountDistinguishesAbsentFromZero(t *testing.T) {
+// Count reports PRESENCE, and presence carries no meaning on the ingestion lane.
+//
+// This replaces TestReport_CountDistinguishesAbsentFromZero, which asserted the
+// opposite. That test passed only because it hand-built `Counts` with an EXPLICIT
+// zero — a shape the platform's ingestion projection never produces, since it
+// deletes zero buckets. The function was right and the claim about what absence
+// MEANS was wrong, so a green test was giving false confidence about the contract.
+func TestReport_CountPresenceIsNotSemantic(t *testing.T) {
+	t.Parallel()
+	// The ingestion lane as the platform actually projects it: SPARSE. A data
+	// dispatch that created 7 vertices and changed no edges emits neither
+	// edges_updated (zero, omitted) nor types_registered (not measured at all).
+	rep := validReport()
+	rep.Counts = map[string]int{"vertices_created": 7}
+
+	if v, ok := rep.Count("vertices_created"); !ok || v != 7 {
+		t.Errorf("present: got %d,%v want 7,true", v, ok)
+	}
+	zeroed, zeroedOK := rep.Count("edges_updated")
+	notMeasured, notMeasuredOK := rep.Count("types_registered")
+	if zeroedOK != notMeasuredOK || zeroed != notMeasured {
+		t.Errorf("a zero bucket (%d,%v) and a not-measured bucket (%d,%v) must be "+
+			"indistinguishable on the ingestion lane — if they ever differ, the doc "+
+			"on Count is wrong again",
+			zeroed, zeroedOK, notMeasured, notMeasuredOK)
+	}
+
+	// CountOrZero is the accessor for arithmetic, precisely because of the above.
+	if got := rep.CountOrZero("edges_updated"); got != 0 {
+		t.Errorf("CountOrZero on an absent key = %d, want 0", got)
+	}
+	if got := rep.CountOrZero("vertices_created"); got != 7 {
+		t.Errorf("CountOrZero on a present key = %d, want 7", got)
+	}
+	// Nil-safe: a failed report carries no counts at all.
+	var empty Report
+	if got := empty.CountOrZero("pushed"); got != 0 {
+		t.Errorf("CountOrZero on a nil map = %d, want 0", got)
+	}
+	if _, ok := empty.Count("pushed"); ok {
+		t.Error("Count on a nil map reported presence")
+	}
+}
+
+// The egress lane IS dense, so presence there is uninformative for the opposite
+// reason: every documented bucket is always sent, including zero. Pinned so a
+// future producer change that starts omitting them is caught by a test rather
+// than by a receiver computing a wrong total.
+func TestReport_EgressCountsAreDense(t *testing.T) {
 	t.Parallel()
 	rep := validReport()
-	rep.Counts = map[string]int{"edges_created": 0}
-
-	if v, ok := rep.Count("edges_created"); !ok || v != 0 {
-		t.Errorf("present-zero: got %d,%v want 0,true", v, ok)
+	rep.Stage = StageEgress
+	rep.Counts = map[string]int{
+		"pushed": 0, "created": 0, "updated": 0,
+		"skipped": 0, "failed": 0, "correlated": 0,
 	}
-	if v, ok := rep.Count("pushed"); ok || v != 0 {
-		t.Errorf("absent: got %d,%v want 0,false", v, ok)
+	for _, k := range []string{"pushed", "created", "updated", "skipped", "failed", "correlated"} {
+		if _, ok := rep.Count(k); !ok {
+			t.Errorf("egress bucket %q absent; the egress lane emits all six, including zero", k)
+		}
+	}
+}
+
+// The two ingestion quarantine breakdowns are keyed in DIFFERENT spaces — entity
+// type vs error code — so a receiver must be able to read both without merging
+// them. A submission can also fail entirely at the edge stage, in which case the
+// vertex breakdown is empty and only the edge one explains the outcome.
+func TestReport_BothQuarantineBreakdownsDecode(t *testing.T) {
+	t.Parallel()
+	const body = `{
+	  "schema_version": 1, "stage": "ingestion", "delivery_id": "ingestion:t:j",
+	  "tenant_id": "t", "status": "completed",
+	  "counts": {"records_quarantined": 5, "edges_quarantined": 3},
+	  "quarantined_by_type": {"ex:SomeType": 2},
+	  "quarantined_edges_by_reason": {"OGA-INGS-REL-1320": 2, "OGA-INGS-REL-1321": 1}
+	}`
+	var rep Report
+	if err := json.Unmarshal([]byte(body), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rep.QuarantinedByType["ex:SomeType"] != 2 {
+		t.Errorf("vertex breakdown: %+v", rep.QuarantinedByType)
+	}
+	if rep.QuarantinedEdgesByReason["OGA-INGS-REL-1320"] != 2 ||
+		rep.QuarantinedEdgesByReason["OGA-INGS-REL-1321"] != 1 {
+		t.Errorf("edge breakdown: %+v", rep.QuarantinedEdgesByReason)
+	}
+	// Reconcilable: the two stages' tallies sum to records_quarantined, and the
+	// edge stage's own total is also reported directly.
+	vertexTotal, edgeTotal := 0, 0
+	for _, v := range rep.QuarantinedByType {
+		vertexTotal += v
+	}
+	for _, v := range rep.QuarantinedEdgesByReason {
+		edgeTotal += v
+	}
+	if got := vertexTotal + edgeTotal; got != rep.CountOrZero("records_quarantined") {
+		t.Errorf("tallies sum to %d, want records_quarantined = %d",
+			got, rep.CountOrZero("records_quarantined"))
+	}
+	if edgeTotal != rep.CountOrZero("edges_quarantined") {
+		t.Errorf("edge tally sums to %d, want edges_quarantined = %d",
+			edgeTotal, rep.CountOrZero("edges_quarantined"))
 	}
 }
 
