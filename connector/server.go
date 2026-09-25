@@ -40,7 +40,7 @@ type Config struct {
 	// connector that emits points fails loudly (no silent drop).
 	Sink TimeseriesSink
 
-	// OutcomeReceiver accepts the platform's sync-outcome report for the
+	// OutcomeReportReceiver accepts the platform's sync-outcome report for the
 	// submissions THIS connector made (OGA-917), served at
 	// [outcomereport.Path].
 	//
@@ -55,7 +55,7 @@ type Config struct {
 	// loader and only the connector is fed.
 	//
 	// Optional: nil with no manifest flag means the platform never delivers here.
-	OutcomeReceiver outcomereport.Receiver
+	OutcomeReportReceiver outcomereport.Receiver
 
 	// WebhookMode selects how an inbound webhook delivery is processed.
 	// Zero value is WebhookSync — the long-standing behaviour, unchanged.
@@ -542,7 +542,7 @@ func (s *server) mux() http.Handler {
 	// body-cap field (the webhook path hardcodes its own), and a report is
 	// bounded by construction anyway.
 	mux.HandleFunc("POST "+outcomereport.Path, outcomereport.Handler(outcomereport.Config{
-		Receiver: s.cfg.OutcomeReceiver,
+		Receiver: s.cfg.OutcomeReportReceiver,
 		Logger:   s.cfg.Logger,
 	}))
 

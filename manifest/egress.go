@@ -302,7 +302,7 @@ type EgressSyncSpec struct {
 	// declared status vocabulary so a receiver's parser needs no change when it
 	// arrives.
 	//
-	// A component that sets this MUST supply an egress.Config.OutcomeReceiver.
+	// A component that sets this MUST supply an egress.Config.OutcomeReportReceiver.
 	// egress.ListenAndServe mounts the route UNCONDITIONALLY — with no receiver it
 	// answers 501, which dead-letters the report rather than retrying it. That is
 	// deliberate: a route mounted only when a receiver exists would 404 instead,

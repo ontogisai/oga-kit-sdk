@@ -40,7 +40,7 @@ func TestValidateExtraRoutes_RejectsShadowingTheOutcomeReportPath(t *testing.T) 
 	}
 }
 
-// The route is mounted UNCONDITIONALLY — with a nil OutcomeReceiver it answers
+// The route is mounted UNCONDITIONALLY — with a nil OutcomeReportReceiver it answers
 // 501, never 404.
 //
 // This is the behaviour the manifest field's documentation now describes, and it
@@ -54,7 +54,7 @@ func TestValidateExtraRoutes_RejectsShadowingTheOutcomeReportPath(t *testing.T) 
 // the 404.
 func TestServer_OutcomeReportRouteIsMountedWithoutAReceiver(t *testing.T) {
 	t.Parallel()
-	s := &server{cfg: &Config{}} // deliberately no OutcomeReceiver
+	s := &server{cfg: &Config{}} // deliberately no OutcomeReportReceiver
 	h := s.mux()
 
 	req := httptest.NewRequest(http.MethodPost, outcomereport.Path, strings.NewReader("{}"))
