@@ -180,7 +180,12 @@ type RelationshipBatch struct {
 	known   map[string]struct{}
 	results map[string]SyncResult
 	defects []string
-	verb    laneVerb // which outcomes this batch's lane accepts
+
+	// verb decides which outcomes Results accepts:
+	//   - verbPush (/egress/relationship-sync): created, updated, skipped, failed
+	//   - verbWithdraw (/egress/relationship-withdraw): withdrawn, skipped, failed
+	// Any other outcome becomes a failed verdict with sdk:unrecognized_outcome.
+	verb laneVerb
 }
 
 // Created records that the component created an external record for a

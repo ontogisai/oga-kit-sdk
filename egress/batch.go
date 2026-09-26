@@ -26,7 +26,12 @@ type Batch struct {
 	known   map[string]struct{} // membership, for rejecting unrequested ids
 	results map[string]SyncResult
 	defects []string
-	verb    laneVerb // which outcomes this batch's lane accepts
+
+	// verb decides which outcomes Results accepts:
+	//   - verbPush (/egress/sync, /egress/ontology-sync): created, updated, skipped, failed
+	//   - verbWithdraw (/egress/withdraw): withdrawn, skipped, failed
+	// Any other outcome becomes a failed verdict with sdk:unrecognized_outcome.
+	verb laneVerb
 }
 
 // newBatch builds a push-lane Batch for the entities of one request.
