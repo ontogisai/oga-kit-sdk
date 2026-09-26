@@ -1229,3 +1229,71 @@ func TestEgressSyncSpec_RelationshipEntityTypesAbsentIsNil(t *testing.T) {
 		t.Errorf("RelationshipEntityTypes() = %v, want nil", got)
 	}
 }
+
+// OGA-941: the withdrawal block parses through the strict decoder, and an
+// omitted block means no withdrawal.
+func TestParse_EgressWithdrawalBlock(t *testing.T) {
+	withBlock := strings.Replace(egressManifestYAML,
+		"      max_in_flight: 4\n",
+		"      max_in_flight: 4\n      withdrawal:\n        entities: true\n", 1)
+	if withBlock == egressManifestYAML {
+		t.Fatal("fixture anchor not found; the test would not exercise the withdrawal block")
+	}
+	m, err := Parse(strings.NewReader(withBlock))
+	if err != nil {
+		t.Fatalf("parse manifest with withdrawal block: %v", err)
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("validate manifest with withdrawal block: %v", err)
+	}
+	if got := m.Spec.EgressSyncs[0].Withdrawal; !got.Entities || got.Relationships {
+		t.Errorf("withdrawal = %+v, want entities only", got)
+	}
+
+	plain, err := Parse(strings.NewReader(egressManifestYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.Spec.EgressSyncs[0].Withdrawal; got != (EgressWithdrawalSpec{}) {
+		t.Errorf("omitted withdrawal block = %+v, want zero (no withdrawal)", got)
+	}
+
+	t.Run("an unknown key under withdrawal is rejected", func(t *testing.T) {
+		typo := strings.Replace(withBlock, "        entities: true\n", "        entites: true\n", 1)
+		if _, err := Parse(strings.NewReader(typo)); err == nil {
+			t.Error("a misspelled withdrawal flag parsed; it would silently disable withdrawal")
+		}
+	})
+}
+
+// withdrawal.relationships needs a relationships_sync block to withdraw from;
+// withdrawal.entities always has one, since entities_sync is required.
+func TestValidateEgressSyncs_Withdrawal(t *testing.T) {
+	t.Run("both lanes with both blocks are accepted", func(t *testing.T) {
+		e := validEgressSpecForRelationshipLane()
+		e.Withdrawal = EgressWithdrawalSpec{Entities: true, Relationships: true}
+		if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+			t.Fatalf("rejected: %v", err)
+		}
+	})
+
+	t.Run("entities without relationships_sync is accepted", func(t *testing.T) {
+		e := validEgressSpecForOntologyLane()
+		e.Withdrawal = EgressWithdrawalSpec{Entities: true}
+		if err := validateEgressSyncs([]EgressSyncSpec{e}); err != nil {
+			t.Fatalf("rejected: %v", err)
+		}
+	})
+
+	t.Run("relationships without relationships_sync is rejected", func(t *testing.T) {
+		e := validEgressSpecForOntologyLane()
+		e.Withdrawal = EgressWithdrawalSpec{Relationships: true}
+		err := validateEgressSyncs([]EgressSyncSpec{e})
+		if err == nil {
+			t.Fatal("expected an error: nothing to withdraw relationships from")
+		}
+		if !strings.Contains(err.Error(), "withdrawal.relationships") {
+			t.Errorf("error should name the flag, got: %v", err)
+		}
+	})
+}

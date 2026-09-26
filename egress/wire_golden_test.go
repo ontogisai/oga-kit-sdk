@@ -343,10 +343,11 @@ func TestVocabulary_MatchesPlatformWireValues(t *testing.T) {
 		t.Errorf("mode vocabulary drifted: bulk=%q change=%q", ModeBulk, ModeChange)
 	}
 	for want, o := range map[string]Outcome{
-		"created": OutcomeCreated,
-		"updated": OutcomeUpdated,
-		"skipped": OutcomeSkipped,
-		"failed":  OutcomeFailed,
+		"created":   OutcomeCreated,
+		"updated":   OutcomeUpdated,
+		"skipped":   OutcomeSkipped,
+		"failed":    OutcomeFailed,
+		"withdrawn": OutcomeWithdrawn,
 	} {
 		if string(o) != want {
 			t.Errorf("outcome %q drifted to %q", want, o)
@@ -366,6 +367,12 @@ func TestVocabulary_MatchesPlatformWireValues(t *testing.T) {
 func TestPaths_MatchPlatformContract(t *testing.T) {
 	if PathSync != "/egress/sync" {
 		t.Errorf("PathSync = %q", PathSync)
+	}
+	if PathWithdraw != "/egress/withdraw" {
+		t.Errorf("PathWithdraw = %q", PathWithdraw)
+	}
+	if PathRelationshipWithdraw != "/egress/relationship-withdraw" {
+		t.Errorf("PathRelationshipWithdraw = %q", PathRelationshipWithdraw)
 	}
 	// Unprefixed on purpose: the platform-wide sidecar health convention.
 	if PathHealthz != "/healthz" {

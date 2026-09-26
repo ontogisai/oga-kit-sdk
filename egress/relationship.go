@@ -25,12 +25,18 @@ import (
 // RelationshipEndpoint is one end of a relationship — a resolved
 // (entity_id, entity_type, correlation) triple.
 //
-// Correlation is guaranteed non-nil with a non-empty ExternalRecordID by the
-// time this reaches a component: an endpoint the platform could not correlate
-// for the declaration's external_system fails that relationship before it is
-// ever sent (OGA-EGRS-DATA-2005), so a component never has to defend against a
-// nil Correlation here the way it must for Entity.Correlation on the entity
-// lane (where nil legitimately means "not yet correlated, create it").
+// On the PUSH lane (POST /egress/relationship-sync) Correlation is guaranteed
+// non-nil with a non-empty ExternalRecordID by the time this reaches a
+// component: an endpoint the platform could not correlate for the
+// declaration's external_system fails that relationship before it is ever sent
+// (OGA-EGRS-DATA-2005), so a component never has to defend against a nil
+// Correlation there the way it must for Entity.Correlation on the entity lane
+// (where nil legitimately means "not yet correlated, create it").
+//
+// ⚠️ On the WITHDRAWAL lane (POST /egress/relationship-withdraw) that guarantee
+// does NOT hold. An endpoint may already be gone, so its correlation is sent
+// when the platform still holds it and may be nil. Retract a relationship by
+// its OWN [Relationship.Correlation], which is always present there.
 type RelationshipEndpoint struct {
 	// EntityID is the platform's entity id for this endpoint. Useful for
 	// logging; it is NOT the external system's id, which is Correlation's job.
@@ -42,8 +48,8 @@ type RelationshipEndpoint struct {
 	EntityType string `json:"entity_type"`
 
 	// Correlation is this endpoint's external-system identifier. See the type
-	// doc comment: always present and non-empty by the time a component sees
-	// it.
+	// doc comment: always present and non-empty on the push lane; possibly nil
+	// on the withdrawal lane.
 	Correlation *Correlation `json:"correlation"`
 }
 
@@ -76,6 +82,9 @@ type Relationship struct {
 	// already recorded from a prior push. Its presence is how a component
 	// knows to report `updated` instead of attempting a `created` that the
 	// external system (enforcing pair-uniqueness) may reject as a duplicate.
+	//
+	// On the withdrawal lane it is always present: it names the record to
+	// retract.
 	Correlation *Correlation `json:"correlation,omitempty"`
 }
 
@@ -104,11 +113,10 @@ type RelationshipSyncRequest struct {
 	// same rule as SyncRequest.EntityType).
 	Predicate string `json:"predicate"`
 
-	// Mode is bulk (Day-1) or change (Day-2). Day-2 relationship delivery is
-	// not implemented by the platform as of this lane's introduction — see the
-	// design's Non-Goals — so a component only ever receives ModeBulk here
-	// today, but the field exists so a future Day-2 wiring needs no wire
-	// change.
+	// Mode is bulk (Day-1) or change (Day-2). Day-2 relationship PUSH delivery
+	// is not implemented by the platform as of this lane's introduction — see
+	// the design's Non-Goals — so a push only ever carries ModeBulk today. A
+	// withdrawal carries ModeChange.
 	Mode Mode `json:"mode"`
 
 	// BatchID is STABLE ACROSS RETRIES, exactly like SyncRequest.BatchID. It
@@ -127,7 +135,14 @@ type RelationshipSyncRequest struct {
 // request. Mirrors newBatch exactly, keyed on Relationship.ID instead of
 // Entity.ID.
 func newRelationshipBatch(rels []Relationship) *RelationshipBatch {
+	return newLaneRelationshipBatch(verbPush, rels)
+}
+
+// newLaneRelationshipBatch builds a RelationshipBatch whose lane accepts verb's
+// outcomes.
+func newLaneRelationshipBatch(verb laneVerb, rels []Relationship) *RelationshipBatch {
 	b := &RelationshipBatch{
+		verb:    verb,
 		ids:     make([]string, 0, len(rels)),
 		known:   make(map[string]struct{}, len(rels)),
 		results: make(map[string]SyncResult, len(rels)),
@@ -164,6 +179,7 @@ type RelationshipBatch struct {
 	known   map[string]struct{}
 	results map[string]SyncResult
 	defects []string
+	verb    laneVerb // which outcomes this batch's lane accepts
 }
 
 // Created records that the component created an external record for a
@@ -176,6 +192,14 @@ func (b *RelationshipBatch) Created(id, externalRecordID string) {
 // a relationship id. externalRecordID is REQUIRED — see [Batch.Updated].
 func (b *RelationshipBatch) Updated(id, externalRecordID string) {
 	b.record(SyncResult{ID: id, Outcome: OutcomeUpdated, ExternalRecordID: externalRecordID})
+}
+
+// Withdrawn records that the component retracted the external record for a
+// relationship id. See [Batch.Withdrawn] — identical rules: withdrawal lane only
+// ([RelationshipWithdrawer]), no external record id, and an already-absent
+// record is a skip rather than this.
+func (b *RelationshipBatch) Withdrawn(id string) {
+	b.record(SyncResult{ID: id, Outcome: OutcomeWithdrawn})
 }
 
 // Skipped records that this relationship needs no external record, with no
@@ -300,10 +324,9 @@ func (b *RelationshipBatch) Results() ([]SyncResult, []string) {
 				"component returned no verdict for this relationship"))
 			continue
 		}
-		if !r.Outcome.Valid() {
-			defects = append(defects, "unrecognized outcome "+string(r.Outcome)+" for id "+id)
-			out = append(out, normalizedFailure(id, ReasonCodeUnrecognizedOutcome,
-				"component reported unrecognized outcome "+string(r.Outcome)))
+		if f, defect, bad := outcomeViolation(b.verb, r.Outcome, id); bad {
+			defects = append(defects, defect)
+			out = append(out, f)
 			continue
 		}
 		if (r.Outcome == OutcomeCreated || r.Outcome == OutcomeUpdated) && r.ExternalRecordID == "" {
@@ -341,4 +364,33 @@ type RelationshipSyncer interface {
 	// a batch-wide fault, and a [ThrottleError] to pass an external system's
 	// backpressure through.
 	SyncRelationships(ctx context.Context, req *RelationshipSyncRequest, b *RelationshipBatch) error
+}
+
+// RelationshipWithdrawer is implemented by a component that retracts
+// relationship records from its external system when the platform withdraws
+// them — the relationships lane's withdrawal verb, reached at
+// POST /egress/relationship-withdraw.
+//
+// The platform withdraws a relationship when the knowledge-graph edge it was
+// pushed from has been CLOSED — the source stopped declaring it, or an entity at
+// one end was removed — while the edge still carries this component's
+// correlation.
+//
+// OPTIONAL, on the same reasoning as [EntityWithdrawer]: implementing it IS the
+// statement "this component retracts relationships", and the kit's manifest
+// declares it with withdrawal.relationships. Without it the route answers 501.
+//
+// # Pin the method signature at compile time
+//
+//	var _ egress.RelationshipWithdrawer = (*myComponent)(nil)
+type RelationshipWithdrawer interface {
+	// WithdrawRelationships retracts one homogeneous batch of relationship
+	// records and records a verdict per relationship on b.
+	//
+	// Each relationship carries its own [Relationship.Correlation] — the record
+	// to retract. Its endpoints' correlations may be nil (see
+	// [RelationshipEndpoint]).
+	//
+	// The verdict rules are the same as [EntityWithdrawer.WithdrawEntities].
+	WithdrawRelationships(ctx context.Context, req *RelationshipSyncRequest, b *RelationshipBatch) error
 }

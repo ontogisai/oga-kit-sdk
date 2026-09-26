@@ -17,7 +17,8 @@
 //	cfg := &egress.Config{Port: "8600"}
 //	egress.ListenAndServe(ctx, cfg, c)
 //
-// The server serves POST /egress/sync, POST /egress/ontology-sync and
+// The server serves POST /egress/sync, the optional lanes (ontology types,
+// relationships, and the two withdrawal verbs — see "Withdrawal" below) and
 // GET /healthz, decodes each push, and builds a response the platform will
 // accept. A minimal Sync:
 //
@@ -114,6 +115,24 @@
 // the record kind from the payload. Routing answers it instead, and a batch mixing
 // the two kinds becomes unrepresentable. A component that declares no
 // ontology_sync block implements nothing extra.
+//
+// # Withdrawal
+//
+// When the knowledge graph stops holding something this component pushed — an
+// entity is tombstoned, or an edge is closed — the platform can ask the
+// component to retract the external record. Each lane that holds external
+// records has an optional withdrawal verb on its own route:
+//
+//   - [EntityWithdrawer] at POST /egress/withdraw, with the entity lane's
+//     [SyncRequest] and [Batch];
+//   - [RelationshipWithdrawer] at POST /egress/relationship-withdraw, with the
+//     relationships lane's [RelationshipSyncRequest] and [RelationshipBatch].
+//
+// A withdrawal lane accepts `withdrawn`, `skipped` and `failed`; a push lane
+// accepts `created`, `updated`, `skipped` and `failed`. Anything else is
+// normalized to a per-record failure. The manifest declares withdrawal per lane
+// (manifest.EgressWithdrawalSpec); a component that implements neither verb is
+// unchanged on every existing lane.
 //
 // Each parent_edges entry carries a traversal DIRECTION, defaulting to outbound.
 // The key under which an owner arrives in [Entity.ParentRefs] is the declared EDGE

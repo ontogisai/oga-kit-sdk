@@ -49,18 +49,69 @@ const (
 	// a batch-wide fault: signal those by returning an error from Sync, which
 	// lets the platform retry the whole batch.
 	OutcomeFailed Outcome = "failed"
+
+	// OutcomeWithdrawn means the component retracted the external record — it
+	// deleted it, or did whatever its external system uses to stop holding it.
+	// Valid ONLY on a withdrawal lane ([EntityWithdrawer],
+	// [RelationshipWithdrawer]); it carries no ExternalRecordID. The platform
+	// then releases the correlation, so the record is never asked about again.
+	OutcomeWithdrawn Outcome = "withdrawn"
 )
 
-// Valid reports whether o is one of the four recognized outcomes. The platform
+// Valid reports whether o is a recognized outcome on ANY lane. The platform
 // rejects an unrecognized outcome as a malformed response, so the server checks
 // this before replying rather than letting a typo reach the platform.
+//
+// A recognized outcome can still be wrong for the lane it arrives on — a
+// `withdrawn` on a push lane, a `created` on a withdrawal lane. The batch checks
+// that separately, against the outcomes its own lane accepts.
 func (o Outcome) Valid() bool {
 	switch o {
-	case OutcomeCreated, OutcomeUpdated, OutcomeSkipped, OutcomeFailed:
+	case OutcomeCreated, OutcomeUpdated, OutcomeSkipped, OutcomeFailed, OutcomeWithdrawn:
 		return true
 	default:
 		return false
 	}
+}
+
+// laneVerb is what a lane asks the component to do with each record: PUSH it
+// (create or update the external record) or WITHDRAW it (retract the external
+// record). It decides which outcomes the lane's batch accepts.
+//
+// Unexported: the verb is carried by the route and by which method the server
+// calls, exactly like the lane itself (see the laneLabel constants).
+type laneVerb uint8
+
+const (
+	// verbPush is the zero value, so a batch built without naming a verb — every
+	// batch before withdrawal existed — keeps accepting exactly what it did.
+	verbPush laneVerb = iota
+	verbWithdraw
+)
+
+// permits reports whether the lane accepts outcome o.
+//
+// Both directions matter. A `withdrawn` on a push lane has no meaning to the
+// platform. A `created` / `updated` on a withdrawal lane would ask the platform
+// to persist a correlation for a record it has just asked to retract.
+func (v laneVerb) permits(o Outcome) bool {
+	switch o {
+	case OutcomeSkipped, OutcomeFailed:
+		return true
+	case OutcomeCreated, OutcomeUpdated:
+		return v == verbPush
+	case OutcomeWithdrawn:
+		return v == verbWithdraw
+	default:
+		return false
+	}
+}
+
+func (v laneVerb) String() string {
+	if v == verbWithdraw {
+		return "withdrawal"
+	}
+	return "push"
 }
 
 // Correlation is the (system, record id) pair already recorded for an entity.
@@ -298,7 +349,7 @@ type SyncResult struct {
 
 	// ReasonCode is the STABLE, machine-readable classification of why this
 	// record was skipped or failed. Valid on `skipped` and `failed` alike; never
-	// set on created/updated, which need no reason.
+	// set on created/updated/withdrawn, which need no reason.
 	//
 	// This is the field the operator's run report GROUPS BY, which is the whole
 	// reason it exists separately from the prose: a report that tallied a
@@ -343,7 +394,9 @@ type SyncResult struct {
 const (
 	// ReasonCodeNoVerdict: the component recorded nothing for a requested id.
 	ReasonCodeNoVerdict = "sdk:no_verdict"
-	// ReasonCodeUnrecognizedOutcome: the outcome was not one of the four.
+	// ReasonCodeUnrecognizedOutcome: the outcome is not one the batch's lane
+	// accepts — either not a recognized outcome at all, or one that belongs to
+	// the other kind of lane (see Outcome.Valid).
 	ReasonCodeUnrecognizedOutcome = "sdk:unrecognized_outcome"
 	// ReasonCodeMissingExternalRecordID: created/updated with no external id.
 	ReasonCodeMissingExternalRecordID = "sdk:missing_external_record_id"

@@ -308,6 +308,29 @@ type EgressSyncSpec struct {
 	// deliberate: a route mounted only when a receiver exists would 404 instead,
 	// and a 404 is indistinguishable from a misdeployed sidecar.
 	ReceivesOutcomeReport bool `yaml:"receives_outcome_report,omitempty"`
+
+	// Withdrawal opts this component in to the platform's withdrawal lanes: when
+	// the knowledge graph stops holding something this component pushed, the
+	// platform asks it to retract the external record. Omitted ⇒ no withdrawal,
+	// and the component behaves exactly as before.
+	Withdrawal EgressWithdrawalSpec `yaml:"withdrawal,omitempty"`
+}
+
+// EgressWithdrawalSpec declares which withdrawal lanes an egress component
+// serves. Each flag pairs with an egress interface the component MUST
+// implement; a flag without the interface is a deployment mismatch that the
+// server answers with 501.
+type EgressWithdrawalSpec struct {
+	// Entities: retract the record of an entity that has been tombstoned in the
+	// knowledge graph, for every entities_sync type. The component implements
+	// egress.EntityWithdrawer (POST /egress/withdraw).
+	Entities bool `yaml:"entities,omitempty"`
+
+	// Relationships: retract the record of an edge that has been closed, for
+	// every relationships_sync rule. Requires a relationships_sync block. The
+	// component implements egress.RelationshipWithdrawer
+	// (POST /egress/relationship-withdraw).
+	Relationships bool `yaml:"relationships,omitempty"`
 }
 
 // EgressEntityTypeSpec is one entity type an egress component pushes.
@@ -756,6 +779,24 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 		if err := validateEgressRelationshipSync(i, e); err != nil {
 			return err
 		}
+		if err := validateEgressWithdrawal(i, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateEgressWithdrawal checks spec.egress_syncs[].withdrawal: a lane can be
+// withdrawn only if the component pushes it.
+//
+// Only the relationships flag needs a check here. entities_sync is already
+// required for every component (validateEgressSyncs), so withdrawal.entities
+// always has a lane to withdraw from.
+func validateEgressWithdrawal(i int, e *EgressSyncSpec) error {
+	if e.Withdrawal.Relationships && len(e.RelationshipsSync) == 0 {
+		return fmt.Errorf(
+			"spec.egress_syncs[%d].withdrawal.relationships: requires a relationships_sync block — "+
+				"the platform withdraws only relationships this component pushed", i)
 	}
 	return nil
 }
