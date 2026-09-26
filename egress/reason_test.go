@@ -2,6 +2,7 @@ package egress
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -263,5 +264,112 @@ func TestRelationshipBatch_ReservedPrefixRecordsADefect(t *testing.T) {
 	}
 	if results[0].ReasonCode != "" {
 		t.Errorf("reason_code = %q, want dropped", results[0].ReasonCode)
+	}
+}
+
+// recorder is what both batch types share for Record-based tests.
+type recorder interface {
+	Record(SyncResult)
+	Failed(id, reason string)
+	Results() ([]SyncResult, []string)
+}
+
+// recorderLanes builds each batch type, on each lane, over the given ids.
+func recorderLanes(ids ...string) map[string]func() recorder {
+	ents := make([]Entity, 0, len(ids))
+	rels := make([]Relationship, 0, len(ids))
+	for _, id := range ids {
+		ents = append(ents, Entity{ID: id})
+		rels = append(rels, Relationship{ID: id})
+	}
+	return map[string]func() recorder{
+		"entity push":             func() recorder { return newLaneBatch(verbPush, ents) },
+		"entity withdrawal":       func() recorder { return newLaneBatch(verbWithdraw, ents) },
+		"relationship push":       func() recorder { return newLaneRelationshipBatch(verbPush, rels) },
+		"relationship withdrawal": func() recorder { return newLaneRelationshipBatch(verbWithdraw, rels) },
+	}
+}
+
+// Record applies the named helpers' reason-code checks. Before this it forwarded
+// any code verbatim, so a component could put a platform: code in the run report
+// and, on a withdrawal lane, in the audit log.
+func TestRecord_ValidatesTheReasonCode(t *testing.T) {
+	refused := map[string]SyncResult{
+		"platform prefix":          {Outcome: OutcomeSkipped, ReasonCode: "platform:record_vanished"},
+		"invented sdk code":        {Outcome: OutcomeFailed, ReasonCode: "sdk:made_up", Error: "x", ReasonDetail: "x"},
+		"sdk code on a skip":       {Outcome: OutcomeSkipped, ReasonCode: ReasonCodeNoVerdict},
+		"whitespace in the code":   {Outcome: OutcomeSkipped, ReasonCode: "not a grouping key"},
+		"longer than the code cap": {Outcome: OutcomeSkipped, ReasonCode: strings.Repeat("x", maxReasonCodeLen+1)},
+	}
+	for lane, mk := range recorderLanes("a") {
+		for name, r := range refused {
+			t.Run(lane+"/"+name, func(t *testing.T) {
+				b := mk()
+				r.ID, r.ReasonDetail = "a", "detail survives"
+				b.Record(r)
+				results, defects := b.Results()
+				if len(defects) != 1 {
+					t.Fatalf("defects = %v, want exactly one naming the refusal", defects)
+				}
+				got := results[0]
+				if got.ReasonCode != "" {
+					t.Errorf("reason_code = %q, want dropped", got.ReasonCode)
+				}
+				if got.Outcome != r.Outcome || got.ReasonDetail != "detail survives" {
+					t.Errorf("result = %+v: a refused code must change nothing else", got)
+				}
+			})
+		}
+
+		t.Run(lane+"/a valid code is trimmed and kept", func(t *testing.T) {
+			b := mk()
+			b.Record(SyncResult{ID: "a", Outcome: OutcomeSkipped, ReasonCode: "  predicate_unmapped "})
+			results, defects := b.Results()
+			if len(defects) != 0 || results[0].ReasonCode != "predicate_unmapped" {
+				t.Errorf("reason_code = %q, defects = %v; want predicate_unmapped and none",
+					results[0].ReasonCode, defects)
+			}
+		})
+	}
+}
+
+// A component that deduplicates redeliveries records Results() and replays it
+// through Record. The replay must be lossless and raise no defects, including the
+// sdk: codes Results() itself minted. Without the exemption every replayed
+// normalized failure would lose its code and log as a component bug.
+func TestRecord_ReplayingResultsIsLossless(t *testing.T) {
+	ids := []string{"no-reason", "no-verdict", "bad-outcome", "no-id", "attributed", "done"}
+	for lane, mk := range recorderLanes(ids...) {
+		t.Run(lane, func(t *testing.T) {
+			// "no-verdict" gets nothing, so Results mints sdk:no_verdict for it.
+			first := mk()
+			first.Failed("no-reason", "")                                             // sdk:no_reason
+			first.Record(SyncResult{ID: "bad-outcome", Outcome: Outcome("nonsense")}) // sdk:unrecognized_outcome
+			first.Record(SyncResult{ID: "no-id", Outcome: OutcomeCreated})            // sdk:missing_external_record_id, or wrong-lane
+			first.Record(SyncResult{ID: "attributed", Outcome: OutcomeSkipped, ReasonCode: "predicate_unmapped"})
+			first.Record(SyncResult{ID: "done", Outcome: OutcomeWithdrawn}) // kept on a withdrawal lane, normalized on a push lane
+			recorded, _ := first.Results()
+
+			replay := mk()
+			for _, r := range recorded {
+				replay.Record(r)
+			}
+			replayed, defects := replay.Results()
+			if len(defects) != 0 {
+				t.Errorf("replay raised defects: %v", defects)
+			}
+			if !slices.Equal(replayed, recorded) {
+				t.Errorf("replay differs:\n got  %+v\n want %+v", replayed, recorded)
+			}
+			sdkCodes := 0
+			for _, r := range recorded {
+				if strings.HasPrefix(r.ReasonCode, "sdk:") {
+					sdkCodes++
+				}
+			}
+			if sdkCodes < 3 {
+				t.Errorf("fixture produced %d sdk: codes; the test would not exercise the exemption", sdkCodes)
+			}
+		})
 	}
 }

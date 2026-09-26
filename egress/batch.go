@@ -186,8 +186,20 @@ func (b *Batch) reasonCode(id, code string) string {
 }
 
 // Record stores an arbitrary verdict. Prefer the named helpers; this exists for
-// a component that computes a SyncResult generically.
-func (b *Batch) Record(r SyncResult) { b.record(r) }
+// a component that computes a SyncResult generically, or replays a set it
+// recorded earlier (the batch_id dedup pattern).
+//
+// Its reason code gets the named helpers' checks: a reserved-prefix, overlong or
+// whitespace-bearing code is dropped with a defect, never forwarded. The one
+// exception is a failed verdict carrying one of this package's own ReasonCode*
+// constants, which [Batch.Results] hands out and a replay must be able to record
+// again unchanged.
+func (b *Batch) Record(r SyncResult) {
+	if !isSDKMintedReplay(r) {
+		r.ReasonCode = b.reasonCode(r.ID, r.ReasonCode)
+	}
+	b.record(r)
+}
 
 func (b *Batch) record(r SyncResult) {
 	if _, ok := b.known[r.ID]; !ok {

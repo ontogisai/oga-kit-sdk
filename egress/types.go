@@ -373,6 +373,8 @@ type SyncResult struct {
 	// for the ones this package mints (see the ReasonCode* constants). A code
 	// carrying either is dropped with a defect rather than forwarded, so a
 	// component can never make its own classification read as the platform's.
+	// This holds for [Batch.Record] too, except that a failed verdict replayed
+	// from [Batch.Results] keeps the sdk: code the SDK gave it.
 	ReasonCode string `json:"reason_code,omitempty"`
 
 	// ReasonDetail is the human prose behind ReasonCode — the specifics a code
@@ -450,6 +452,31 @@ func normalizeReasonCode(code string) (string, string) {
 		}
 	}
 	return trimmed, ""
+}
+
+// isSDKMintedReplay reports whether r carries a reason code this package minted,
+// on the only verdict it mints one for (failed), byte for byte.
+//
+// [Batch.Record] and [RelationshipBatch.Record] keep such a code instead of
+// refusing it for its reserved prefix. [Batch.Results] hands these codes out, and
+// a component that deduplicates redeliveries replays a recorded Results() set
+// through Record. Refusing the SDK's own output there would strip the codes from
+// every replayed failure and log each one as a component bug.
+//
+// The residual is that a component can re-state one of these four codes on a
+// failure of its own. It cannot invent a new sdk: code, attach one to any other
+// verdict, or use the platform: namespace.
+func isSDKMintedReplay(r SyncResult) bool {
+	if r.Outcome != OutcomeFailed {
+		return false
+	}
+	switch r.ReasonCode {
+	case ReasonCodeNoVerdict, ReasonCodeUnrecognizedOutcome,
+		ReasonCodeMissingExternalRecordID, ReasonCodeNoReason:
+		return true
+	default:
+		return false
+	}
 }
 
 // SyncResponse is the body of a reply on every lane, push or withdrawal.

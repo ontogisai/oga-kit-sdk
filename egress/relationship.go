@@ -281,8 +281,15 @@ func (b *RelationshipBatch) reasonCode(id, code string) string {
 	return out
 }
 
-// Record stores an arbitrary verdict. Prefer the named helpers.
-func (b *RelationshipBatch) Record(r SyncResult) { b.record(r) }
+// Record stores an arbitrary verdict. Prefer the named helpers. See
+// [Batch.Record] — identical rules: the reason code gets the named helpers'
+// checks, except for a replayed code this package minted on a failed verdict.
+func (b *RelationshipBatch) Record(r SyncResult) {
+	if !isSDKMintedReplay(r) {
+		r.ReasonCode = b.reasonCode(r.ID, r.ReasonCode)
+	}
+	b.record(r)
+}
 
 func (b *RelationshipBatch) record(r SyncResult) {
 	if _, ok := b.known[r.ID]; !ok {
