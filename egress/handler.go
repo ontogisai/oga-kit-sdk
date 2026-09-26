@@ -27,9 +27,9 @@ type Component interface {
 	// to crash-loop the container.
 	//
 	// Sync is never called before this returns: the SDK answers 503 on every
-	// push and withdrawal lane until the initial Connect attempt has completed, so a
-	// component still holds the guarantee it had when Connect ran before the
-	// listener was bound — it will not be handed a batch without having had
+	// push and withdrawal lane until the initial Connect attempt has completed,
+	// so a component still holds the guarantee it had when Connect ran before
+	// the listener was bound — it will not be handed a batch without having had
 	// its chance to establish credentials.
 	//
 	// ⚠️ Connect is called ONCE when it SUCCEEDS, but is RETRIED on an
@@ -156,7 +156,12 @@ type EntityWithdrawer interface {
 	//
 	// created and updated are not valid here and are normalized to failures.
 	// Batch-wide faults and [ThrottleError] follow [Component.Sync]'s rules
-	// unchanged, and the batch_id is stable across retries.
+	// unchanged.
+	//
+	// The batch_id is stable across retries of one withdrawal batch, but the
+	// platform does not promise batch ids unique across lanes. Keep this lane's
+	// redelivery dedup window separate from the push lanes', or a withdrawal
+	// could replay a push's verdicts.
 	WithdrawEntities(ctx context.Context, req *SyncRequest, b *Batch) error
 }
 

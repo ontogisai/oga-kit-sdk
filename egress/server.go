@@ -47,9 +47,10 @@ import (
 // the same anchor in both lanes), so before the split a component had to infer the
 // kind from the payload. See [OntologyTypeSyncer].
 //
-// Withdrawal follows the same rule: each push lane that holds external records
-// has a withdrawal counterpart on its own path, rather than a mode flag in the
-// body, so a withdrawal can never be mistaken for a push.
+// Withdrawal follows the same rule: the entity and relationship lanes each have
+// a withdrawal counterpart on its own path, rather than a mode flag in the body,
+// so a withdrawal can never be mistaken for a push. The ontology lane has none,
+// because type records are never withdrawn.
 const (
 	PathSync                 = "/egress/sync"
 	PathOntologySync         = "/egress/ontology-sync"

@@ -409,6 +409,32 @@ func TestWithdrawalLanes_SharePushMachinery(t *testing.T) {
 			t.Errorf("= %d, want 400", w.Code)
 		}
 	})
+
+	t.Run("a missing relationship verdict is normalized, not forwarded", func(t *testing.T) {
+		impl := &withdrawalStub{withdrawRelationships: func(_ context.Context, _ *RelationshipSyncRequest, b *RelationshipBatch) error {
+			b.Withdrawn("rel-1")
+			return nil
+		}}
+		got := outcomesByID(t, postRelationshipTo(t, impl, PathRelationshipWithdraw, relationshipWithdrawalRequest()))
+		if len(got) != 2 {
+			t.Fatalf("got %d results, want one per requested relationship", len(got))
+		}
+		if r := got["rel-2"]; r.Outcome != OutcomeFailed || r.ReasonCode != ReasonCodeNoVerdict {
+			t.Errorf("rel-2: %+v, want failed/%s", r, ReasonCodeNoVerdict)
+		}
+	})
+
+	t.Run("a non-homogeneous relationship batch is 400", func(t *testing.T) {
+		bad := relationshipWithdrawalRequest()
+		bad.Relationships[1].Predicate = "hasPoint"
+		impl := &withdrawalStub{}
+		if w := postRelationshipTo(t, impl, PathRelationshipWithdraw, bad); w.Code != http.StatusBadRequest {
+			t.Errorf("= %d, want 400", w.Code)
+		}
+		if len(impl.calls) != 0 {
+			t.Errorf("component called on a rejected batch: %v", impl.calls)
+		}
+	})
 }
 
 // The outcome literal crosses the wire as a string, like the other four.

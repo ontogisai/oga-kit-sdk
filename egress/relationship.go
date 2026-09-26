@@ -89,7 +89,8 @@ type Relationship struct {
 }
 
 // RelationshipSyncRequest is the body of a push to
-// POST /egress/relationship-sync.
+// POST /egress/relationship-sync, and of a relationship withdrawal to
+// POST /egress/relationship-withdraw.
 //
 // A batch is HOMOGENEOUS on (tenant, predicate, mode) — never a mixture, and
 // in particular never a mixture of two declared (source_type, target_type)

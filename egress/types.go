@@ -138,6 +138,10 @@ type Entity struct {
 	// CREATE — which is what makes a re-run of a completed sync all updates
 	// instead of a second set of duplicate external records. A component that
 	// ignores it will duplicate records on every re-run.
+	//
+	// On the withdrawal lane (POST /egress/withdraw) it is always present and
+	// names the record to retract; there it says nothing about update versus
+	// create.
 	Correlation *Correlation `json:"correlation,omitempty"`
 
 	// ParentRefs carries the entity's resolved OWNERS, keyed by how each was
@@ -273,10 +277,11 @@ type ParentRef struct {
 }
 
 // SyncRequest is the body of a push — POST /egress/sync for entities, and
-// POST /egress/ontology-sync for ontology type records. One type serves both
-// because the two carry the same fields; what differs is the KIND of record in
-// Entities, and that is carried by the ROUTE, never by a field here. See
-// [OntologyTypeSyncer].
+// POST /egress/ontology-sync for ontology type records — and of an entity
+// withdrawal, POST /egress/withdraw. One type serves all three because they carry
+// the same fields; what differs is the KIND of record in Entities and what to do
+// with it, and that is carried by the ROUTE, never by a field here. See
+// [OntologyTypeSyncer] and [EntityWithdrawer].
 //
 // A batch is HOMOGENEOUS: one (tenant, entity_type, mode) per call, never a
 // mixture. A component may therefore map one target shape per call, and its
@@ -310,7 +315,7 @@ type SyncRequest struct {
 	// live is a platform concern the contract does not expose.
 	EntityType string `json:"entity_type"`
 
-	// Mode is bulk (Day-1) or change (Day-2).
+	// Mode is bulk (Day-1) or change (Day-2). A withdrawal carries change.
 	Mode Mode `json:"mode"`
 
 	// BatchID is STABLE ACROSS RETRIES. The platform retries a transient push
@@ -447,7 +452,7 @@ func normalizeReasonCode(code string) (string, string) {
 	return trimmed, ""
 }
 
-// SyncResponse is the body of a push reply, on either lane.
+// SyncResponse is the body of a reply on every lane, push or withdrawal.
 //
 // It MUST carry exactly one result per requested entity id. The platform
 // validates this and, on any mismatch — a missing id, an unrequested id, a
