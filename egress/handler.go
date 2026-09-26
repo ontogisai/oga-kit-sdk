@@ -26,10 +26,10 @@ type Component interface {
 	// unreachable at boot is an expected, transient condition — not a reason
 	// to crash-loop the container.
 	//
-	// Sync is never called before this returns: the SDK answers 503 on both
-	// push lanes until the initial Connect attempt has completed, so a
-	// component still holds the guarantee it had when Connect ran before the
-	// listener was bound — it will not be handed a batch without having had
+	// Sync is never called before this returns: the SDK answers 503 on every
+	// push and withdrawal lane until the initial Connect attempt has completed,
+	// so a component still holds the guarantee it had when Connect ran before
+	// the listener was bound — it will not be handed a batch without having had
 	// its chance to establish credentials.
 	//
 	// ⚠️ Connect is called ONCE when it SUCCEEDS, but is RETRIED on an
@@ -110,6 +110,59 @@ type OntologyTypeSyncer interface {
 	// its business key for the external system and travels as a property, because
 	// that is the value the external system stores and matches on.
 	SyncOntologyTypes(ctx context.Context, req *SyncRequest, b *Batch) error
+}
+
+// EntityWithdrawer is implemented by a component that retracts entity records
+// from its external system when the platform withdraws them — the entity lane's
+// withdrawal verb, reached at POST /egress/withdraw.
+//
+// The platform withdraws an entity when it has been TOMBSTONED in the knowledge
+// graph while still carrying this component's correlation: the external system
+// holds a record for something the graph no longer holds. Relationships have
+// their own verb, [RelationshipWithdrawer].
+//
+// It is OPTIONAL and separate from [Component], on the same reasoning as
+// [OntologyTypeSyncer]: implementing it IS the statement "this component
+// retracts records", and the kit's manifest declares it with
+// withdrawal.entities. Without it the route answers 501.
+//
+// # Pin the method signature at compile time
+//
+// This is a runtime type assertion, so a signature typo silently means "not
+// implemented" and surfaces as a 501 against a manifest that declares the lane:
+//
+//	var _ egress.EntityWithdrawer = (*myComponent)(nil)
+type EntityWithdrawer interface {
+	// WithdrawEntities retracts one homogeneous batch of records and records a
+	// verdict per entity on b.
+	//
+	// Each entity carries its id, its entity_type and its [Entity.Correlation] —
+	// the record to retract — and no properties. Route by entity type exactly as
+	// Sync does, and retract by the correlation's external record id, never by a
+	// name or business key: those can have changed since the record was pushed.
+	//
+	// Verdicts, and what the platform does with each:
+	//
+	//   - [Batch.Withdrawn]: the record was retracted. The platform releases the
+	//     correlation and never asks again.
+	//   - [Batch.Skipped] / [Batch.SkippedReason]: nothing further to do — the
+	//     record was already absent, or is a kind this component cannot retract
+	//     (give a stable reason code). The platform releases the correlation too,
+	//     so never skip anything that should be retried.
+	//   - [Batch.Failed] / [Batch.FailedReason]: keep and retry on a later pass.
+	//     This includes a record the external system refuses because other
+	//     records still depend on it; the platform withdraws dependents first, so
+	//     a retry converges.
+	//
+	// created and updated are not valid here and are normalized to failures.
+	// Batch-wide faults and [ThrottleError] follow [Component.Sync]'s rules
+	// unchanged.
+	//
+	// The batch_id is stable across retries of one withdrawal batch, but the
+	// platform does not promise batch ids unique across lanes. Keep this lane's
+	// redelivery dedup window separate from the push lanes', or a withdrawal
+	// could replay a push's verdicts.
+	WithdrawEntities(ctx context.Context, req *SyncRequest, b *Batch) error
 }
 
 // Prober is implemented by a Component whose Health(ctx) may serve a cached

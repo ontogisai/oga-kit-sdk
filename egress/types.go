@@ -49,18 +49,69 @@ const (
 	// a batch-wide fault: signal those by returning an error from Sync, which
 	// lets the platform retry the whole batch.
 	OutcomeFailed Outcome = "failed"
+
+	// OutcomeWithdrawn means the component retracted the external record — it
+	// deleted it, or did whatever its external system uses to stop holding it.
+	// Valid ONLY on a withdrawal lane ([EntityWithdrawer],
+	// [RelationshipWithdrawer]); it carries no ExternalRecordID. The platform
+	// then releases the correlation, so the record is never asked about again.
+	OutcomeWithdrawn Outcome = "withdrawn"
 )
 
-// Valid reports whether o is one of the four recognized outcomes. The platform
+// Valid reports whether o is a recognized outcome on ANY lane. The platform
 // rejects an unrecognized outcome as a malformed response, so the server checks
 // this before replying rather than letting a typo reach the platform.
+//
+// A recognized outcome can still be wrong for the lane it arrives on — a
+// `withdrawn` on a push lane, a `created` on a withdrawal lane. The batch checks
+// that separately, against the outcomes its own lane accepts.
 func (o Outcome) Valid() bool {
 	switch o {
-	case OutcomeCreated, OutcomeUpdated, OutcomeSkipped, OutcomeFailed:
+	case OutcomeCreated, OutcomeUpdated, OutcomeSkipped, OutcomeFailed, OutcomeWithdrawn:
 		return true
 	default:
 		return false
 	}
+}
+
+// laneVerb is what a lane asks the component to do with each record: PUSH it
+// (create or update the external record) or WITHDRAW it (retract the external
+// record). It decides which outcomes the lane's batch accepts.
+//
+// Unexported: the verb is carried by the route and by which method the server
+// calls, exactly like the lane itself (see the laneLabel constants).
+type laneVerb uint8
+
+const (
+	// verbPush is the zero value, so a batch built without naming a verb — every
+	// batch before withdrawal existed — keeps accepting exactly what it did.
+	verbPush laneVerb = iota
+	verbWithdraw
+)
+
+// permits reports whether the lane accepts outcome o.
+//
+// Both directions matter. A `withdrawn` on a push lane has no meaning to the
+// platform. A `created` / `updated` on a withdrawal lane would ask the platform
+// to persist a correlation for a record it has just asked to retract.
+func (v laneVerb) permits(o Outcome) bool {
+	switch o {
+	case OutcomeSkipped, OutcomeFailed:
+		return true
+	case OutcomeCreated, OutcomeUpdated:
+		return v == verbPush
+	case OutcomeWithdrawn:
+		return v == verbWithdraw
+	default:
+		return false
+	}
+}
+
+func (v laneVerb) String() string {
+	if v == verbWithdraw {
+		return "withdrawal"
+	}
+	return "push"
 }
 
 // Correlation is the (system, record id) pair already recorded for an entity.
@@ -87,6 +138,10 @@ type Entity struct {
 	// CREATE — which is what makes a re-run of a completed sync all updates
 	// instead of a second set of duplicate external records. A component that
 	// ignores it will duplicate records on every re-run.
+	//
+	// On the withdrawal lane (POST /egress/withdraw) it is always present and
+	// names the record to retract; there it says nothing about update versus
+	// create.
 	Correlation *Correlation `json:"correlation,omitempty"`
 
 	// ParentRefs carries the entity's resolved OWNERS, keyed by how each was
@@ -222,10 +277,11 @@ type ParentRef struct {
 }
 
 // SyncRequest is the body of a push — POST /egress/sync for entities, and
-// POST /egress/ontology-sync for ontology type records. One type serves both
-// because the two carry the same fields; what differs is the KIND of record in
-// Entities, and that is carried by the ROUTE, never by a field here. See
-// [OntologyTypeSyncer].
+// POST /egress/ontology-sync for ontology type records — and of an entity
+// withdrawal, POST /egress/withdraw. One type serves all three because they carry
+// the same fields; what differs is the KIND of record in Entities and what to do
+// with it, and that is carried by the ROUTE, never by a field here. See
+// [OntologyTypeSyncer] and [EntityWithdrawer].
 //
 // A batch is HOMOGENEOUS: one (tenant, entity_type, mode) per call, never a
 // mixture. A component may therefore map one target shape per call, and its
@@ -259,7 +315,7 @@ type SyncRequest struct {
 	// live is a platform concern the contract does not expose.
 	EntityType string `json:"entity_type"`
 
-	// Mode is bulk (Day-1) or change (Day-2).
+	// Mode is bulk (Day-1) or change (Day-2). A withdrawal carries change.
 	Mode Mode `json:"mode"`
 
 	// BatchID is STABLE ACROSS RETRIES. The platform retries a transient push
@@ -298,7 +354,7 @@ type SyncResult struct {
 
 	// ReasonCode is the STABLE, machine-readable classification of why this
 	// record was skipped or failed. Valid on `skipped` and `failed` alike; never
-	// set on created/updated, which need no reason.
+	// set on created/updated/withdrawn, which need no reason.
 	//
 	// This is the field the operator's run report GROUPS BY, which is the whole
 	// reason it exists separately from the prose: a report that tallied a
@@ -317,6 +373,8 @@ type SyncResult struct {
 	// for the ones this package mints (see the ReasonCode* constants). A code
 	// carrying either is dropped with a defect rather than forwarded, so a
 	// component can never make its own classification read as the platform's.
+	// This holds for [Batch.Record] too, except that a failed verdict replayed
+	// from [Batch.Results] keeps the sdk: code the SDK gave it.
 	ReasonCode string `json:"reason_code,omitempty"`
 
 	// ReasonDetail is the human prose behind ReasonCode — the specifics a code
@@ -343,7 +401,9 @@ type SyncResult struct {
 const (
 	// ReasonCodeNoVerdict: the component recorded nothing for a requested id.
 	ReasonCodeNoVerdict = "sdk:no_verdict"
-	// ReasonCodeUnrecognizedOutcome: the outcome was not one of the four.
+	// ReasonCodeUnrecognizedOutcome: the outcome is not one the batch's lane
+	// accepts — either not a recognized outcome at all, or one that belongs to
+	// the other kind of lane (see Outcome.Valid).
 	ReasonCodeUnrecognizedOutcome = "sdk:unrecognized_outcome"
 	// ReasonCodeMissingExternalRecordID: created/updated with no external id.
 	ReasonCodeMissingExternalRecordID = "sdk:missing_external_record_id"
@@ -394,7 +454,32 @@ func normalizeReasonCode(code string) (string, string) {
 	return trimmed, ""
 }
 
-// SyncResponse is the body of a push reply, on either lane.
+// isSDKMintedReplay reports whether r carries a reason code this package minted,
+// on the only verdict it mints one for (failed), byte for byte.
+//
+// [Batch.Record] and [RelationshipBatch.Record] keep such a code instead of
+// refusing it for its reserved prefix. [Batch.Results] hands these codes out, and
+// a component that deduplicates redeliveries replays a recorded Results() set
+// through Record. Refusing the SDK's own output there would strip the codes from
+// every replayed failure and log each one as a component bug.
+//
+// The residual is that a component can re-state one of these four codes on a
+// failure of its own. It cannot invent a new sdk: code, attach one to any other
+// verdict, or use the platform: namespace.
+func isSDKMintedReplay(r SyncResult) bool {
+	if r.Outcome != OutcomeFailed {
+		return false
+	}
+	switch r.ReasonCode {
+	case ReasonCodeNoVerdict, ReasonCodeUnrecognizedOutcome,
+		ReasonCodeMissingExternalRecordID, ReasonCodeNoReason:
+		return true
+	default:
+		return false
+	}
+}
+
+// SyncResponse is the body of a reply on every lane, push or withdrawal.
 //
 // It MUST carry exactly one result per requested entity id. The platform
 // validates this and, on any mismatch — a missing id, an unrequested id, a

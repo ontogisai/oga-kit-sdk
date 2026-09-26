@@ -46,13 +46,20 @@ import (
 // convenience: the two lanes' batch labels legitimately collide (a kit declares
 // the same anchor in both lanes), so before the split a component had to infer the
 // kind from the payload. See [OntologyTypeSyncer].
+//
+// Withdrawal follows the same rule: the entity and relationship lanes each have
+// a withdrawal counterpart on its own path, rather than a mode flag in the body,
+// so a withdrawal can never be mistaken for a push. The ontology lane has none,
+// because type records are never withdrawn.
 const (
-	PathSync             = "/egress/sync"
-	PathOntologySync     = "/egress/ontology-sync"
-	PathRelationshipSync = "/egress/relationship-sync"
-	PathHealthz          = "/healthz"
-	PathLivez            = "/livez"
-	PathTestConnection   = "/egress/test-connection"
+	PathSync                 = "/egress/sync"
+	PathOntologySync         = "/egress/ontology-sync"
+	PathRelationshipSync     = "/egress/relationship-sync"
+	PathWithdraw             = "/egress/withdraw"
+	PathRelationshipWithdraw = "/egress/relationship-withdraw"
+	PathHealthz              = "/healthz"
+	PathLivez                = "/livez"
+	PathTestConnection       = "/egress/test-connection"
 )
 
 // Lane labels for LOGS ONLY.
@@ -62,9 +69,11 @@ const (
 // would invite a component to branch on it, which is the coupling this split
 // removes. These exist so a log line says which lane a batch belonged to.
 const (
-	laneLabelEntities      = "entities"
-	laneLabelOntologyTypes = "ontology_types"
-	laneLabelRelationships = "relationships"
+	laneLabelEntities               = "entities"
+	laneLabelOntologyTypes          = "ontology_types"
+	laneLabelRelationships          = "relationships"
+	laneLabelEntityWithdrawal       = "entity_withdrawal"
+	laneLabelRelationshipWithdrawal = "relationship_withdrawal"
 )
 
 // DefaultMaxRequestBytes caps a decoded push body. A batch is bounded by the
@@ -305,6 +314,11 @@ func (s *server) mux() http.Handler {
 	mux.HandleFunc("POST "+PathSync, s.handleSync)
 	mux.HandleFunc("POST "+PathOntologySync, s.handleOntologySync)
 	mux.HandleFunc("POST "+PathRelationshipSync, s.handleRelationshipSync)
+	// Both withdrawal routes are registered unconditionally, like the optional
+	// push lanes above: a component that does not implement the verb answers
+	// 501, never 404, which is indistinguishable from a wrong base URL.
+	mux.HandleFunc("POST "+PathWithdraw, s.handleWithdraw)
+	mux.HandleFunc("POST "+PathRelationshipWithdraw, s.handleRelationshipWithdraw)
 	mux.HandleFunc("GET "+PathHealthz, s.handleHealth)
 	mux.HandleFunc("GET "+PathLivez, s.handleLivez)
 	mux.HandleFunc("POST "+PathTestConnection, s.handleTestConnection)
@@ -328,7 +342,52 @@ func (s *server) mux() http.Handler {
 type pushFunc func(ctx context.Context, req *SyncRequest, b *Batch) error
 
 func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
-	s.servePush(w, r, laneLabelEntities, s.impl.Sync)
+	s.servePush(w, r, laneLabelEntities, verbPush, s.impl.Sync)
+}
+
+// handleWithdraw serves the entity withdrawal lane, or reports that this
+// component does not implement it. Same shape as handleOntologySync: the 501 is
+// decided before the body is read, and the lane then delegates to servePush with
+// the withdrawal outcome set.
+func (s *server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
+	wd, ok := s.impl.(EntityWithdrawer)
+	if !ok {
+		s.laneNotImplemented(w, PathWithdraw, laneLabelEntityWithdrawal,
+			"EntityWithdrawer", "WithdrawEntities", "withdrawal.entities")
+		return
+	}
+	s.servePush(w, r, laneLabelEntityWithdrawal, verbWithdraw, wd.WithdrawEntities)
+}
+
+// handleRelationshipWithdraw serves the relationship withdrawal lane, or
+// reports that this component does not implement it. It delegates to
+// serveRelationshipPush with the withdrawal outcome set.
+func (s *server) handleRelationshipWithdraw(w http.ResponseWriter, r *http.Request) {
+	wd, ok := s.impl.(RelationshipWithdrawer)
+	if !ok {
+		s.laneNotImplemented(w, PathRelationshipWithdraw, laneLabelRelationshipWithdrawal,
+			"RelationshipWithdrawer", "WithdrawRelationships", "withdrawal.relationships")
+		return
+	}
+	s.serveRelationshipPush(w, r, laneLabelRelationshipWithdrawal, verbWithdraw, wd.WithdrawRelationships)
+}
+
+// laneNotImplemented answers 501 for an optional lane whose interface the
+// component does not implement.
+//
+// Reaching it is a DEPLOYMENT MISMATCH: the platform calls a withdrawal lane only
+// because the kit's manifest declared it, so the running image is out of step
+// with the manifest it was installed with. Hence ERROR, and hence naming the
+// interface, the manifest flag and the compile-time assertion in the response.
+// See handleOntologySync for why 501 rather than 404.
+func (s *server) laneNotImplemented(w http.ResponseWriter, path, lane, iface, method, manifestFlag string) {
+	msg := fmt.Sprintf("this component does not serve the %s lane: it does not implement "+
+		"egress.%s. The manifest declares %s, so the running image is out of step with it — "+
+		"implement %s, and pin the signature with `var _ egress.%s = (*yourComponent)(nil)`",
+		lane, iface, manifestFlag, method, iface)
+	s.cfg.Logger.Error("egress request rejected: component does not implement "+iface,
+		"path", path, "lane", lane)
+	http.Error(w, "egress: "+msg, http.StatusNotImplemented)
 }
 
 // handleOntologySync serves the ontology lane, or reports that this component does
@@ -360,7 +419,7 @@ func (s *server) handleOntologySync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "egress: "+msg, http.StatusNotImplemented)
 		return
 	}
-	s.servePush(w, r, laneLabelOntologyTypes, syncer.SyncOntologyTypes)
+	s.servePush(w, r, laneLabelOntologyTypes, verbPush, syncer.SyncOntologyTypes)
 }
 
 // handleRelationshipSync serves the relationships lane, or reports that this
@@ -388,7 +447,7 @@ func (s *server) handleRelationshipSync(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "egress: "+msg, http.StatusNotImplemented)
 		return
 	}
-	s.serveRelationshipPush(w, r, syncer.SyncRelationships)
+	s.serveRelationshipPush(w, r, laneLabelRelationships, verbPush, syncer.SyncRelationships)
 }
 
 // relationshipPushFunc is the relationships-lane call, mirroring pushFunc.
@@ -401,10 +460,15 @@ type relationshipPushFunc func(ctx context.Context, req *RelationshipSyncRequest
 // request's batch_id/entity_type-equivalent fields for logging, so it is
 // reused as-is below with the relationship request's fields substituted in a
 // throwaway SyncRequest-shaped log context).
-func (s *server) serveRelationshipPush(w http.ResponseWriter, r *http.Request, push relationshipPushFunc) {
+//
+// lane labels the logs; verb picks which outcomes the batch accepts, which is
+// the only difference between the relationship push and withdrawal lanes.
+func (s *server) serveRelationshipPush(
+	w http.ResponseWriter, r *http.Request, lane string, verb laneVerb, push relationshipPushFunc,
+) {
 	if s.connectPending.Load() {
 		const msg = "component is still completing its initial Connect; retry shortly"
-		s.cfg.Logger.Warn("egress push rejected: initial connect still in flight", "lane", laneLabelRelationships)
+		s.cfg.Logger.Warn("egress push rejected: initial connect still in flight", "lane", lane)
 		http.Error(w, msg, http.StatusServiceUnavailable)
 		return
 	}
@@ -420,16 +484,16 @@ func (s *server) serveRelationshipPush(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	b := newRelationshipBatch(req.Relationships)
+	b := newLaneRelationshipBatch(verb, req.Relationships)
 	if syncErr := push(r.Context(), req, b); syncErr != nil {
-		s.writeRelationshipSyncError(w, req, syncErr)
+		s.writeRelationshipSyncError(w, req, lane, syncErr)
 		return
 	}
 
 	results, defects := b.Results()
 	for _, d := range defects {
 		s.cfg.Logger.Error("egress component returned a malformed verdict; normalized to a per-relationship failure",
-			"batch_id", req.BatchID, "lane", laneLabelRelationships, "predicate", req.Predicate, "defect", d)
+			"batch_id", req.BatchID, "lane", lane, "predicate", req.Predicate, "defect", d)
 	}
 	s.writeJSON(w, http.StatusOK, SyncResponse{Results: results})
 }
@@ -471,24 +535,26 @@ func (s *server) decodeRelationshipSync(w http.ResponseWriter, r *http.Request) 
 // relationships lane — same status mapping (throttle → 429 with Retry-After,
 // else 500), logged with the relationship batch's own identity fields instead
 // of a SyncRequest's.
-func (s *server) writeRelationshipSyncError(w http.ResponseWriter, req *RelationshipSyncRequest, err error) {
+func (s *server) writeRelationshipSyncError(w http.ResponseWriter, req *RelationshipSyncRequest, lane string, err error) {
 	var te *ThrottleError
 	if errors.As(err, &te) && te.After > 0 {
 		s.cfg.Logger.Warn("egress batch throttled by external system",
-			"batch_id", req.BatchID, "lane", laneLabelRelationships, "predicate", req.Predicate,
+			"batch_id", req.BatchID, "lane", lane, "predicate", req.Predicate,
 			"retry_after", te.After.String(), "error", err)
 		w.Header().Set("Retry-After", strconv.Itoa(int(te.After.Round(time.Second).Seconds())))
 		http.Error(w, err.Error(), http.StatusTooManyRequests)
 		return
 	}
 	s.cfg.Logger.Error("egress batch failed",
-		"batch_id", req.BatchID, "lane", laneLabelRelationships, "predicate", req.Predicate,
+		"batch_id", req.BatchID, "lane", lane, "predicate", req.Predicate,
 		"mode", string(req.Mode), "relationships", len(req.Relationships), "error", err)
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
-// servePush is one push, whichever lane it belongs to.
-func (s *server) servePush(w http.ResponseWriter, r *http.Request, lane string, push pushFunc) {
+// servePush is one push, whichever lane it belongs to. lane labels the logs;
+// verb picks which outcomes the batch accepts, which is the only difference
+// between the entity push and withdrawal lanes.
+func (s *server) servePush(w http.ResponseWriter, r *http.Request, lane string, verb laneVerb, push pushFunc) {
 	// Checked BEFORE decoding, and before any component call: until the initial
 	// Connect attempt has completed the component may hold no credentials, so
 	// accepting this batch would fail it one entity at a time. 503 (not 4xx) so
@@ -515,7 +581,7 @@ func (s *server) servePush(w http.ResponseWriter, r *http.Request, lane string, 
 		return
 	}
 
-	b := newBatch(req.Entities)
+	b := newLaneBatch(verb, req.Entities)
 	if syncErr := push(r.Context(), req, b); syncErr != nil {
 		s.writeSyncError(w, req, lane, syncErr)
 		return

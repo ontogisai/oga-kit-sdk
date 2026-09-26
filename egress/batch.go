@@ -26,11 +26,21 @@ type Batch struct {
 	known   map[string]struct{} // membership, for rejecting unrequested ids
 	results map[string]SyncResult
 	defects []string
+
+	// verb decides which outcomes Results accepts:
+	//   - verbPush (/egress/sync, /egress/ontology-sync): created, updated, skipped, failed
+	//   - verbWithdraw (/egress/withdraw): withdrawn, skipped, failed
+	// Any other outcome becomes a failed verdict with sdk:unrecognized_outcome.
+	verb laneVerb
 }
 
-// newBatch builds a Batch for the entities of one request.
-func newBatch(entities []Entity) *Batch {
+// newBatch builds a push-lane Batch for the entities of one request.
+func newBatch(entities []Entity) *Batch { return newLaneBatch(verbPush, entities) }
+
+// newLaneBatch builds a Batch whose lane accepts verb's outcomes.
+func newLaneBatch(verb laneVerb, entities []Entity) *Batch {
 	b := &Batch{
+		verb:    verb,
 		ids:     make([]string, 0, len(entities)),
 		known:   make(map[string]struct{}, len(entities)),
 		results: make(map[string]SyncResult, len(entities)),
@@ -64,6 +74,19 @@ func (b *Batch) Created(id, externalRecordID string) {
 // component bug and is downgraded to a failure — see [Batch.Results].
 func (b *Batch) Updated(id, externalRecordID string) {
 	b.record(SyncResult{ID: id, Outcome: OutcomeUpdated, ExternalRecordID: externalRecordID})
+}
+
+// Withdrawn records that the component retracted the external record for id.
+// It takes no external record id: there is no longer a record to address.
+//
+// Valid ONLY on a withdrawal lane ([EntityWithdrawer]). On a push lane it is
+// normalized to a per-entity failure — see [Batch.Results].
+//
+// Report a record that was ALREADY absent as [Batch.Skipped] (or
+// [Batch.SkippedReason]) rather than this: the platform releases the
+// correlation either way, and the distinction is what the audit trail records.
+func (b *Batch) Withdrawn(id string) {
+	b.record(SyncResult{ID: id, Outcome: OutcomeWithdrawn})
 }
 
 // Skipped records that id needs no external record, or is already current.
@@ -168,8 +191,20 @@ func (b *Batch) reasonCode(id, code string) string {
 }
 
 // Record stores an arbitrary verdict. Prefer the named helpers; this exists for
-// a component that computes a SyncResult generically.
-func (b *Batch) Record(r SyncResult) { b.record(r) }
+// a component that computes a SyncResult generically, or replays a set it
+// recorded earlier (the batch_id dedup pattern).
+//
+// Its reason code gets the named helpers' checks: a reserved-prefix, overlong or
+// whitespace-bearing code is dropped with a defect, never forwarded. The one
+// exception is a failed verdict carrying one of this package's own ReasonCode*
+// constants, which [Batch.Results] hands out and a replay must be able to record
+// again unchanged.
+func (b *Batch) Record(r SyncResult) {
+	if !isSDKMintedReplay(r) {
+		r.ReasonCode = b.reasonCode(r.ID, r.ReasonCode)
+	}
+	b.record(r)
+}
 
 func (b *Batch) record(r SyncResult) {
 	if _, ok := b.known[r.ID]; !ok {
@@ -207,12 +242,14 @@ func (b *Batch) Len() int { return len(b.ids) }
 // component-bug descriptions collected while building it (which the server logs
 // at ERROR).
 //
-// Three component bugs are NORMALIZED to a per-entity failure rather than
+// These component bugs are NORMALIZED to a per-entity failure rather than
 // propagated:
 //
 //   - no verdict was recorded for a requested id;
 //   - created/updated carried no external record id;
-//   - the outcome was not one of the four recognized values.
+//   - the outcome is not a recognized value, or is one the batch's lane does not
+//     accept (push lanes: created, updated, skipped, failed; withdrawal lanes:
+//     withdrawn, skipped, failed).
 //
 // Each of those would otherwise make the platform discard the whole batch, so
 // normalizing keeps the other entities' correlations. It is not a silent
@@ -232,11 +269,9 @@ func (b *Batch) Results() ([]SyncResult, []string) {
 				"component returned no verdict for this entity"))
 			continue
 		}
-		if !r.Outcome.Valid() {
-			defects = append(defects, fmt.Sprintf(
-				"unrecognized outcome %q for id %q", r.Outcome, id))
-			out = append(out, normalizedFailure(id, ReasonCodeUnrecognizedOutcome,
-				fmt.Sprintf("component reported unrecognized outcome %q", r.Outcome)))
+		if f, defect, bad := outcomeViolation(b.verb, r.Outcome, id); bad {
+			defects = append(defects, defect)
+			out = append(out, f)
 			continue
 		}
 		if (r.Outcome == OutcomeCreated || r.Outcome == OutcomeUpdated) && r.ExternalRecordID == "" {
@@ -249,6 +284,25 @@ func (b *Batch) Results() ([]SyncResult, []string) {
 		out = append(out, r)
 	}
 	return out, defects
+}
+
+// outcomeViolation reports whether outcome o is unacceptable on a lane speaking
+// verb, returning the normalized failure and the defect to log when it is.
+//
+// Shared by both batch types so the entity and relationship lanes cannot drift
+// in which outcomes they accept or in how a violation reads.
+func outcomeViolation(verb laneVerb, o Outcome, id string) (SyncResult, string, bool) {
+	if !o.Valid() {
+		return normalizedFailure(id, ReasonCodeUnrecognizedOutcome,
+				fmt.Sprintf("component reported unrecognized outcome %q", o)),
+			fmt.Sprintf("unrecognized outcome %q for id %q", o, id), true
+	}
+	if !verb.permits(o) {
+		return normalizedFailure(id, ReasonCodeUnrecognizedOutcome,
+				fmt.Sprintf("component reported outcome %q, which a %s lane does not accept", o, verb)),
+			fmt.Sprintf("outcome %q for id %q is not valid on a %s lane", o, id, verb), true
+	}
+	return SyncResult{}, "", false
 }
 
 // normalizedFailure builds the per-record failure a component bug is turned into.

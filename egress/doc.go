@@ -17,7 +17,8 @@
 //	cfg := &egress.Config{Port: "8600"}
 //	egress.ListenAndServe(ctx, cfg, c)
 //
-// The server serves POST /egress/sync, POST /egress/ontology-sync and
+// The server serves POST /egress/sync, the optional lanes (ontology types,
+// relationships, and the two withdrawal verbs — see "Withdrawal" below) and
 // GET /healthz, decodes each push, and builds a response the platform will
 // accept. A minimal Sync:
 //
@@ -120,4 +121,25 @@
 // name, not the semantic relation — so an owner reached inbound over hasPoint
 // arrives under "hasPoint", even though the relation reads naturally as
 // "isPointOf". See manifest.ParentEdgeSpec.
+//
+// # Withdrawal
+//
+// When the knowledge graph stops holding something this component pushed — an
+// entity is tombstoned, or an edge is closed — the platform can ask the
+// component to retract the external record. The entity and relationship lanes
+// each have an optional withdrawal verb on its own route:
+//
+//   - [EntityWithdrawer] at POST /egress/withdraw, with the entity lane's
+//     [SyncRequest] and [Batch];
+//   - [RelationshipWithdrawer] at POST /egress/relationship-withdraw, with the
+//     relationships lane's [RelationshipSyncRequest] and [RelationshipBatch].
+//
+// The ontology lane has no withdrawal verb. Type records are never withdrawn, so
+// a type record stays in the external system after its last instance is gone.
+//
+// A withdrawal lane accepts `withdrawn`, `skipped` and `failed`; a push lane
+// accepts `created`, `updated`, `skipped` and `failed`. Anything else is
+// normalized to a per-record failure. The manifest declares withdrawal per lane
+// (manifest.EgressWithdrawalSpec); a component that implements neither verb is
+// unchanged on every existing lane.
 package egress
