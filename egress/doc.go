@@ -56,8 +56,10 @@
 // uncorrelated. The next run pushes that entity again with no correlation
 // attached, so a component MUST be able to recognize an already-created record
 // and report [OutcomeUpdated] with its existing id — otherwise every interrupted
-// run leaves duplicates behind. This is also why a component should treat
-// [SyncRequest.BatchID], which is stable across retries, as a deduplication key.
+// run leaves duplicates behind. The batch id does not help here: the next run is
+// a new delivery with a new [SyncRequest.BatchID]. A component may still treat
+// the batch id as a deduplication key, which covers the retries WITHIN one
+// delivery, where the id is stable.
 //
 // # Errors: per entity or per batch
 //

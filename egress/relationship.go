@@ -120,7 +120,8 @@ type RelationshipSyncRequest struct {
 	// withdrawal carries ModeChange.
 	Mode Mode `json:"mode"`
 
-	// BatchID is STABLE ACROSS RETRIES, exactly like SyncRequest.BatchID. It
+	// BatchID identifies ONE DELIVERY, exactly like SyncRequest.BatchID: stable
+	// across that delivery's retries, different for every other delivery. It
 	// additionally encodes the declared scope entry (source_type/target_type),
 	// not just the predicate — two scope entries sharing a predicate would
 	// otherwise mint colliding batch ids across entries, and a component that
