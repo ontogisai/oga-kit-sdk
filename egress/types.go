@@ -318,11 +318,23 @@ type SyncRequest struct {
 	// Mode is bulk (Day-1) or change (Day-2). A withdrawal carries change.
 	Mode Mode `json:"mode"`
 
-	// BatchID is STABLE ACROSS RETRIES. The platform retries a transient push
-	// failure with the same batch id, and a transport failure means the request
-	// may have been fully processed before the response was lost — so a
-	// component that records batch ids can deduplicate a redelivery instead of
-	// creating a second external record for every entity in it.
+	// BatchID identifies ONE DELIVERY of a batch. It is stable across the
+	// retries of that delivery and different for every other delivery.
+	//
+	// Stable across retries: the platform retries a transient push failure with
+	// the same batch id, and a transport failure means the request may have been
+	// fully processed before the response was lost — so a component that records
+	// batch ids can deduplicate a redelivery instead of creating a second external
+	// record for every entity in it.
+	//
+	// Different across deliveries: a later push of the same records (the next
+	// change to an entity, the next sweep pass, a re-run of a bulk sync) carries a
+	// new id, and its content may differ. A component that answered it from a
+	// window of recorded verdicts would drop the new state while the platform
+	// recorded it as delivered. So a dedup window keyed on BatchID is safe, and it
+	// protects retries only: recognising a record already created by an earlier
+	// delivery is the job of correlation and of the component's own
+	// adopt-existing path (see the package doc), never of the batch id.
 	BatchID string `json:"batch_id"`
 
 	// Entities are the entities to push, in the platform's push order.
