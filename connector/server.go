@@ -434,6 +434,13 @@ func validateBindings(bindings []Binding) (map[string]Binding, error) {
 // countingWriter wraps a transfer.Writer to track whether any record was
 // emitted, so the server can skip committing an empty batch (a no-change poll
 // or a no-op webhook must NOT produce an empty artifact every tick).
+//
+// It must override EVERY Write* method of transfer.Writer. One it does not
+// override is promoted from the embedded writer and writes without counting, so
+// a batch made only of that kind reads as empty and is dropped without a word.
+// WriteRelationshipType was exactly that gap until it was added here;
+// TestCountingWriter_CountsEveryWriteMethod walks the interface by reflection so
+// the next method added to transfer.Writer cannot reopen it.
 type countingWriter struct {
 	transfer.Writer
 	n int
@@ -457,6 +464,14 @@ func (c *countingWriter) WriteEdge(ctx context.Context, e transfer.Edge) error {
 
 func (c *countingWriter) WriteEntityType(ctx context.Context, t transfer.EntityTypeDef) error {
 	if err := c.Writer.WriteEntityType(ctx, t); err != nil {
+		return err
+	}
+	c.n++
+	return nil
+}
+
+func (c *countingWriter) WriteRelationshipType(ctx context.Context, t transfer.RelationshipTypeDef) error {
+	if err := c.Writer.WriteRelationshipType(ctx, t); err != nil {
 		return err
 	}
 	c.n++
