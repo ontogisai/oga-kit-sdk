@@ -1,0 +1,4 @@
+github.com/ontogisai/oga-kit-sdk v0.98.0-beta h1:AfsUpRvnojzP12sx4DoDRSmb/VC1qQW7X8J3Y3Qhhv4=
+github.com/ontogisai/oga-kit-sdk v0.98.0-beta/go.mod h1:i3Mx8AnO+70nrOaC00aEAm911YTwdJ9+QZjYWSQ0Vyo=
+golang.org/x/text v0.37.0 h1:Cqjiwd9eSg8e0QAkyCaQTNHFIIzWtidPahFWR83rTrc=
+golang.org/x/text v0.37.0/go.mod h1:a5sjxXGs9hsn/AJVwuElvCAo9v8QYLzvavO5z2PiM38=

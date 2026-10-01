@@ -46,14 +46,14 @@ Loaders never write to ArcadeDB directly. Records flow through a streaming `tran
 ```
 Loader sidecar                         Platform gateway              Storage (MinIO/S3)
 ─────────────────                      ────────────────              ──────────────────
-WriteVertex/WriteEntityType/...   →    (buffered in writer)
+WriteVertex/WriteEntityType/...   →    (in memory ≤ 700 KiB, else spooled to TMPDIR)
                                        (writer chooses transport)
                   ┌────────────────────────────────────────────────────────────┐
-                  │ Inline path (artifact ≤ 1 MiB):                            │
+                  │ Inline path (artifact ≤ 700 KiB):                          │
 Close()           │   loader.complete  with inline_body  ────────────►         │
                   │   (single MCP call)                                        │
                   ├────────────────────────────────────────────────────────────┤
-                  │ Presigned path (artifact > 1 MiB):                         │
+                  │ Presigned path (artifact > 700 KiB, read from the spool):  │
 Close()           │   loader.prepare_upload  ────►  (issues presigned URL)     │
                   │   PUT bytes  ──────────────────────────────────────►       │
                   │   loader.complete  with upload_token  ────────►            │
@@ -274,7 +274,9 @@ Loaders never trust `tenant_id` from a request body. The platform's gateway sets
 
 ## Memory ceiling guidance
 
-The writer is streaming above `transfer.InlineBodyLimit` (1 MiB); loader memory is bounded by what the kit's parser holds, not by what it has emitted.
+Above `transfer.InlineBodyLimit` (700 KiB) the writer spools the artifact to an unlinked temp file in `TMPDIR` and uploads it from there, holding only a 256 KiB write buffer and one encoded record in memory. Loader memory is therefore bounded by what the kit's parser holds, not by what it has emitted. The emitted bytes go to disk instead, so a sidecar needs a writable `TMPDIR` with room for the artifact (the platform mounts one at `/tmp`); a writer that cannot create its spool fails the write rather than falling back to memory.
+
+A writer that is abandoned instead of closed releases its spool through `transfer.Discarder` (`transfer.DiscardWriter(w)` calls it when `w` implements it). The SDK's connector and loader servers do this on every path that drops a writer, and a kit that builds its own writers outside those servers should defer it right after creating one — it is a no-op once `Close` has run. Because the spool is unlinked as soon as it is created, even a writer dropped without `Discard`, or a process that is killed, leaves no file behind — but a dropped writer's disk space is only returned when the garbage collector closes its descriptor, which is why the servers discard explicitly.
 
 For source files larger than `transfer.MultiPassThreshold` (5 MiB), kit authors should:
 

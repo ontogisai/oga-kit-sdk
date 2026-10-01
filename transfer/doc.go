@@ -27,8 +27,9 @@
 //
 // Most kits stream every entry in a single pass: parse the source,
 // call WriteVertex / WriteEdge / WriteEntityType, then Close. The
-// writer buffers in memory up to [InlineBodyLimit] (700 KiB) and switches
-// to a presigned-upload streaming path when the buffer fills.
+// writer keeps the body in memory up to [InlineBodyLimit] (700 KiB) and
+// commits it inline; past that it spools the body to an unlinked temp file
+// in [os.TempDir] and uploads it from there through the presigned path.
 //
 // Kits whose source format requires more than one pass over the input
 // (for example, building a vertex source-id → platform-id map in pass
@@ -39,8 +40,19 @@
 //
 // # Memory ceiling guidance
 //
-// The writer is streaming above [InlineBodyLimit]; loader memory is
-// bounded by what the kit's parser holds, not by what it has emitted.
+// Above [InlineBodyLimit] the writer holds a 256 KiB write buffer and one
+// encoded record, whatever the artifact's size, so loader memory is bounded
+// by what the kit's parser holds, not by what it has emitted. The emitted
+// bytes go to disk instead: a sidecar needs a writable TMPDIR with room for
+// the artifact (the platform mounts one at /tmp), and a writer that cannot
+// create its spool fails the write rather than falling back to memory.
+//
+// A writer that is abandoned instead of closed releases its spool through
+// [Discarder.Discard]; the SDK's connector and loader servers call it on
+// every path that drops a writer. Because the spool is unlinked as soon as
+// it is created, a writer dropped without Discard — or a process that is
+// killed — leaves no file behind either: the space returns when the
+// descriptor is closed or the process exits.
 // For source files larger than [MultiPassThreshold] (5 MiB) kit
 // authors should switch to [json.Decoder]-style streaming and a
 // [loader.StreamingLoaderHandler] so the parser stays bounded too.
