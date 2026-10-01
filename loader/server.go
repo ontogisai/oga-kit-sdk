@@ -337,6 +337,16 @@ func loadHandlerFunc(impl LoaderHandler, cfg *handlerConfig) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, "writer_factory_failed", err.Error())
 			return
 		}
+		// Release the writer on every exit that does not commit it: a Load,
+		// Plan or Pass error, a nil response or an empty plan all return
+		// before Close. After Close, Discard is a no-op (transfer.Discarder),
+		// so deferring it here covers exactly the abandoned paths, including
+		// any added later.
+		defer func() {
+			if err := transfer.DiscardWriter(writer); err != nil {
+				kitlog.Default().Warn("loader: releasing an uncommitted writer failed", "error", err)
+			}
+		}()
 		lc := &LoadContext{
 			Request:  req,
 			Transfer: writer,

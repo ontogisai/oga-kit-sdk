@@ -604,16 +604,35 @@ func (s *server) drain(ctx context.Context, b Binding, cursor string) string {
 	}
 }
 
+// discardUncommitted releases a writer the server will not commit. Every
+// server path defers it right after the writer factory returns, so it runs on
+// every exit: where the batch was committed, Close has already ended the
+// writer and Discard is a no-op by contract (transfer.Discarder); where the
+// writer was dropped — a handler error, or nothing emitted — it releases what
+// the writer holds, such as the temp file a large artifact spooled to.
+//
+// It is called on the factory's writer, never on countingWriter, which embeds
+// transfer.Writer and so hides Discard. A release failure is logged rather than
+// returned: the path that dropped the writer already has its own outcome, and
+// the batch itself is unaffected.
+func (s *server) discardUncommitted(w transfer.Writer, b Binding) {
+	if err := transfer.DiscardWriter(w); err != nil {
+		s.cfg.Logger.Warn("source connector: releasing an uncommitted writer failed",
+			"binding", b.ID, "error", err)
+	}
+}
+
 // runSync builds a writer, runs one Sync, and commits the batch on success.
 // On error the writer is dropped (no commit), so a partial batch is never
 // persisted and the next poll retries from the unchanged cursor. When Sync
 // emits no entity records the writer is dropped too — a no-change poll must
-// never commit an empty artifact.
+// never commit an empty artifact. A dropped writer is discarded.
 func (s *server) runSync(ctx context.Context, b Binding, cursor string) (*SyncResult, error) {
 	w, err := s.cfg.WriterFactory(ctx, b)
 	if err != nil {
 		return nil, fmt.Errorf("writer factory: %w", err)
 	}
+	defer s.discardUncommitted(w, b)
 	cw := &countingWriter{Writer: w}
 	res, syncErr := s.impl.Sync(ctx, b, cursor, &Emitter{Entities: cw, Timeseries: s.sink})
 	if syncErr != nil {
@@ -708,6 +727,7 @@ func (s *server) processWebhookSync(w http.ResponseWriter, r *http.Request, b Bi
 		http.Error(w, "writer factory: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer s.discardUncommitted(writer, b)
 	cw := &countingWriter{Writer: writer}
 	if herr := s.impl.HandleWebhook(r.Context(), b, payload, &Emitter{Entities: cw, Timeseries: s.sink}); herr != nil {
 		http.Error(w, "handle webhook: "+herr.Error(), http.StatusInternalServerError)
@@ -749,6 +769,7 @@ func (s *server) processWebhookAsync(ctx context.Context, job webhookJob) {
 			"binding", b.ID, "error", err)
 		return
 	}
+	defer s.discardUncommitted(writer, b)
 	cw := &countingWriter{Writer: writer}
 	if herr := s.impl.HandleWebhook(ctx, b, job.payload, &Emitter{Entities: cw, Timeseries: s.sink}); herr != nil {
 		// Drop the uncommitted writer — identical to the sync path, so a partial
