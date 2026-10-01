@@ -1,12 +1,15 @@
 package transfer_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -168,6 +171,62 @@ func TestHTTPCommitClient_PutBytes(t *testing.T) {
 	}
 	if string(gate.uploadBody) != `{"format":"ndjson"}` {
 		t.Errorf("uploaded body = %q, want %q", gate.uploadBody, `{"format":"ndjson"}`)
+	}
+}
+
+// The writer uploads a spooled artifact as an io.SectionReader, which net/http
+// cannot re-send on its own. A storage endpoint that answers 307 must still end
+// up with every byte at the redirect target — the bytes.Reader the writer used
+// before did, and the SectionReader did not until PutBytes set GetBody.
+func TestHTTPCommitClient_PutBytesFollowsRedirectWithSectionReader(t *testing.T) {
+	t.Parallel()
+	payload := bytes.Repeat([]byte("ndjson-line\n"), 100_000)
+	var landed []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /first", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		http.Redirect(w, r, "/second", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("PUT /second", func(w http.ResponseWriter, r *http.Request) {
+		landed, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	cc, _ := transfer.NewHTTPCommitClient(srv.URL, "tenant-A", "test-kit")
+
+	f, err := os.CreateTemp(t.TempDir(), "spool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	if _, err := f.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	body := io.NewSectionReader(f, 0, int64(len(payload)))
+	if err := cc.PutBytes(context.Background(), srv.URL+"/first", body, int64(len(payload))); err != nil {
+		t.Fatalf("PutBytes: %v", err)
+	}
+	if !bytes.Equal(landed, payload) {
+		t.Fatalf("redirect target received %d of %d bytes", len(landed), len(payload))
+	}
+}
+
+// Only a 2xx is an upload. A 3xx the client did not follow means nothing landed,
+// and must not be reported as success.
+func TestHTTPCommitClient_PutBytesNon2xxIsFailure(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusMultipleChoices, http.StatusNotModified, http.StatusForbidden, http.StatusInternalServerError} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(status)
+		}))
+		cc, _ := transfer.NewHTTPCommitClient(srv.URL, "tenant-A", "test-kit")
+		err := cc.PutBytes(context.Background(), srv.URL+"/put", strings.NewReader("x"), 1)
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(status)) {
+			t.Errorf("HTTP %d: err = %v, want a failure naming the status", status, err)
+		}
 	}
 }
 

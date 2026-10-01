@@ -547,14 +547,15 @@ func (w *bufferedWriter) Close(ctx context.Context) (*Receipt, error) {
 // presigned from the spool otherwise.
 func (w *bufferedWriter) commit(ctx context.Context) (*Receipt, error) {
 	if w.writeErr != nil {
-		return nil, fmt.Errorf("transfer: artifact not committed: %w", w.writeErr)
+		// writeErr already carries the "transfer:" prefix.
+		return nil, fmt.Errorf("artifact not committed: %w", w.writeErr)
 	}
 	hashHex := hex.EncodeToString(w.hash.Sum(nil))
 	if w.spool == nil {
 		return w.commitInline(ctx, w.buf.Bytes(), hashHex, w.size)
 	}
 	if err := w.spoolW.Flush(); err != nil {
-		return nil, fmt.Errorf("transfer: artifact not committed: flush artifact spool: %w", err)
+		return nil, fmt.Errorf("artifact not committed: transfer: flush artifact spool: %w", err)
 	}
 	return w.commitPresigned(ctx, io.NewSectionReader(w.spool, 0, w.size), hashHex, w.size)
 }

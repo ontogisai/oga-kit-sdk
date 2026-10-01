@@ -12,10 +12,12 @@ import (
 // nested values and floats; edges; and, every 50 records, an entity type, a
 // relationship type and a hierarchy entry.
 //
-// It is copied VERBATIM into the program that produced
-// testdata/golden-v0.98.0-beta.json against the released v0.98.0-beta writer —
-// keep the two identical, or the golden stops meaning anything. Map keys are
-// sorted by encoding/json, so the output depends only on n.
+// testdata/golden-recorder runs this exact function through the released
+// v0.98.0-beta writer to produce testdata/golden-v0.98.0-beta*.{json,ndjson}:
+// its record.sh copies this file in at run time, so the recorder cannot hold a
+// stale copy. Changing anything here means re-running
+// transfer/testdata/golden-recorder/record.sh and committing what it writes.
+// Map keys are sorted by encoding/json, so the output depends only on n.
 func writeGoldenRecords(ctx context.Context, w transfer.Writer, n int) error {
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("asset-%05d", i)

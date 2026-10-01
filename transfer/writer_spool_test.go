@@ -3,6 +3,8 @@ package transfer_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -214,6 +216,40 @@ func TestWriter_Discard(t *testing.T) {
 	}
 	if fc.CompleteCalls() != 1 {
 		t.Errorf("Complete calls = %d, want 1", fc.CompleteCalls())
+	}
+}
+
+// The spooled path through the REAL HTTPCommitClient, not FakeCommitClient:
+// prepare_upload, a presigned PUT of the section reader over the spool, then
+// complete. FakeCommitClient reads its body in one call, so it cannot show how
+// net/http treats the reader; this test does.
+func TestWriter_SpooledArtifactThroughHTTPCommitClient(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	g, _ := loadGolden(t)
+	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "golden-kit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := transfer.NewDataWriter(cc, "golden-kit")
+	if err := writeGoldenRecords(context.Background(), w, g.Cases[1].Records); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	r, err := w.Close(context.Background())
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if r.Mode != transfer.TransportPresigned || gate.uploadCalls != 1 || gate.completeCalls != 1 {
+		t.Fatalf("mode=%s uploads=%d completes=%d, want one presigned upload and one complete",
+			r.Mode, gate.uploadCalls, gate.completeCalls)
+	}
+	sum := sha256.Sum256(gate.uploadBody)
+	if got := hex.EncodeToString(sum[:]); got != g.Cases[1].ContentHash || int64(len(gate.uploadBody)) != g.Cases[1].Bytes {
+		t.Errorf("storage received %d bytes hashing to %s; golden is %d bytes, %s",
+			len(gate.uploadBody), got, g.Cases[1].Bytes, g.Cases[1].ContentHash)
+	}
+	if r.ContentHash != g.Cases[1].ContentHash {
+		t.Errorf("receipt hash %s, golden %s", r.ContentHash, g.Cases[1].ContentHash)
 	}
 }
 

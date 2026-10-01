@@ -134,6 +134,18 @@ func (c *HTTPCommitClient) PrepareUpload(ctx context.Context) (*PrepareUploadRes
 }
 
 // PutBytes streams the artifact body to the presigned PUT URL.
+//
+// The body must be re-sendable, because net/http re-sends it in two cases: to
+// follow a 307/308 redirect, and to retry a request a dead pooled connection or a
+// refused HTTP/2 stream never let it write. It does that through
+// [http.Request.GetBody], which net/http fills in only for bytes and strings
+// readers. The default writer hands over an [io.SectionReader] over its spool
+// file, so GetBody is set here to re-read that section from its start. Without
+// it, a redirected PUT came back as the bare 307 with nothing uploaded.
+//
+// Only a 2xx response is success. A 3xx that was not followed means the bytes
+// did not land, and reporting it as success would let Close go on to commit an
+// artifact that is not in storage.
 func (c *HTTPCommitClient) PutBytes(ctx context.Context, uploadURL string, body io.Reader, size int64) error {
 	if uploadURL == "" {
 		return errors.New("transfer.PutBytes: uploadURL is required")
@@ -143,13 +155,18 @@ func (c *HTTPCommitClient) PutBytes(ctx context.Context, uploadURL string, body 
 		return fmt.Errorf("build presigned PUT request: %w", err)
 	}
 	req.ContentLength = size
+	if sr, ok := body.(*io.SectionReader); ok && req.GetBody == nil {
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(io.NewSectionReader(sr, 0, size)), nil
+		}
+	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("presigned PUT: %w", err)
 	}
 	defer drainAndClose(resp.Body)
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		errBody, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("presigned PUT failed: HTTP %d %s — %s",
 			resp.StatusCode, resp.Status, strings.TrimSpace(string(errBody)))

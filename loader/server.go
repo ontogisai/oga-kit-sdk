@@ -163,6 +163,20 @@ func WithLoaderKind(kind transfer.LoadKind) HandlerOption {
 type handlerConfig struct {
 	writerFactory WriterFactory
 	kind          transfer.LoadKind
+	// logger receives the handler's own warnings. ListenAndServe sets it to
+	// ServerConfig.Logger; a bare Handler uses kitlog.Default().
+	logger *slog.Logger
+}
+
+// withLogger points the handler's own warnings at logger. Unexported:
+// ListenAndServe applies it from ServerConfig.Logger so a kit's configured
+// logger sees everything the server logs.
+func withLogger(logger *slog.Logger) HandlerOption {
+	return func(c *handlerConfig) {
+		if logger != nil {
+			c.logger = logger
+		}
+	}
 }
 
 func newHandlerConfig(opts []HandlerOption) *handlerConfig {
@@ -172,6 +186,7 @@ func newHandlerConfig(opts []HandlerOption) *handlerConfig {
 		writerFactory: func(_ context.Context, _ transfer.LoadKind, _ *LoadRequest) (transfer.Writer, error) {
 			return nil, errors.New("loader.Handler: no transfer writer factory configured (use WithWriterFactory)")
 		},
+		logger: kitlog.Default(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -264,7 +279,7 @@ func ListenAndServe(ctx context.Context, cfg *ServerConfig, impl LoaderHandler) 
 
 	server := &http.Server{
 		Addr:              ":" + strings.TrimPrefix(cfg.Port, ":"),
-		Handler:           Handler(impl, cfg.HandlerOptions...),
+		Handler:           Handler(impl, append([]HandlerOption{withLogger(cfg.Logger)}, cfg.HandlerOptions...)...),
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -344,7 +359,7 @@ func loadHandlerFunc(impl LoaderHandler, cfg *handlerConfig) http.HandlerFunc {
 		// any added later.
 		defer func() {
 			if err := transfer.DiscardWriter(writer); err != nil {
-				kitlog.Default().Warn("loader: releasing an uncommitted writer failed", "error", err)
+				cfg.logger.Warn("loader: releasing an uncommitted writer failed", "error", err)
 			}
 		}()
 		lc := &LoadContext{
