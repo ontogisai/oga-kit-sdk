@@ -1,0 +1,216 @@
+package agent
+
+import (
+	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
+)
+
+// DomainAgentProfile contains the full configuration for a domain agent,
+// loaded from the agent profile YAML file.
+type DomainAgentProfile struct {
+	// AgentID is the unique identifier for this agent instance.
+	AgentID string `yaml:"agent_id"`
+
+	// Name is the agent's display name.
+	Name string `yaml:"name"`
+
+	// Description is a human-readable description.
+	Description string `yaml:"description"`
+
+	// Version is the agent version.
+	Version string `yaml:"version"`
+
+	// Port is the HTTP port the agent listens on.
+	Port string `yaml:"port"`
+
+	// Category classifies the agent (e.g., "platform_addon", "customer_extension").
+	Category string `yaml:"category"`
+
+	// Domain is the vertical domain (e.g., "built-environment").
+	Domain string `yaml:"domain"`
+
+	// Skills lists the agent's capabilities.
+	Skills []SkillDef `yaml:"skills"`
+
+	// ProactiveReasoning configures proactive behavior.
+	ProactiveReasoning *ProactiveConfig `yaml:"proactive_reasoning,omitempty"`
+
+	// Capabilities lists named capability groups with their tools.
+	Capabilities []CapabilityDef `yaml:"capabilities,omitempty"`
+
+	// PBACBoundary defines access control limits.
+	PBACBoundary *PBACBoundary `yaml:"pbac_boundary,omitempty"`
+
+	// EventSubscriptions lists the ontology entity types whose mutations wake
+	// this agent (matched against ingestion.resolved.{tenant}.{entity_type}).
+	EventSubscriptions []EventSubscription `yaml:"event_subscriptions,omitempty"`
+
+	// ReactiveDelegation configures whether this agent's REACTIVE surface
+	// (interactive chat + the [Investigate] deep link) may delegate to other
+	// platform agents. Default opt-out: absent → the agent does not delegate.
+	// The proactive proposal path is never affected (palette purity, Property 5).
+	// See OGA-419.
+	ReactiveDelegation *ReactiveDelegationConfig `yaml:"reactive_delegation,omitempty"`
+}
+
+// ReactiveDelegationConfig gates reactive agent-delegation capabilities on a
+// domain agent. It is consumed ONLY by the reactive stream handler
+// (NewDefaultStreamHandler); the proactive proposal palette never reads it.
+type ReactiveDelegationConfig struct {
+	// KnowledgeAgent, when true, adds the reactive `ask_knowledge_agent`
+	// capability so the agent's ReAct planner may stream the platform Knowledge
+	// Agent's grounded answer in for broad knowledge-graph questions outside its
+	// own tools. Default false (opt-out). The downstream KA must be reachable at
+	// the gateway name "knowledge-agent" and PBAC level (a) must allow the call;
+	// otherwise the delegation degrades to a failed observation and the loop
+	// continues. See OGA-419 G3.
+	KnowledgeAgent bool `yaml:"knowledge_agent,omitempty"`
+}
+
+// SkillDef defines a skill in the agent profile.
+type SkillDef struct {
+	ID          string   `yaml:"id"`
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description"`
+	Tags        []string `yaml:"tags,omitempty"`
+}
+
+// ProactiveConfig configures proactive reasoning behavior.
+type ProactiveConfig struct {
+	SystemPrompt         string   `yaml:"system_prompt"`
+	ToolCategories       []string `yaml:"tool_categories,omitempty"`
+	ContextGatherTimeout string   `yaml:"context_gather_timeout,omitempty"`
+	ReasoningTimeout     string   `yaml:"reasoning_timeout,omitempty"`
+
+	// PlanningContext is OPTIONAL planner-safe domain vocabulary composed into
+	// the tool-planning prompt (PlanningSystemPrompt). Unlike SystemPrompt —
+	// which is written for proposal generation (prose output: a one-sentence
+	// description + a short reasoning) and must NOT leak into the JSON planner —
+	// this field carries only neutral domain hints (entity-type names,
+	// terminology, equipment-class vocabulary) that help the planner pick the
+	// right tools. Empty/absent (the common case) → the planner prompt has no
+	// domain block, just the neutral JSON-mandating template. Composing the
+	// proposal-framed SystemPrompt into the planner caused the model to reply
+	// in prose instead of JSON, failing plan parsing (OGA-387).
+	PlanningContext string `yaml:"planning_context,omitempty"`
+
+	// GroundingStrategy is the optional declarative tool-call plan.
+	// When non-empty, DefaultRuntime.HandleStream uses GroundingStrategyPlanner
+	// (deterministic, no LLM planning call). When empty, falls back to
+	// LLMToolPlanner (dynamic per-request planning). See OGA-303.
+	GroundingStrategy []GroundingStep `yaml:"grounding_strategy,omitempty"`
+
+	// Actions is the declarative catalog of proactive actions this agent may
+	// propose. Each action is the contract between the reasoning LLM and the
+	// platform's execution + persistence layer. The reasoning LLM selects one
+	// action from the candidate catalog (or declines) — the catalog is offered
+	// as a discriminated decision schema, never a rule-based gate. See
+	// proactive-action-handling design "Action Schema". (OGA-317)
+	Actions []ActionDef `yaml:"actions,omitempty"`
+
+	// Routing is the primary delivery target for proposals this agent submits.
+	// REQUIRED when Actions is non-empty (validated at load → OGA-DKIT-VAL-1041)
+	// so a misconfigured kit fails at install rather than at runtime. The
+	// proactive handler packs it into ActionProposal.Routing for every proposal.
+	Routing *RoutingDef `yaml:"routing,omitempty"`
+
+	// EscalationPolicy declares where a proposal escalates when no operator
+	// responds within Timeout, plus the notification hold window. Optional —
+	// when absent, proposals carry no escalation routing and rely on platform
+	// defaults. (OGA-317)
+	EscalationPolicy *EscalationPolicyDef `yaml:"escalation_policy,omitempty"`
+}
+
+// GroundingStep is one step in a kit-declared grounding strategy. Each step
+// runs a specific MCP tool with named-placeholder substitution from prior step
+// results. Conditional execution (When) and required-step semantics (Required)
+// preserve the kit author's declarative intent.
+type GroundingStep struct {
+	// Name is the human-readable identifier and placeholder key.
+	Name string `yaml:"name"`
+
+	// Tool is the MCP tool to invoke (e.g., "kg_search").
+	Tool string `yaml:"tool"`
+
+	// Arguments is the parameter map passed to the tool. Values may contain
+	// {placeholder} tokens resolved from prior step results.
+	Arguments map[string]any `yaml:"arguments,omitempty"`
+
+	// Condition is a CEL expression evaluated at runtime. When false, the
+	// step is skipped (a tool_call event with Skipped:true is emitted).
+	// "true" / empty / missing → always run. "false" → always skip.
+	// Other CEL expressions → not yet evaluated (treated as skip with a
+	// "CEL evaluation not yet implemented" reason). Full CEL integration
+	// is tracked as a follow-up.
+	Condition string `yaml:"condition,omitempty"`
+
+	// Required marks this step as fail-fast: a tool error stops the pipeline
+	// with task/status{failed}. Non-required steps log and continue.
+	Required bool `yaml:"required,omitempty"`
+
+	// MaxResults caps the number of results returned (for tools that produce
+	// JSON arrays). 0 = no cap.
+	MaxResults int `yaml:"max_results,omitempty"`
+
+	// DependsOn references a prior step by name. Resolved to step index
+	// at planner time.
+	DependsOn string `yaml:"depends_on,omitempty"`
+}
+
+// CapabilityDef defines a named capability with its tools.
+type CapabilityDef struct {
+	Name  string   `yaml:"name"`
+	Tools []string `yaml:"tools"`
+}
+
+// PBACBoundary defines the access control boundary for the agent.
+type PBACBoundary struct {
+	AllowedEntityTypes []string `yaml:"allowed_entity_types,omitempty"`
+	AllowedOperations  []string `yaml:"allowed_operations,omitempty"`
+	DeniedOperations   []string `yaml:"denied_operations,omitempty"`
+}
+
+// EventSubscription declares an ontology entity type whose mutations wake this
+// agent. The Event Router matches proactive agents against
+// ingestion.resolved.{tenant}.{entity_type} events by exact EntityType; the
+// optional On filter restricts to specific mutations. EntityType is validated
+// against the tenant's active ontology at kit-install time
+// (OGA-DKIT-VAL-1040). Replaces the legacy {topic, action} form (OGA-317 C4).
+type EventSubscription struct {
+	// EntityType is the ontology entity type whose mutations wake the agent
+	// (e.g., "EntityAnomalyEvent", "brick_Equipment"). Case-sensitive; must
+	// exist in the active ontology.
+	EntityType string `yaml:"entity_type"`
+
+	// On optionally restricts the subscription to specific mutations — any of
+	// "created", "updated", "deleted". Empty means all mutations.
+	On []string `yaml:"on,omitempty"`
+}
+
+// LoadDomainAgentProfile reads and parses an agent profile from a YAML file.
+func LoadDomainAgentProfile(path string) (*DomainAgentProfile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read agent profile %s: %w", path, err)
+	}
+
+	var profile DomainAgentProfile
+	if err := yaml.Unmarshal(data, &profile); err != nil {
+		return nil, fmt.Errorf("parse agent profile %s: %w", path, err)
+	}
+
+	if profile.Name == "" {
+		return nil, fmt.Errorf("agent profile %s: name is required", path)
+	}
+	if profile.Port == "" {
+		profile.Port = "8200"
+	}
+
+	if err := validateActions(&profile); err != nil {
+		return nil, fmt.Errorf("agent profile %s: %w", path, err)
+	}
+
+	return &profile, nil
+}

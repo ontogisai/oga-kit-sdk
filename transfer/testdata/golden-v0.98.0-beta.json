@@ -1,0 +1,23 @@
+{
+  "sdk_version": "v0.98.0-beta",
+  "kind": "data",
+  "kit_id": "golden-kit",
+  "cases": [
+    {
+      "name": "inline",
+      "records": 12,
+      "mode": "inline",
+      "bytes": 4556,
+      "entry_count": 26,
+      "content_hash": "97cc6c8132be5440b3b197d29f45a4b2a6eae9fa198c9317aaec15c82f0947ee"
+    },
+    {
+      "name": "presigned",
+      "records": 4000,
+      "mode": "presigned",
+      "bytes": 1474487,
+      "entry_count": 8239,
+      "content_hash": "b5a5168cb2bc9c858fdee1d78a98fddd299aaba3113bcc27e1ae0888205e1796"
+    }
+  ]
+}

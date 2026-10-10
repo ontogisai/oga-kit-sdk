@@ -1,0 +1,690 @@
+# oga-kit-sdk
+
+Domain-agnostic SDK for ONTOGIS AI Platform kit development.
+
+[![CI](https://github.com/ontogisai/oga-kit-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/ontogisai/oga-kit-sdk/actions/workflows/ci.yml)
+
+## Overview
+
+`oga-kit-sdk` is the public contract for all domain kit development on the ONTOGIS AI Platform. It contains:
+
+- **Loader contract** for ontology + data loaders (HTTP sidecars on `kind: ontology|data`)
+- **Source connector contract** (`connector/`) for continuous inbound ingress — poll and/or webhook sidecars that keep the graph current
+- **Egress contract** (`egress/`) for outbound sync — sidecars that push graph entities to an external system of record and report its record id, and optionally retract a record when the graph stops holding it (`EntityWithdrawer`, `RelationshipWithdrawer`)
+- **Streaming transfer pipeline** (`transfer.Writer`) for shipping load artifacts to the platform via presigned-URL handoff
+- **Ontology registrar** convenience layer for kit authors who think in "register a batch of types" terms
+- **Agent runtime chassis** (A2A-compliant HTTP server with LLM + MCP tool access)
+- **Platform Gateway client** (single endpoint for all platform services)
+- **Token management** (sliding renewal, atomic rotation, credential watching)
+- **Testing utilities** (mock MCP server, mock loader sidecar, fake commit client)
+
+Zero dependencies on `oga-platform`. Kit developers depend only on this module.
+
+## Installation
+
+```bash
+go get github.com/ontogisai/oga-kit-sdk@latest
+```
+
+## Loader sidecars
+
+Loader sidecars run as containers inside a kit's tar.gz bundle. The platform calls them over HTTP using the contract in `loader/`. The platform recognises **two kinds** of loaders, distinguished by the `kind:` field on the loader spec in your kit's `manifest.yaml`:
+
+| Kind | When invoked | Produces |
+|------|-------------|----------|
+| `ontology` | At kit install time, by the `domain-kit-installer` Temporal worker | Entity / relationship type definitions persisted via the platform's ontology activator |
+| `data` | At `oga-admin import` time, by `DataImportWorkflow` | Vertices and edges persisted via the platform's batched ingest |
+
+The HTTP contract is identical for both kinds — the same `LoaderHandler` interface, the same `POST /load` and `GET /jobs/{id}` endpoints. The kind only changes **when** the platform calls the loader and **what kind of work** the kit author is expected to do inside the handler.
+
+When the field is missing from a kit manifest, the platform defaults to `data`. Always set it explicitly on new kits.
+
+## How records reach the platform
+
+Loaders never write to ArcadeDB directly. Records flow through a streaming `transfer.Writer` that handles upload + commit:
+
+```
+Loader sidecar                         Platform gateway              Storage (MinIO/S3)
+─────────────────                      ────────────────              ──────────────────
+WriteVertex/WriteEntityType/...   →    (in memory ≤ 700 KiB, else spooled to TMPDIR)
+                                       (writer chooses transport)
+                  ┌────────────────────────────────────────────────────────────┐
+                  │ Inline path (artifact ≤ 700 KiB):                          │
+Close()           │   loader.complete  with inline_body  ────────────►         │
+                  │   (single MCP call)                                        │
+                  ├────────────────────────────────────────────────────────────┤
+                  │ Presigned path (artifact > 700 KiB, read from the spool):  │
+Close()           │   loader.prepare_upload  ────►  (issues presigned URL)     │
+                  │   PUT bytes  ──────────────────────────────────────►       │
+                  │   loader.complete  with upload_token  ────────►            │
+                  └────────────────────────────────────────────────────────────┘
+
+Returns:  receipt (job_id, content_hash, mode)
+```
+
+The platform owns the job ledger; both ontology and data loads are uniformly async. The kit's caller (the install workflow for ontology, the import workflow for data) polls `loader.status` until terminal.
+
+### Full-snapshot feeds: asserting edge completeness
+
+By default an artifact's edges are a **partial batch** — the platform never infers that a relationship ended because your artifact stopped carrying it. That is right for an incremental loader, and wrong for a feed whose export is the system of record for the assets it carries: a relationship you drop would survive in the graph forever.
+
+A full-snapshot connector opts in on the writer:
+
+```go
+w := transfer.NewDataWriter(client, "example-kit",
+    transfer.WithEdgeCompleteness(transfer.EdgeCompleteness{
+        Mode: transfer.EdgeCompletenessPerSource,
+        GovernedPredicates: []string{
+            "feeds", "hasLocation", "hasPoint", "hasPart",
+            "controls", "meters", "hasSubMeter",
+        },
+    }))
+```
+
+This asserts: *for every vertex this artifact carries, the edges it carries from that vertex under the governed predicates are the complete set — including the empty set.* The platform closes a live edge whose source is one of those vertices, whose predicate is governed, and which the artifact does not carry. Closure is soft (`is_deleted` + `tx_to`), so an as-of traversal before the publish still resolves.
+
+`GovernedPredicates` bounds the assertion and is **required**. A source routinely also carries edges written by another feed, the MCP tools, or the platform itself; those are only left alone because they are not in your vocabulary. An empty list is rejected rather than read as "all predicates".
+
+⚠️ **Two obligations the platform cannot verify.**
+
+1. **Collapse inverse pairs before you emit.** If the upstream declares a relationship from both ends (`feeds` on the damper, `isFedBy` on the AHU), that is *one* canonical edge. Emit it under a single canonical source whichever end declared it — the platform honours the submitted set verbatim and never re-derives an owner from the declaring asset. Without the collapse, you will close edges the other endpoint still declares.
+2. **One artifact per snapshot.** A source's edges must be in the *same* artifact as its vertex. Splitting one logical export across two artifacts makes each one's vertex set partial, and the first would close the edges the second carries.
+
+The platform applies a **volume guard**: a publish that would close an implausible number of edges is refused whole (nothing applied) and alerts an operator, who can clear a genuinely large removal. Expect a refused sync if your export truncates.
+
+#### Operator-driven imports: declare the vocabulary, let the operator assert
+
+The writer option above is right for a **connector**, whose author knows every cycle is a full export. It is wrong for a **loader driven by an operator data import**, where the same loader handles a complete export one day and a partial top-up the next — only the person who chose the file knows which, and hard-coding the assertion would close live edges on the partial run.
+
+So the two halves are split by who knows the answer. The kit declares the predicates its feed **owns**; the operator asserts, per run, whether **this** artifact is complete (a checkbox in the console, `--full-snapshot` on `oga-admin import`). Wire it with `WithCommitClient`:
+
+```go
+cfg := &loader.ServerConfig{
+    Port: "8400",
+    HandlerOptions: []loader.HandlerOption{
+        loader.WithCommitClient(commitClient, "my-kit",
+            loader.WithGovernedPredicates(myFeedPredicates()...)),
+        loader.WithLoaderKind(transfer.KindData),
+    },
+}
+```
+
+The chassis reads the operator's assertion off the reserved `config` keys (`oga.full_snapshot`, and an optional `oga.governed_predicates` to scope tighter for one run) and stamps the header for you. With no assertion the artifact is byte-identical to one written without any of this, so nothing changes for an ordinary incremental import.
+
+Two things worth knowing:
+
+- **Derive your predicate list, do not retype it.** Build it from whatever already defines your feed's vocabulary and add a test that fails when the two drift. A predicate you emit but do not declare is silently ungoverned — its stale edges are never closed. Safe, but a bug, and the platform will report it as predicate drift.
+- **Declaring a vocabulary asserts nothing on its own.** Without `oga.full_snapshot=true` on the request, no assertion is written. A loader that declares none refuses every assertion and says so with a WARN at startup.
+
+## Single-pass loader (most kits)
+
+For source files under 5 MiB or formats that don't need cross-pass state, implement `loader.LoaderHandler` and stream every record in one pass:
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "os"
+
+    "github.com/ontogisai/oga-kit-sdk/loader"
+    "github.com/ontogisai/oga-kit-sdk/transfer"
+)
+
+type myDataLoader struct{}
+
+func (l *myDataLoader) Load(ctx context.Context, lc *loader.LoadContext) (*loader.LoadResponse, error) {
+    w := lc.Transfer
+    raw, _ := os.ReadFile(strings.TrimPrefix(lc.Request.SourceURI, "file://"))
+
+    var file struct {
+        Entities      []struct{ ID, Type, Label string; Properties map[string]any } `json:"entities"`
+        Relationships []struct{ Source, Target, Type string }                       `json:"relationships"`
+    }
+    json.Unmarshal(raw, &file)
+
+    for _, e := range file.Entities {
+        if err := w.WriteVertex(ctx, transfer.Vertex{
+            ID: e.ID, EntityType: e.Type, Label: e.Label, Properties: e.Properties,
+        }); err != nil {
+            return nil, err
+        }
+    }
+    for _, r := range file.Relationships {
+        if err := w.WriteEdge(ctx, transfer.Edge{
+            SourceID: r.Source, TargetID: r.Target, RelationshipType: r.Type,
+        }); err != nil {
+            return nil, err
+        }
+    }
+
+    return &loader.LoadResponse{Status: loader.StatusRunning}, nil
+    // SDK closes the writer; receipt fields land in the response
+    // automatically. The platform-issued job_id is what callers poll.
+}
+
+// (Job, Formats, Health implementations omitted for brevity.)
+
+func main() {
+    cc, _ := transfer.NewHTTPCommitClient(
+        os.Getenv("PLATFORM_GATEWAY_URL"),
+        os.Getenv("OGA_TENANT_ID"),
+        "my-kit",
+    )
+    cfg := &loader.ServerConfig{
+        Port: "8400",
+        HandlerOptions: []loader.HandlerOption{
+            // Builds the writer for you. Add
+            // loader.WithGovernedPredicates(...) if this loader serves
+            // full-snapshot imports (see "Operator-driven imports" above).
+            loader.WithCommitClient(cc, "my-kit"),
+            loader.WithLoaderKind(transfer.KindData),
+        },
+    }
+    loader.ListenAndServe(context.Background(), cfg, &myDataLoader{})
+}
+```
+
+The kit handler:
+
+- Receives a `*loader.LoadContext` carrying the request and a fresh `transfer.Writer`.
+- Streams records via `WriteVertex` / `WriteEdge` / `WriteEntityType` / `WriteHierarchy`.
+- Returns its `LoadResponse` — the SDK closes the writer for you and merges the platform-issued `job_id` and stats into the response before sending it on the wire.
+
+## Multi-pass loader (large files, > 5 MiB)
+
+When source data is too large to hold a parsed in-memory representation, implement `loader.StreamingLoaderHandler` to walk the input multiple times. Typical pattern: pass 1 emits vertices and builds a source-id → platform-id map; pass 2 emits edges with resolved IDs:
+
+```go
+type myStreamingLoader struct {
+    idMap map[string]string
+}
+
+// Load is required by the interface but never called when Plan / Pass exist.
+func (l *myStreamingLoader) Load(_ context.Context, _ *loader.LoadContext) (*loader.LoadResponse, error) {
+    return nil, errors.New("use Plan/Pass instead")
+}
+
+func (l *myStreamingLoader) Plan(_ context.Context, _ *loader.LoadContext) (*loader.LoadPlan, error) {
+    return &loader.LoadPlan{
+        Passes: []loader.PassSpec{
+            {Name: "vertices", EntryKinds: []string{"vertex"}, Description: "Stream entities"},
+            {Name: "edges",    EntryKinds: []string{"edge"},   Description: "Stream relationships"},
+        },
+    }, nil
+}
+
+func (l *myStreamingLoader) Pass(ctx context.Context, lc *loader.LoadContext, p *loader.PassSpec) error {
+    f, err := os.Open(strings.TrimPrefix(lc.Request.SourceURI, "file://"))
+    if err != nil { return err }
+    defer f.Close()
+
+    dec := json.NewDecoder(f)
+    switch p.Name {
+    case "vertices":
+        l.idMap = make(map[string]string, 50_000)
+        for {
+            var v sourceEntity
+            if err := dec.Decode(&v); errors.Is(err, io.EOF) { break }
+            l.idMap[v.SourceID] = v.PlatformID()
+            if err := lc.Transfer.WriteVertex(ctx, v.toVertex()); err != nil { return err }
+        }
+    case "edges":
+        for {
+            var r sourceRelationship
+            if err := dec.Decode(&r); errors.Is(err, io.EOF) { break }
+            edge := r.toEdge(l.idMap)
+            if err := lc.Transfer.WriteEdge(ctx, edge); err != nil { return err }
+        }
+    }
+    return nil
+}
+```
+
+The SDK detects the streaming variant via type assertion and drives the Plan / Pass loop instead of calling Load. The same `lc.Transfer` is shared across all passes.
+
+## Ontology loader convenience
+
+For ontology loaders the `ontology` package wraps the writer with a "register a batch of types" surface:
+
+```go
+import "github.com/ontogisai/oga-kit-sdk/ontology"
+
+func (l *myOntologyLoader) Load(ctx context.Context, lc *loader.LoadContext) (*loader.LoadResponse, error) {
+    types := buildEntityTypeDefs(...)
+    hierarchy := buildHierarchy(...)
+
+    reg := ontology.NewRegistrar(lc.Transfer)
+    if err := reg.RegisterTypes(ctx, ontology.RegisterTypesRequest{
+        EntityTypes:   types,
+        TypeHierarchy: hierarchy,
+    }); err != nil {
+        return failed(err)
+    }
+    return &loader.LoadResponse{Status: loader.StatusRunning}, nil
+}
+```
+
+The registrar leaves the underlying writer open — the SDK closes it once at request end, and the platform-side dispatcher does atomic DDL + EntityTypeDef + activation.
+
+## Tenant boundary
+
+Loaders never trust `tenant_id` from a request body. The platform's gateway sets the `X-Tenant-ID` header authoritatively when starting the loader sidecar; the SDK's HTTP server reads it from the header on every `POST /load`, validates any body claim matches, and overwrites `LoadRequest.TenantID` with the header value before invoking the kit handler.
+
+## Memory ceiling guidance
+
+Above `transfer.InlineBodyLimit` (700 KiB) the writer spools the artifact to an unlinked temp file in `TMPDIR` and uploads it from there, holding only a 256 KiB write buffer and one encoded record in memory. Loader memory is therefore bounded by what the kit's parser holds, not by what it has emitted. The emitted bytes go to disk instead, so a sidecar needs a writable `TMPDIR` with room for the artifact (the platform mounts one at `/tmp`); a writer that cannot create its spool fails the write rather than falling back to memory.
+
+A writer that is abandoned instead of closed releases its spool through `transfer.Discarder` (`transfer.DiscardWriter(w)` calls it when `w` implements it). The SDK's connector and loader servers do this on every path that drops a writer, and a kit that builds its own writers outside those servers should defer it right after creating one — it is a no-op once `Close` has run. Because the spool is unlinked as soon as it is created, even a writer dropped without `Discard`, or a process that is killed, leaves no file behind — but a dropped writer's disk space is only returned when the garbage collector closes its descriptor, which is why the servers discard explicitly.
+
+For source files larger than `transfer.MultiPassThreshold` (5 MiB), kit authors should:
+
+1. Switch from `os.ReadFile` + `json.Unmarshal` to `json.Decoder` streaming
+2. Implement `StreamingLoaderHandler` so the parser's working set stays bounded across passes
+
+The SDK has no opinion about how the kit parses — only about how records leave the loader. The 5 MiB constant is a guideline, not an enforced threshold.
+
+## Source connectors
+
+A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding.
+
+Declare the bindings in the kit manifest and collapse them to the runtime mode with `connector.ModeFromStrings`:
+
+```yaml
+source_connectors:
+  - name: my-sync
+    bindings:
+      - id: upstream-feed
+        external_system: upstream
+        source_type: my_snapshot
+        modes: [webhook, poll]        # a LIST in the manifest…
+```
+
+```go
+// …one IngressMode at runtime. Use the SDK's resolver rather than writing your
+// own: the platform provisions ingress from the manifest, so a connector that
+// disagrees about what a declared mode means serves no route for half of it and
+// silently 404s every delivery.
+b.Mode = connector.ModeFromStrings(spec.Modes)
+```
+
+### Webhook processing: sync (default) or async
+
+```go
+cfg := &connector.Config{
+    Port:          port,
+    WriterFactory: factory,
+    WebhookMode:   connector.WebhookAsync,   // opt in
+    WebhookQueueDepth: 16,                   // optional; 16 is the default
+}
+```
+
+| | `WebhookSync` (default) | `WebhookAsync` |
+|---|---|---|
+| Response | after the handler, reflecting its outcome | `202` **before** the handler runs |
+| Handler error | becomes a 5xx → the provider retries | can only be logged |
+| Full queue | n/a | `429` (never a silent drop) |
+| Use when | the work fits comfortably in the request | a download / large parse risks the ingress proxy's 30s read timeout |
+
+**⚠️ Async moves retry ownership to your connector.** Once `202` is sent the provider considers the delivery accepted, so a later failure is unreportable. Choose async only if your connector is either safe to lose a delivery — a full-snapshot connector is, because the next trigger re-reads everything and repairs the gap — or owns its own retry and dedupe. Your handler must also tolerate running *after* the response was written, so do not capture anything request-scoped.
+
+This is a Go field rather than a manifest key on purpose: whether ACK-before-process is safe is a property of your handler's code, so it belongs with the code and not somewhere an operator could flip it without touching the handler that has to satisfy it.
+
+The `connectPending` gate applies in both modes — a delivery arriving before the connector's first `Connect` attempt completes gets `503`, so the provider retries rather than the delivery being accepted and lost.
+
+### Rejecting a malformed payload with `400`
+
+Implement `connector.PayloadValidator` and a body you cannot accept is answered `400` **before** the delivery is queued:
+
+```go
+func (c *MyConnector) ValidateWebhookPayload(_ context.Context, _ connector.Binding, payload []byte) error {
+    var n Notification
+    if err := json.Unmarshal(payload, &n); err != nil {
+        return fmt.Errorf("invalid notification json: %w", err)
+    }
+    if strings.TrimSpace(n.PresignedURL) == "" {
+        return errors.New("presigned_url is required")
+    }
+    return nil
+}
+```
+
+**An async connector should take this.** It is the one class of failure async mode would otherwise hide: without a validator a malformed body gets `202`, so the upstream team debugs a silent failure holding a success status. Sync connectors gain from it too — a handler cannot tell "your payload is bad" from "my downstream broke", so it reports both as `500`.
+
+| | no validator | with validator |
+|---|---|---|
+| async, malformed body | `202`, then logged | **`400`**, never queued |
+| sync, malformed body | `500` (handler error) | **`400`** |
+
+Three constraints:
+
+- **Keep it cheap and side-effect free.** It runs inline in the request, ahead of the queue. Doing I/O here — resolving the payload's URL, calling the external system — reintroduces exactly the request-timeout exposure async mode exists to remove, while looking like validation.
+- **Return an error only when the payload itself is unacceptable.** For a transient condition return `nil` and let the handler deal with it: a `400` tells the caller to change its request, which is wrong advice for a fault that would clear on retry.
+- **Your handler still validates.** The interface is optional, so the handler is the layer that must hold regardless.
+
+It runs *after* the `connectPending` gate, so a delivery arriving during the boot window is still a retryable `503` rather than a `400` the caller would never retry. Distinct from `ValidationHandler`, which answers the provider's subscribe-time challenge on the webhook `GET` and carries no payload.
+
+### Extra routes
+
+Needing one more endpoint should not cost you the whole contract:
+
+```go
+cfg.ExtraRoutes = map[string]http.Handler{
+    "POST /trigger": triggerHandler,
+    "GET /metrics":  promHandler,
+}
+```
+
+A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`) is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
+
+### Fetching a published artifact
+
+When the upstream pushes a pointer rather than the payload — a presigned URL in the webhook body — **the connector dereferences it, never the platform** (SSRF containment). `fetch` supplies the guards:
+
+```go
+dl := fetch.New(
+    fetch.WithMaxBytes(300<<20),           // your upstream's realistic ceiling
+    fetch.WithHostAllowlist(hosts),        // from per-tenant config
+    fetch.WithBearer(token, pollHost),     // sent ONLY to that host
+)
+res, err := dl.Get(ctx, notification.PresignedURL)
+if err != nil {
+    return err
+}
+defer res.Close()                          // deletes the spooled temp file
+
+// res.Hash is the sha256 of the artifact, computed during the transfer:
+// compare it against the publisher's claimed checksum, and use it as the
+// no-op gate's key. res.Reader() hands out an independent reader each call,
+// so a multi-pass parse needs no rewind and no second download.
+if err := parse(res.Reader()); err != nil {
+    return err
+}
+```
+
+HTTPS-only, size-capped, allowlist-checked before any request is made, bounded retry that treats a 4xx as permanent and a 5xx as retryable, and errors that redact the query string — for a presigned URL, the signature *is* the credential.
+
+Set the allowlist whenever a fetch target arrives in a webhook body: even a validly signed notification can then only point your connector at a known origin. An allowlist that reduces to nothing is treated as *unset*, not deny-all, so reading it from optional config degrades to unrestricted rather than to a connector that can fetch nothing.
+
+**Pick the cap for your own downstream, not from this example.** 300 MB suits a connector that emits over the transfer wire. A connector that PUTs its artifact back to the platform's ontology-snapshot intake must stay at or below that intake's own 64 MiB body cap — which is what `DefaultMaxBytes` is — or a clear, immediate size rejection becomes a 413 that only arrives after a full download has succeeded.
+
+**The artifact is spooled to a temp file, not held in memory**. `Result` owns an open descriptor and a file on disk, so the caller **must** `Close` it — a leak per failed cycle is its own outage at these sizes. Measured on a 300 MB artifact: 317 KiB of total allocation streaming, against 616 MiB for the byte-slice version it replaced.
+
+Three things follow from that:
+
+- **`res.Hash` is free.** The transfer is the one unavoidable pass over the bytes, so the SHA-256 is computed during it. Nothing needs a second read to gate on content or to check a publisher's checksum.
+- **`WithTempDir` matters when `/tmp` is RAM-backed.** Spooling to a tmpfs moves the artifact off the Go heap but *not* out of the container's memory allowance — measured on Docker 29.4.0, a 300 MB write to a tmpfs `/tmp` in a 512 MiB container took `memory.current` from 2.9 MB to 317 MB. Under the ONTOGIS Kubernetes runtime `/tmp` is an `emptyDir` on node disk, so the default is correct there; under the Docker runtime it is tmpfs, so either size the cap against the memory limit or point `WithTempDir` at a disk-backed mount.
+- **Sweep once at startup.** `Close` is the only thing that removes a spool and `SIGKILL` runs no defers, so a component killed mid-download leaves the partial artifact behind. Under Kubernetes an `emptyDir` survives *container* restarts, so a crash-looping component accumulates one per crash:
+
+  ```go
+  if n, err := fetch.SweepStaleSpools(tempDir, fetch.DefaultStaleSpoolAge); err != nil {
+      slog.Warn("could not sweep stale download spools", "error", err)
+  } else if n > 0 {
+      slog.Info("removed abandoned download spools", "count", n)
+  }
+  ```
+
+  It is age-based (default one hour, against a two-minute per-attempt timeout) so it can never delete a live download, which is what makes it safe to call unconditionally even when several components share a directory.
+
+## Build an agent
+
+```yaml
+# agents/my-agent.yaml
+agent_id: my-domain-agent
+name: My Domain Agent
+description: Handles domain-specific queries
+version: "1.0.0"
+port: "8200"
+category: customer_extension
+domain: my-vertical
+skills:
+  - id: query
+    name: Domain Query
+    description: Answers domain-specific questions
+    tags: [query, domain]
+proactive_reasoning:
+  system_prompt: |
+    You are a domain expert agent. Use the available MCP tools
+    to answer questions about the knowledge graph.
+  tool_categories: [kg_entity, kg_document]
+```
+
+```go
+package main
+
+import (
+    "context"
+    "log/slog"
+    "os"
+
+    "github.com/ontogisai/oga-kit-sdk/agent"
+)
+
+func main() {
+    ctx := context.Background()
+
+    profile, err := agent.LoadDomainAgentProfile(envOr("AGENT_PROFILE_PATH", "/config/profile.yaml"))
+    if err != nil {
+        slog.Error("load profile failed", "error", err)
+        os.Exit(1)
+    }
+
+    deps, err := agent.ConnectRuntimeDeps(ctx, &agent.RuntimeDepsConfig{
+        GatewayURL:       envOr("PLATFORM_GATEWAY_URL", "http://localhost:8050"),
+        EventStreamURL:   envOr("EVENT_STREAM_URL", "nats://localhost:4222"),
+        EventStreamCreds: envOr("EVENT_STREAM_CREDENTIALS_PATH", "/run/oga/agents/creds"),
+        TokenPath:        envOr("AGENT_SERVICE_TOKEN_PATH", "/run/oga/agents/token"),
+        AgentID:          profile.AgentID,
+        TenantID:         envOr("OGA_TENANT_ID", ""),
+    })
+    if err != nil {
+        slog.Error("connect failed", "error", err)
+        os.Exit(1)
+    }
+    defer deps.Close()
+
+    runtime := agent.NewDefaultRuntime(profile, deps)
+    agent.ListenAndServe(ctx, profile.Port, runtime)
+}
+```
+
+## Proactive actions
+
+A proactive agent declares the actions it may propose under
+`proactive_reasoning.actions`. Each action's `outcome` block answers one
+question — **where does the result live?** — by setting exactly one of two
+intents:
+
+- `knowledge_graph_entity` — the result is a first-class **domain entity** in
+  the Knowledge Graph; the platform writes it. Optionally also sync it to an
+  external system with an `integration` block (the hybrid pattern).
+- `external_system_record` — the result lives only in an **external system**;
+  the KG keeps a lightweight reference vertex. Requires an `integration`.
+
+The platform **always owns Knowledge Graph writes** — an `integration` tool is
+for custom processing and/or external-system calls, never for writing the KG
+entity itself. Its result is recorded as an `ExternalSystemRecord` and/or merged
+per `result_mapping`.
+
+### Example 1 — Knowledge-graph entity (no external system)
+
+```yaml
+proactive_reasoning:
+  routing: { target_roles: [fm_operator] }   # required when actions are declared
+  actions:
+    - name: log_observation
+      description: Record an advisory observation for the operator
+      human_action_mode: acknowledgement
+      risk_level: informational
+      outcome:
+        knowledge_graph_entity:
+          type: new                            # registered in the active ontology at install
+          name: AgentObservation
+          schema:                              # required for type=new
+            type: object
+            required: [observation]
+            properties:
+              observation: { type: string }
+              severity: { type: string, enum: [info, warning, alert] }
+```
+
+### Example 2 — Hybrid (KG entity + external system sync)
+
+```yaml
+    - name: create_work_order
+      description: Raise a corrective work order for the affected equipment
+      human_action_mode: approval
+      risk_level: medium
+      outcome:
+        knowledge_graph_entity:
+          type: existing                       # WorkOrder already in the active ontology
+          name: WorkOrder
+          relationships:
+            - { source: event.entity_id, edge_type: AFFECTS, direction: outgoing }
+          integration:                         # OPTIONAL — also create the WO in the external system
+            system: contract_wo_mgmt
+            tool: fm_create_work_order
+            result_mapping:                    # <ExternalSystemRecord column>: <tool-result field>
+              external_record_id: wo_number    # REQUIRED when integration is present
+              status: wo_status                # optional
+```
+
+### Example 3 — External-system record (no domain entity)
+
+```yaml
+    - name: raise_sap_incident
+      description: Raise an incident in SAP
+      human_action_mode: approval
+      risk_level: high
+      outcome:
+        external_system_record:
+          system: sap
+          schema:                              # required — describes the payload sent to the tool
+            type: object
+            required: [equipment_id, priority]
+            properties:
+              equipment_id: { type: string }
+              priority: { type: string, enum: [P1, P2, P3] }
+          integration:                         # REQUIRED for external_system_record
+            tool: sap_create_incident
+            result_mapping:
+              external_record_id: id
+              status: state
+```
+
+### Validation (at `LoadDomainAgentProfile` / kit CI / sidecar startup)
+
+| Rule | Error code |
+|------|-----------|
+| `human_action_mode` ∈ {approval, acknowledgement} | `OGA-DKIT-VAL-1030` |
+| `risk_level` ∈ {informational, low, medium, high} | `OGA-DKIT-VAL-1031` |
+| `outcome` sets exactly one of `knowledge_graph_entity` / `external_system_record` | `OGA-DKIT-VAL-1046` |
+| `knowledge_graph_entity.type` ∈ {existing, new}; `name` required | `OGA-DKIT-VAL-1032` |
+| schema required (`knowledge_graph_entity.type=new` / `external_system_record`) | `OGA-DKIT-VAL-1033` |
+| schema is valid JSON Schema 2020-12 | `OGA-DKIT-VAL-1034` |
+| `external_system_record.system` required | `OGA-DKIT-VAL-1035` |
+| `integration.system` required for a hybrid `knowledge_graph_entity` integration | `OGA-DKIT-VAL-1035` |
+| `integration` / `integration.tool` required (external_system_record + tool) | `OGA-DKIT-VAL-1036` |
+| `integration.result_mapping.external_record_id` required when integration present | `OGA-DKIT-VAL-1045` |
+| `relationships[].source` starts with `event.` / `payload.`; `direction` ∈ {outgoing, incoming} | `OGA-DKIT-VAL-1037` / `1038` |
+| `relationships[].*` sets exactly one of `edge_type` / `edge`; long-form `edge.type` ∈ {existing,new}, `edge.name` required | `OGA-DKIT-VAL-1047` / `1048` / `1049` |
+| `auto_approve_timeout` / routing + escalation durations parse; routing required when actions present | `OGA-DKIT-VAL-1039` / `1041` / `1042` |
+
+The reasoning LLM picks one action (or `no_action`) and produces a payload
+conforming to that action's schema; the platform validates the payload again at
+execution time before writing the outcome.
+
+## Test with mocks
+
+`transfer.FakeCommitClient` records every prepare / put / complete call so kit tests can assert on the artifact body, transport mode, and request shape without standing up a gateway:
+
+```go
+fc := &transfer.FakeCommitClient{}
+w := transfer.NewOntologyWriter(fc, "test-kit")
+
+reg := ontology.NewRegistrar(w)
+reg.RegisterTypes(ctx, ontology.RegisterTypesRequest{...})
+receipt, _ := w.Close(ctx)
+
+if receipt.Mode != transfer.TransportInline {
+    t.Errorf("small payload should not trigger presigned upload")
+}
+if fc.CompleteCalls() != 1 {
+    t.Errorf("expected exactly one loader.complete call")
+}
+```
+
+`transfer.NopWriter` is a test-only writer that discards records — useful when testing the request-routing path without exercising the persistence path:
+
+```go
+factory := func(_ context.Context, _ transfer.LoadKind, _ *loader.LoadRequest) (transfer.Writer, error) {
+    return transfer.NewNopWriter("test-job"), nil
+}
+```
+
+## Locale keys (BCP-47, OGA-51)
+
+Every locale-keyed map a kit emits — `KitMetadata.DisplayName`,
+`KitMetadata.Description`, `EntityTypeDef.DisplayName`,
+`EntityTypeDef.Description`, `TypeProperty.Description` — MUST use full
+BCP-47 tags (`en-US`, `vi-VN`, `zh-CN`). Short-form language-only tags
+(`en`, `vi`, `zh`) are rejected at parse / validation time so the
+platform's locale matcher cannot silently disagree on the kit's
+intended locale.
+
+Manifest YAML:
+
+```yaml
+metadata:
+  display_name:
+    en-US: "My Kit"
+    vi-VN: "Bộ Khởi Động"
+  description:
+    en-US: "..."
+    vi-VN: "..."
+```
+
+Programmatic validation for kit-side type definitions:
+
+```go
+import "github.com/ontogisai/oga-kit-sdk/transfer"
+
+if err := transfer.ValidateLocaleKeys(
+    "entity_type.display_name",
+    typeDef.DisplayName,
+); err != nil {
+    return err // names the offending field + key
+}
+```
+
+The `manifest.Validate` function automatically calls the same helper
+on `KitMetadata.DisplayName` and `KitMetadata.Description` — kits that
+ship a malformed manifest get a clear error during install.
+
+## Package Structure
+
+| Package | Purpose |
+|---------|---------|
+| `transfer/` | Streaming `Writer`, presigned-URL handoff, fake clients for tests |
+| `ontology/` | `Registrar` convenience over `transfer.Writer` for batch type registration |
+| `loader/` | HTTP loader-sidecar contract: `LoaderHandler`, `StreamingLoaderHandler`, `Client`, `ListenAndServe` |
+| `manifest/` | `KitManifest` types, `Parse`, `Validate` |
+| `agent/` | `AgentRuntime` interface, `DefaultRuntime`, `ListenAndServe` |
+| `gateway/` | `PlatformGatewayClient` (MCP, LLM, workflows, inter-agent, registry) |
+| `auth/` | `TokenManager`, `CredentialWatcher` |
+| `testing/mcpmock` | Mock MCP server |
+| `testing/loadermock` | Programmable mock loader sidecar |
+
+## Design Principles
+
+1. **Zero platform dependencies** — this module never imports `oga-platform`
+2. **Domain-agnostic** — no Brick, FHIR, or military-specific types
+3. **Interface-first** — consumers depend on interfaces, platform provides implementations
+4. **Testable** — fake clients and mock writers for all wire surfaces
+5. **Tenant boundary by construction** — `X-Tenant-ID` flows through gateway auth, never from body claims
+6. **Stable API** — semver, backward-compatible within major versions
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

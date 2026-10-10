@@ -1,0 +1,308 @@
+package streampipeline
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/ontogisai/oga-kit-sdk/agent"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+)
+
+// ErrSchemaValidation indicates the LLM's structured output failed JSON Schema
+// validation after the stricter retry.
+var ErrSchemaValidation = errors.New("structured output failed schema validation")
+
+// RunSync drives the pipeline, then validates the assembled artifact against
+// the supplied JSON Schema and unmarshals it into T.
+//
+// The pipeline's grounding strategy gathers evidence and the assembly LLM call
+// produces the artifact; RunSync then extracts the JSON object from the
+// artifact, validates it against schema, and unmarshals into T. On validation
+// failure it retries ONCE with a stricter assembly prompt that appends the
+// validation error and the JSON-only instruction. If the second attempt also
+// fails, it returns ErrSchemaValidation.
+//
+// Note: schema enforcement is post-hoc (validate + stricter retry), not yet an
+// LLM-native tool_use constraint — the gateway LLM surface does not expose a
+// structured tool_use contract today. The retry loop gives deterministic
+// validation; native tool_use enforcement is a follow-up.
+//
+// T is typically a kit-defined struct or map[string]any matching the schema.
+func RunSync[T any](
+	ctx context.Context,
+	p *Pipeline,
+	deps Deps,
+	input Input,
+	planner Planner,
+	schema *jsonschema.Schema,
+) (T, []agent.CitationSource, error) {
+	out, citations, _, _, err := RunSyncWithUsage[T](ctx, p, deps, input, planner, schema)
+	return out, citations, err
+}
+
+// RunSyncWithUsage is RunSync that also returns the per-request token-usage
+// aggregate (OGA-420) summed across the initial attempt and the stricter
+// validation retry (both cost tokens). usageAvailable is false when the proxy
+// reported no usage on any attempt — the counts are then zero and must not be
+// read as a real "0 tokens". The proactive path uses this to log/meter the cost
+// of a proposal's reasoning.
+func RunSyncWithUsage[T any](
+	ctx context.Context,
+	p *Pipeline,
+	deps Deps,
+	input Input,
+	planner Planner,
+	schema *jsonschema.Schema,
+) (T, []agent.CitationSource, agent.TokenUsage, bool, error) {
+	if p == nil {
+		p = NewPipeline()
+	}
+	var agg agent.TokenUsage
+	var aggAvail bool
+	acc := func(u agent.TokenUsage, ok bool) {
+		if ok {
+			agg = agg.Add(u)
+			aggAvail = true
+		}
+	}
+
+	// Gather evidence ONCE. The ReAct loop + tools run exactly one time; a
+	// schema-validation retry below re-assembles against this SAME transcript
+	// rather than re-running tools (OGA-423 Gap 2A).
+	results, citations, du, da, err := p.gatherSync(ctx, deps, input, planner)
+	acc(du, da)
+	if err != nil {
+		return zero[T](), citations, agg, aggAvail, err
+	}
+
+	// Attempt 1: assemble + validate.
+	raw, u1, a1, err := p.assembleSync(ctx, deps, jsonInput(input, schema, ""), results)
+	acc(u1, a1)
+	if err != nil {
+		return zero[T](), citations, agg, aggAvail, err
+	}
+	if parsed, perr := validateAndUnmarshal[T](raw, schema); perr == nil {
+		return parsed, citations, agg, aggAvail, nil
+	} else if deps.Logger != nil {
+		deps.Logger.WarnContext(ctx, "structured output validation failed; retrying assembly only (tools not re-run)",
+			"error", perr)
+	}
+
+	// Attempt 2: re-ASSEMBLE only against the same transcript with a stricter
+	// prompt seeding the prior (bad) output. Tools are NOT re-run.
+	retryErrHint := "previous attempt produced output that failed schema validation"
+	raw2, u2, a2, err := p.assembleSync(ctx, deps, jsonInput(input, schema, retryErrHint+": "+raw), results)
+	acc(u2, a2)
+	if err != nil {
+		return zero[T](), citations, agg, aggAvail, err
+	}
+	if parsed, perr := validateAndUnmarshal[T](raw2, schema); perr == nil {
+		return parsed, citations, agg, aggAvail, nil
+	} else {
+		return zero[T](), citations, agg, aggAvail, fmt.Errorf("%w: %v", ErrSchemaValidation, perr)
+	}
+}
+
+// RunText drives the pipeline and returns the assembled artifact text plus the
+// consolidated citations, draining the streaming events to a buffer
+// (stream->collect). It is the non-streaming entry point for callers that need
+// a single answer string rather than an event stream — e.g. the platform
+// Knowledge Agent's synchronous message/send path, or any non-streaming channel
+// (Telegram, etc.). Both this and RunSync[T] share the same underlying drain,
+// so a non-streaming caller exercises the exact same ReAct loop as the
+// streaming path — there is one engine, not two (OGA-419).
+//
+// Errors propagate from the pipeline (planning/assembly transport failures).
+// An empty answer with nil error means the loop produced no artifact text
+// (the caller decides how to surface that).
+func RunText(
+	ctx context.Context,
+	p *Pipeline,
+	deps Deps,
+	input Input,
+	planner Planner,
+) (string, []agent.CitationSource, error) {
+	if p == nil {
+		p = NewPipeline()
+	}
+	text, cites, _, _, err := p.runArtifact(ctx, deps, input, planner)
+	return text, cites, err
+}
+
+// RunTextWithUsage is RunText that also returns the per-request token-usage
+// aggregate (OGA-420) so a non-streaming caller (e.g. the platform Knowledge
+// Agent's synchronous message/send path) can record it on the
+// observability/metering path. usageAvailable is false when the proxy reported
+// no usage — the counts are then zero and must not be read as a real "0 tokens".
+func RunTextWithUsage(
+	ctx context.Context,
+	p *Pipeline,
+	deps Deps,
+	input Input,
+	planner Planner,
+) (text string, citations []agent.CitationSource, usage agent.TokenUsage, usageAvailable bool, err error) {
+	if p == nil {
+		p = NewPipeline()
+	}
+	return p.runArtifact(ctx, deps, input, planner)
+}
+
+// jsonInput augments the assembly prompt to instruct strict JSON-only output
+// conforming to the schema. The retryHint (empty on the first attempt) appends
+// the prior failure so the second attempt can self-correct.
+func jsonInput(in Input, schema *jsonschema.Schema, retryHint string) Input {
+	var b strings.Builder
+	b.WriteString(in.AssemblyPrompt)
+	b.WriteString("\n\nRespond with a SINGLE JSON object only — no prose, no markdown code fences. ")
+	b.WriteString("The object MUST conform to the provided JSON Schema for this task.")
+	if schema != nil {
+		if loc := schema.Location; loc != "" {
+			// Location is informational; the concrete schema is enforced by
+			// validateAndUnmarshal after generation.
+			_ = loc
+		}
+	}
+	if retryHint != "" {
+		b.WriteString("\n\nYour ")
+		b.WriteString(retryHint)
+		b.WriteString("\nFix the output so it validates.")
+	}
+	in.AssemblyPrompt = b.String()
+	return in
+}
+
+// validateAndUnmarshal extracts the JSON object from raw, validates it against
+// schema, and unmarshals it into T.
+func validateAndUnmarshal[T any](raw string, schema *jsonschema.Schema) (T, error) {
+	jsonText := extractJSONObject(raw)
+	if jsonText == "" {
+		return zero[T](), fmt.Errorf("no JSON object found in output")
+	}
+
+	// Validate the generic decoded value against the schema first.
+	var generic any
+	if err := json.Unmarshal([]byte(jsonText), &generic); err != nil {
+		return zero[T](), fmt.Errorf("unmarshal generic: %w", err)
+	}
+
+	// Defense-in-depth normalization (OGA-423 Gap 2B): coerce a top-level
+	// "reasoning" emitted as an array of strings (a common LLM tic when the
+	// prompt suggests bullet points) into a single newline-joined string so it
+	// satisfies a string-typed schema without forcing a stricter retry. No-op
+	// when reasoning is absent or not an all-string array.
+	coerced := false
+	if m, ok := generic.(map[string]any); ok {
+		coerced = coerceReasoningArray(m)
+	}
+
+	if schema != nil {
+		if err := schema.Validate(generic); err != nil {
+			return zero[T](), fmt.Errorf("schema validate: %s", schemaErrorSummary(err))
+		}
+	}
+
+	// Unmarshal into the typed target. Use the original bytes on the common
+	// (non-coerced) path to preserve exact numeric encoding; only re-marshal the
+	// coerced generic when a normalization actually changed the value.
+	src := []byte(jsonText)
+	if coerced {
+		if b, err := json.Marshal(generic); err == nil {
+			src = b
+		}
+	}
+	var out T
+	if err := json.Unmarshal(src, &out); err != nil {
+		return zero[T](), fmt.Errorf("unmarshal typed: %w", err)
+	}
+	return out, nil
+}
+
+// coerceReasoningArray normalizes a top-level "reasoning" field emitted as an
+// array of strings into a single newline-joined string, returning true when it
+// changed the map. It is a no-op when "reasoning" is absent, not an array, or
+// not composed entirely of strings (so a schema that legitimately wants an
+// array is left untouched). See OGA-423 Gap 2B.
+func coerceReasoningArray(m map[string]any) bool {
+	v, ok := m["reasoning"]
+	if !ok {
+		return false
+	}
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return false
+	}
+	parts := make([]string, 0, len(arr))
+	for _, e := range arr {
+		s, ok := e.(string)
+		if !ok {
+			return false // not an all-string array — leave untouched
+		}
+		parts = append(parts, s)
+	}
+	m["reasoning"] = strings.Join(parts, "\n")
+	return true
+}
+
+// extractJSONObject strips markdown code fences and returns the substring from
+// the first '{' to the last '}'. Returns "" when no object delimiters exist.
+func extractJSONObject(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSpace(s)
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start < 0 || end <= start {
+		return ""
+	}
+	return s[start : end+1]
+}
+
+// zero returns the zero value of T.
+func zero[T any]() T {
+	var z T
+	return z
+}
+
+// schemaErrorSummary renders a schema validation failure as instance locations
+// and the keywords that failed, e.g. "/action/priority: enum; /reasoning: type".
+//
+// The library's own message is NOT used: for pattern and format failures it
+// quotes the offending instance value, which here is a fragment of LLM output
+// grounded on tenant data, and the error is logged at WARN and ERROR
+// (OGA-1036). Locations and keywords come from the kit's schema, not the data.
+func schemaErrorSummary(err error) string {
+	ve, ok := errors.AsType[*jsonschema.ValidationError](err)
+	if !ok {
+		return "invalid output"
+	}
+	var parts []string
+	var walk func(v *jsonschema.ValidationError)
+	walk = func(v *jsonschema.ValidationError) {
+		if len(parts) >= 10 {
+			return
+		}
+		if len(v.Causes) == 0 {
+			kw := "invalid"
+			if v.ErrorKind != nil {
+				if p := v.ErrorKind.KeywordPath(); len(p) > 0 {
+					kw = strings.Join(p, "/")
+				}
+			}
+			parts = append(parts, "/"+strings.Join(v.InstanceLocation, "/")+": "+kw)
+			return
+		}
+		for _, c := range v.Causes {
+			walk(c)
+		}
+	}
+	walk(ve)
+	if len(parts) == 0 {
+		return "invalid output"
+	}
+	return strings.Join(parts, "; ")
+}

@@ -1,0 +1,309 @@
+package loader
+
+import (
+	"time"
+
+	"github.com/ontogisai/oga-kit-sdk/transfer"
+)
+
+// LoaderKind identifies what type of loader this sidecar is. The platform
+// uses this to wire the loader into the correct lifecycle stage:
+//
+//   - KindOntology — runs at kit install time. The platform invokes the
+//     loader's POST /load with a customer-supplied ontology source (e.g.,
+//     a Brick RDF file, an Excel mapping sheet) and the loader translates
+//     it into the platform's ontology types via the gateway. Without this
+//     step the customer's data has no schema to attach to.
+//
+//   - KindData — runs at oga-admin import time. By then the active
+//     ontology already exists; the loader parses source data into vertices
+//     and edges and persists them through the gateway.
+//
+// Both flavors implement the same HTTP contract (this package). The kit
+// manifest distinguishes them via the `kind:` field on each loader spec.
+// The platform's data-import workflow filters by KindData so it can never
+// accidentally re-trigger an ontology loader during data ingest.
+//
+// When the field is missing from a kit manifest the platform defaults to
+// KindData (this is the common case for older kits authored before the
+// distinction was made explicit).
+type LoaderKind string
+
+const (
+	// KindOntology declares a loader that produces ontology type
+	// definitions (entity types, relationship types). Invoked at kit
+	// install time.
+	KindOntology LoaderKind = "ontology"
+
+	// KindData declares a loader that produces vertices and edges. Invoked
+	// when an operator runs oga-admin import.
+	KindData LoaderKind = "data"
+)
+
+// IsValid reports whether k is one of the recognized kinds.
+func (k LoaderKind) IsValid() bool {
+	switch k {
+	case KindOntology, KindData:
+		return true
+	default:
+		return false
+	}
+}
+
+// OrDefault returns k if non-empty, otherwise KindData. Use this when
+// reading a kit manifest where the field is optional for backward
+// compatibility with kits authored before the kind distinction existed.
+func (k LoaderKind) OrDefault() LoaderKind {
+	if k == "" {
+		return KindData
+	}
+	return k
+}
+
+// JobStatus describes the lifecycle state of a load job. The same values are
+// returned both inline from POST /load (synchronous loaders) and from
+// GET /jobs/{id} (asynchronous loaders).
+type JobStatus string
+
+const (
+	// StatusPending — job accepted but not yet processing. Rare; most loaders
+	// transition straight to running.
+	StatusPending JobStatus = "pending"
+
+	// StatusRunning — job is in progress. The platform polls
+	// GET /jobs/{id} until the status is terminal.
+	StatusRunning JobStatus = "running"
+
+	// StatusCompleted — job finished successfully. Stats are populated.
+	StatusCompleted JobStatus = "completed"
+
+	// StatusFailed — job finished with an error. Error field is populated.
+	StatusFailed JobStatus = "failed"
+
+	// StatusCancelled — job was cancelled, either by the platform or the
+	// loader's own cancellation logic. Stats may be partial.
+	StatusCancelled JobStatus = "cancelled"
+)
+
+// IsTerminal returns true when the job has reached a final state and the
+// platform should stop polling.
+func (s JobStatus) IsTerminal() bool {
+	switch s {
+	case StatusCompleted, StatusFailed, StatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// LoadRequest is the body of POST /load.
+//
+// All three top-level fields are scalar JSON; loader-specific tuning belongs
+// inside Config (free-form map) so the contract surface stays stable as kits
+// add new options.
+type LoadRequest struct {
+	// TenantID scopes the load to a single tenant. Required.
+	TenantID string `json:"tenant_id"`
+
+	// KitID identifies the domain kit issuing the load. Optional but
+	// recommended for observability and quota accounting.
+	KitID string `json:"kit_id,omitempty"`
+
+	// SourceURI is the location to load from. Schemes are loader-specific
+	// (e.g., file://, s3://, https://, sftp://). Required.
+	SourceURI string `json:"source_uri"`
+
+	// Format optionally narrows the format identifier when a loader
+	// supports more than one (see /formats). When empty, the loader picks
+	// the best match for the source URI.
+	Format string `json:"format,omitempty"`
+
+	// Config carries loader-specific parameters (chunk size, mapping rules,
+	// validation toggles, etc.). Loaders document their accepted keys.
+	Config map[string]any `json:"config,omitempty"`
+
+	// PrincipalID is the user or service that initiated the import.
+	// Recorded for audit but never used as a tenancy boundary.
+	PrincipalID string `json:"principal_id,omitempty"`
+}
+
+// LoadResponse is the body of POST /load. The same shape is returned from
+// GET /jobs/{id} so the platform can use one decoder for both paths.
+//
+// Synchronous loaders complete inside the POST and return Status=completed
+// with Stats populated; async loaders return Status=running with a JobID
+// and the platform polls /jobs/{id}.
+type LoadResponse struct {
+	// JobID is the loader-assigned identifier used to query the job later.
+	// Required when Status is non-terminal.
+	JobID string `json:"job_id,omitempty"`
+
+	// Status reports where the job is in its lifecycle. See JobStatus.
+	Status JobStatus `json:"status"`
+
+	// StartedAt is when the loader accepted the job.
+	StartedAt time.Time `json:"started_at,omitempty"`
+
+	// CompletedAt is when the job reached a terminal state.
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+
+	// Stats are populated on terminal status. Optional during running.
+	Stats *LoadStats `json:"stats,omitempty"`
+
+	// Error is populated when Status == failed. Plain string for
+	// human display; structured error catalogs live on the platform side.
+	Error string `json:"error,omitempty"`
+
+	// Message is an optional human-readable progress message useful for
+	// long-running async jobs ("processed 5000/12000 records").
+	Message string `json:"message,omitempty"`
+}
+
+// LoadStats reports counts produced by a load. Fields are optional — loaders
+// populate what makes sense for their domain.
+type LoadStats struct {
+	// VerticesCreated is the number of new entity vertices.
+	VerticesCreated int `json:"vertices_created,omitempty"`
+
+	// VerticesUpdated is the number of existing entity vertices updated.
+	VerticesUpdated int `json:"vertices_updated,omitempty"`
+
+	// EdgesCreated is the number of new relationship edges.
+	EdgesCreated int `json:"edges_created,omitempty"`
+
+	// EdgesUpdated is the number of existing relationship edges updated.
+	EdgesUpdated int `json:"edges_updated,omitempty"`
+
+	// EdgesCorrected is the number of existing relationship edges that were
+	// found disconnected from their intended endpoints (e.g. a dangling or
+	// mis-pointed row left by a prior purge+reimport) and were repaired so a
+	// traversal from the intended source now reaches the intended target.
+	// Distinct from EdgesUpdated: a correction repairs topology, not just
+	// properties, so a loader that tracks this separately should report it
+	// here rather than folding it into EdgesUpdated.
+	EdgesCorrected int `json:"edges_corrected,omitempty"`
+
+	// EdgesRetired is the number of previously-live relationship edges that
+	// were closed (soft-deleted, never hard-deleted) because a newly created
+	// edge for the same source and predicate superseded them with a
+	// different target — a re-parent under a cardinality-capped predicate
+	// (e.g. a relocated sensor's hasLocation edge moving from Room A to Room
+	// B). Distinct from EdgesCorrected: a retirement closes a DIFFERENT edge
+	// than the one just created, not the same row.
+	EdgesRetired int `json:"edges_retired,omitempty"`
+
+	// EdgesRevived is the number of relationship edges that matched an
+	// existing (but currently retired) row and were reactivated — a
+	// re-parent that cycled back to a target the source held before.
+	// Distinct from both EdgesCreated (no new row was written) and
+	// EdgesUpdated (the row's retirement state needed clearing, not just its
+	// properties).
+	EdgesRevived int `json:"edges_revived,omitempty"`
+
+	// RecordsRead is the total number of source records processed.
+	RecordsRead int `json:"records_read,omitempty"`
+
+	// RecordsSkipped is the number of source records the loader chose
+	// to skip (filtered, duplicate, malformed but recoverable, etc.).
+	RecordsSkipped int `json:"records_skipped,omitempty"`
+
+	// Warnings are non-fatal issues recorded during the load. Capped by
+	// the loader to keep response size bounded.
+	Warnings []string `json:"warnings,omitempty"`
+
+	// Custom holds loader-specific stats (e.g., {"buildings_imported": 12,
+	// "ifc_version": "IFC4"}). Optional.
+	Custom map[string]any `json:"custom,omitempty"`
+}
+
+// FormatsResponse is the body of GET /formats. Lists the format identifiers
+// this loader understands. The platform uses this for capability discovery
+// and validation when an operator selects a loader at import-submit time.
+type FormatsResponse struct {
+	// Formats is the list of supported format identifiers (e.g.,
+	// "brick-campus-json", "ifc-step", "sap-pm-export"). At least one
+	// entry MUST be present.
+	Formats []string `json:"formats"`
+}
+
+// HealthResponse is the body of GET /healthz. Loaders return Status="ok"
+// when ready to accept jobs. Anything else is treated as unhealthy.
+type HealthResponse struct {
+	// Status is "ok" when the loader is ready, otherwise a short
+	// machine-friendly reason ("starting", "draining", "unavailable").
+	Status string `json:"status"`
+
+	// Message is an optional human-readable detail.
+	Message string `json:"message,omitempty"`
+
+	// Version is the loader binary version (Semver) for debugging.
+	Version string `json:"version,omitempty"`
+}
+
+// ErrorResponse is returned by the loader for non-2xx responses. The
+// platform decodes this and logs the loader-specific reason. Loaders
+// that want to be observable always return a body matching this shape.
+type ErrorResponse struct {
+	// Code is a machine-readable token (kit-author-defined).
+	Code string `json:"code,omitempty"`
+
+	// Message is a human-readable description.
+	Message string `json:"message"`
+
+	// Details optionally carries structured context.
+	Details map[string]any `json:"details,omitempty"`
+}
+
+// LoadContext is what kit handlers receive on every Load / Pass call.
+// It bundles the request together with a streaming [transfer.Writer]
+// so the kit can emit records (vertices, edges, entity types) without
+// constructing platform clients itself.
+//
+// LoadContext is not safe for concurrent use across goroutines. Kits
+// that fan out parsing should funnel record emission back through a
+// single goroutine.
+type LoadContext struct {
+	// Request is the original LoadRequest the platform sent to this
+	// loader. The TenantID field on Request is populated from the
+	// X-Tenant-ID gateway header (authoritative); any tenant claim
+	// in the original JSON body is overwritten by the SDK server
+	// before the handler runs.
+	Request *LoadRequest
+
+	// Transfer is the streaming writer the kit emits records through.
+	// Always non-nil when the SDK serves the request through
+	// [ListenAndServe]. Tests using [Handler] directly may pass nil
+	// when they're not exercising the write path.
+	Transfer transfer.Writer
+}
+
+// LoadPlan describes the passes a [StreamingLoaderHandler] will run
+// for a single load. Returned from Plan and consumed by the SDK's
+// driver loop, which calls Pass once per entry.
+//
+// Order matters — passes execute in slice order. Most loaders that
+// need multi-pass use exactly two: pass 1 emits vertices and builds
+// any source-id → platform-id resolution map; pass 2 emits edges
+// using the resolved IDs.
+type LoadPlan struct {
+	Passes []PassSpec
+}
+
+// PassSpec names one pass and declares which entry kinds it produces.
+// The EntryKinds slice is informational — used by the SDK for logging
+// and by the platform's status tool to render progress — but the
+// loader handler is free to emit any record type during any pass.
+// Most loaders stick to the declared kinds for clarity.
+type PassSpec struct {
+	// Name identifies the pass for logs and progress reporting.
+	// Conventional names: "vertices", "edges", "entity_types",
+	// "hierarchy". Kits may use domain-specific names.
+	Name string
+
+	// EntryKinds lists the record types this pass writes.
+	EntryKinds []string
+
+	// Description is an operator-facing one-liner shown in
+	// oga-admin import status output.
+	Description string
+}

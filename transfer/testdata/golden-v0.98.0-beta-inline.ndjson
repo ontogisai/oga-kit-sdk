@@ -1,0 +1,27 @@
+{"format":"ndjson","format_version":1,"kind":"data","kit_id":"golden-kit"}
+{"kind":"vertex","value":{"id":"asset-00000","entity_type":"Equipment","label":"AHU <0> & \"fan\" – ñ","properties":{"index":0,"nested":{"floor":0,"zone":"Z-0"},"ratio":0,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"entity_type","value":{"name":"Type0000","display_name":{"en-US":"Type <Type0000>","vi-VN":"Loại Type0000"},"parent_type":"Equipment"}}
+{"kind":"relationship_type","value":{"name":"rel0000","source_type":"Type0000","target_type":"Equipment"}}
+{"kind":"hierarchy","value":{"type_name":"Type0000","parent_type":"Equipment"}}
+{"kind":"vertex","value":{"id":"asset-00001","entity_type":"Equipment","label":"AHU <1> & \"fan\" – ñ","properties":{"index":1,"nested":{"floor":1,"zone":"Z-1"},"ratio":0.14285714285714285,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00001","target_id":"asset-00000","properties":{"weight":1}}}
+{"kind":"vertex","value":{"id":"asset-00002","entity_type":"Equipment","label":"AHU <2> & \"fan\" – ñ","properties":{"index":2,"nested":{"floor":2,"zone":"Z-2"},"ratio":0.2857142857142857,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00002","target_id":"asset-00001","properties":{"weight":2}}}
+{"kind":"vertex","value":{"id":"asset-00003","entity_type":"Equipment","label":"AHU <3> & \"fan\" – ñ","properties":{"index":3,"nested":{"floor":3,"zone":"Z-3"},"ratio":0.42857142857142855,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00003","target_id":"asset-00002","properties":{"weight":0}}}
+{"kind":"vertex","value":{"id":"asset-00004","entity_type":"Equipment","label":"AHU <4> & \"fan\" – ñ","properties":{"index":4,"nested":{"floor":4,"zone":"Z-0"},"ratio":0.5714285714285714,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00004","target_id":"asset-00003","properties":{"weight":1}}}
+{"kind":"vertex","value":{"id":"asset-00005","entity_type":"Equipment","label":"AHU <5> & \"fan\" – ñ","properties":{"index":5,"nested":{"floor":5,"zone":"Z-1"},"ratio":0.7142857142857143,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00005","target_id":"asset-00004","properties":{"weight":2}}}
+{"kind":"vertex","value":{"id":"asset-00006","entity_type":"Equipment","label":"AHU <6> & \"fan\" – ñ","properties":{"index":6,"nested":{"floor":6,"zone":"Z-2"},"ratio":0.8571428571428571,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00006","target_id":"asset-00005","properties":{"weight":0}}}
+{"kind":"vertex","value":{"id":"asset-00007","entity_type":"Equipment","label":"AHU <7> & \"fan\" – ñ","properties":{"index":7,"nested":{"floor":7,"zone":"Z-3"},"ratio":1,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00007","target_id":"asset-00006","properties":{"weight":1}}}
+{"kind":"vertex","value":{"id":"asset-00008","entity_type":"Equipment","label":"AHU <8> & \"fan\" – ñ","properties":{"index":8,"nested":{"floor":8,"zone":"Z-0"},"ratio":1.1428571428571428,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00008","target_id":"asset-00007","properties":{"weight":2}}}
+{"kind":"vertex","value":{"id":"asset-00009","entity_type":"Equipment","label":"AHU <9> & \"fan\" – ñ","properties":{"index":9,"nested":{"floor":0,"zone":"Z-1"},"ratio":1.2857142857142858,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00009","target_id":"asset-00008","properties":{"weight":0}}}
+{"kind":"vertex","value":{"id":"asset-00010","entity_type":"Equipment","label":"AHU <10> & \"fan\" – ñ","properties":{"index":10,"nested":{"floor":1,"zone":"Z-2"},"ratio":1.4285714285714286,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00010","target_id":"asset-00009","properties":{"weight":1}}}
+{"kind":"vertex","value":{"id":"asset-00011","entity_type":"Equipment","label":"AHU <11> & \"fan\" – ñ","properties":{"index":11,"nested":{"floor":2,"zone":"Z-3"},"ratio":1.5714285714285714,"tags":["brick:AHU","<b>","a&b"]}}}
+{"kind":"edge","value":{"relationship_type":"feeds","source_id":"asset-00011","target_id":"asset-00010","properties":{"weight":2}}}
