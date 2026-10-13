@@ -687,4 +687,12 @@ ship a malformed manifest get a clear error during install.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+The OGA Kit SDK is licensed under the Apache License 2.0. See [LICENSE](LICENSE)
+and [NOTICE](NOTICE); keep both with any copy or derivative you distribute.
+
+The SDK is the open integration contract for kits. The ONTOGIS AI Platform it
+connects to is proprietary software, licensed separately by ONTOGIS AI, and this
+licence grants no rights in it. Nor does it grant rights in the ONTOGIS AI or OGA
+names or logo (Apache License 2.0, section 6).
+
+Contributions are accepted under the Apache License 2.0 (section 5).
