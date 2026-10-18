@@ -314,6 +314,75 @@ type EgressSyncSpec struct {
 	// platform asks it to retract the external record. Omitted ⇒ no withdrawal,
 	// and the component behaves exactly as before.
 	Withdrawal EgressWithdrawalSpec `yaml:"withdrawal,omitempty"`
+
+	// ChangeDelivery says how this component is fed after its first full run.
+	//
+	//   - events (the default): the platform pushes each change as it is
+	//     ingested, through its change consumer, as well as running delta and
+	//     full syncs.
+	//   - off: the component is fed by RUNS only — a delta run started when a
+	//     publication has been taken in (and by the daily backstop), or a Sync
+	//     Now. The change consumer skips the component entirely: nothing is
+	//     buffered or held for it.
+	//
+	// Choose off when the source publishes in batches: a publication is then
+	// delivered by one delta run that orders owners before dependents within the
+	// publication, which a stream of single changes cannot do. It is a
+	// declaration about how the integration is fed, and it is reversible.
+	ChangeDelivery ChangeDelivery `yaml:"change_delivery,omitempty"`
+
+	// SyncGeneration is a positive integer the platform records with this
+	// component's delta watermarks. Raise it when a change to the component means
+	// the external system must be re-written in full (a new field mapping, a new
+	// target): the next run then runs in full mode once and records the new
+	// generation, and deltas resume after it. Omitted ⇒ 1.
+	//
+	// A pointer so an explicit 0 is refused rather than read as "omitted".
+	SyncGeneration *int `yaml:"sync_generation,omitempty"`
+}
+
+// ChangeDelivery is the value of spec.egress_syncs[].change_delivery.
+type ChangeDelivery string
+
+const (
+	// ChangeDeliveryEvents feeds the component each change as it is ingested,
+	// in addition to runs. The default.
+	ChangeDeliveryEvents ChangeDelivery = "events"
+	// ChangeDeliveryOff feeds the component by runs only.
+	ChangeDeliveryOff ChangeDelivery = "off"
+)
+
+// Valid reports whether d is a recognized change_delivery value. Empty is valid:
+// it means the default.
+func (d ChangeDelivery) Valid() bool {
+	switch d {
+	case "", ChangeDeliveryEvents, ChangeDeliveryOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// DefaultSyncGeneration is the sync_generation of a component that declares
+// none.
+const DefaultSyncGeneration = 1
+
+// EffectiveChangeDelivery returns the declared change delivery, defaulted to
+// [ChangeDeliveryEvents].
+func (e *EgressSyncSpec) EffectiveChangeDelivery() ChangeDelivery {
+	if e.ChangeDelivery == "" {
+		return ChangeDeliveryEvents
+	}
+	return e.ChangeDelivery
+}
+
+// EffectiveSyncGeneration returns the declared sync generation, defaulted to
+// [DefaultSyncGeneration].
+func (e *EgressSyncSpec) EffectiveSyncGeneration() int {
+	if e.SyncGeneration == nil {
+		return DefaultSyncGeneration
+	}
+	return *e.SyncGeneration
 }
 
 // EgressWithdrawalSpec declares which withdrawal lanes an egress component
@@ -782,6 +851,26 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 		if err := validateEgressWithdrawal(i, e); err != nil {
 			return err
 		}
+		if err := validateEgressDelivery(i, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateEgressDelivery checks spec.egress_syncs[].change_delivery and
+// sync_generation. Mirrors the platform's install-time check, so a kit author
+// gets the same rejection locally.
+func validateEgressDelivery(i int, e *EgressSyncSpec) error {
+	if !e.ChangeDelivery.Valid() {
+		return fmt.Errorf(
+			"spec.egress_syncs[%d].change_delivery: %q is not a recognized value (use %q or %q)",
+			i, e.ChangeDelivery, ChangeDeliveryEvents, ChangeDeliveryOff)
+	}
+	if e.SyncGeneration != nil && *e.SyncGeneration < 1 {
+		return fmt.Errorf(
+			"spec.egress_syncs[%d].sync_generation: must be a positive integer, got %d",
+			i, *e.SyncGeneration)
 	}
 	return nil
 }
