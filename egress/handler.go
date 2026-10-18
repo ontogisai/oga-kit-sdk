@@ -141,6 +141,19 @@ type EntityWithdrawer interface {
 	// Sync does, and retract by the correlation's external record id, never by a
 	// name or business key: those can have changed since the record was pushed.
 	//
+	// It also carries [Entity.Version], the TOMBSTONE's stamp. Apply the same
+	// rule as an update before retracting ([IsStale] against the stamp the record
+	// holds), and when the external system retires a record rather than deleting
+	// it, write the stamp with the retirement. A stale push still in flight then
+	// finds the newer stamp and cannot revive the record.
+	//
+	// A stale withdrawal is a skip with [ReasonStaleVersion], and it is the one
+	// skip the platform does NOT treat as final: it keeps the correlation and asks
+	// again on its next run with the stamp the entity holds then. A newer stamp on
+	// the record means the entity was written after this tombstone (revived, and
+	// perhaps removed again), so the platform's current view decides, not this
+	// delivery.
+	//
 	// Verdicts, and what the platform does with each:
 	//
 	//   - [Batch.Withdrawn]: the record was retracted. The platform releases the
@@ -148,7 +161,8 @@ type EntityWithdrawer interface {
 	//   - [Batch.Skipped] / [Batch.SkippedReason]: nothing further to do — the
 	//     record was already absent, or is a kind this component cannot retract
 	//     (give a stable reason code). The platform releases the correlation too,
-	//     so never skip anything that should be retried.
+	//     so never skip anything that should be retried. The one exception is
+	//     [ReasonStaleVersion], above.
 	//   - [Batch.Failed] / [Batch.FailedReason]: keep and retry on a later pass.
 	//     This includes a record the external system refuses because other
 	//     records still depend on it; the platform withdraws dependents first, so

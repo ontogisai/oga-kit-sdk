@@ -73,6 +73,16 @@
 //     same batch id. Wrap it with [Throttled] when the external system asked for
 //     backoff, and the platform will honor the delay.
 //
+// # Refusing a stale write
+//
+// Every entity-lane record and every entity withdrawal carries [Entity.Version],
+// the version of the knowledge-graph row it was read from. Two deliveries of one
+// entity can overlap and the older can land last, so a component that records
+// the stamp with the external record and refuses an older one with [IsStale]
+// keeps the newest value. Equal and missing stamps are written; a refusal is a
+// skip with [ReasonStaleVersion]. Hold a lock per entity across the read,
+// compare and write. See [EntityVersion].
+//
 // # Entity types are source-native class IDs
 //
 // Every entity_type on this contract — the batch's, each entity's, and the
