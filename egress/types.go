@@ -217,6 +217,19 @@ type Entity struct {
 	//
 	// Mirrors the platform's internal/egress.Entity.TypeAncestry.
 	TypeAncestry []string `json:"type_ancestry,omitempty"`
+
+	// Version is the version of the knowledge-graph row this record was read
+	// from, so a component can refuse a write older than the one the external
+	// system already holds. See [EntityVersion] for the order and for what a
+	// component does with it, and [IsStale] for the rule.
+	//
+	// Present on every entity-lane record ([PathSync]) and every entity
+	// withdrawal ([PathWithdraw]); on a withdrawal it is the TOMBSTONE's stamp.
+	// Absent (nil) when the platform could not stamp the row, and on the ontology
+	// lane, whose type records carry no version. A nil stamp is never stale.
+	//
+	// Mirrors the platform's internal/egress.Entity.Version.
+	Version *EntityVersion `json:"version,omitempty"`
 }
 
 // Reserved [Entity.ParentRefs] keys. Neither is an edge name: they name how the
