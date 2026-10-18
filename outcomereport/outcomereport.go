@@ -4,9 +4,12 @@
 // # What a report is
 //
 // After the platform finishes an ingestion SUBMISSION (one loader.complete
-// artifact) or a Day-1 bulk egress RUN, it produces a generic report of what it
-// did — counts, divergences, a bounded list of rejected records — and POSTs it
-// to a kit sidecar that declared `receives_outcome_report: true` in its manifest.
+// artifact) or an egress RUN (full or delta), it produces a generic report of
+// what it did — counts, divergences, a bounded list of rejected records — and
+// POSTs it to a kit sidecar that declared `receives_outcome_report: true` in its
+// manifest. When the platform does NOT start a run for a publication it took in
+// (auto-run off, egress paused) it sends a [StatusDeferred] report instead, so
+// the source learns its publish is waiting rather than hearing nothing.
 //
 // Before this existed a submitter received {job_id, status: "running"} and was
 // never told the outcome, and a run's result was readable only by an operator
@@ -79,7 +82,8 @@ type Stage string
 const (
 	// StageIngestion is one loader.complete submission (one artifact).
 	StageIngestion Stage = "ingestion"
-	// StageEgress is one Day-1 bulk egress run.
+	// StageEgress is one egress run (full or delta), or a run not started
+	// ([StatusDeferred]).
 	StageEgress Stage = "egress"
 )
 
@@ -100,7 +104,194 @@ const (
 	// cancellation path needs separate handling (tracked as OGA-939). It is here
 	// so a receiver's parser needs no change when it starts arriving.
 	StatusCancelled Status = "cancelled"
+	// StatusDeferred (egress only) means a run was NOT started for a
+	// publication the platform took in: auto-run is off for the tenant or the
+	// platform, or the tenant's egress is paused. [Report.Deferral] says which,
+	// and [Run.Publications] carries the one publication deferred.
+	//
+	// A deferred report carries NO counts and no record lists — nothing was
+	// attempted. The publication is not lost: the next run of the component (a
+	// Sync Now, a resume, a later auto run) delivers it and lists it in its own
+	// report, so a receiver marks a publication as having reached the external
+	// system from that later report, never from this one.
+	//
+	// [Report.Validate] has always accepted an unknown status, so a receiver
+	// built before this constant existed already receives these reports.
+	StatusDeferred Status = "deferred"
 )
+
+// DeferralReason says why a run was not started for a publication.
+type DeferralReason string
+
+const (
+	// DeferralTenantAutoRunOff: the tenant's administrator turned auto-run off,
+	// so a publication waits for a Sync Now.
+	DeferralTenantAutoRunOff DeferralReason = "tenant_auto_run_off"
+	// DeferralTenantPaused: the tenant's egress is paused; the resume starts the
+	// run.
+	DeferralTenantPaused DeferralReason = "tenant_paused"
+	// DeferralPlatformAutoRunOff: the platform operator has auto-run switched
+	// off for the deployment.
+	DeferralPlatformAutoRunOff DeferralReason = "platform_auto_run_off"
+)
+
+// Deferral is the cause on a [StatusDeferred] report.
+type Deferral struct {
+	// Reason is the cause. Switch on the known values and treat an unknown one
+	// as "deferred for a reason this receiver does not know"; the list may grow.
+	Reason DeferralReason `json:"reason"`
+}
+
+// RunMode is how an egress run selected its records.
+type RunMode string
+
+const (
+	// RunModeFull pushes every record of the declared population and withdraws
+	// every gone record still correlated.
+	RunModeFull RunMode = "full"
+	// RunModeDelta pushes only what changed since the component's last
+	// completed run, retries what an earlier run left outstanding, and withdraws
+	// what was removed since then. Per type, a delta falls back to full when the
+	// type has never completed (or its sync_generation changed), so a delta run
+	// may contain full steps; the run's mode is what was requested.
+	RunModeDelta RunMode = "delta"
+)
+
+// TriggerKind names what requested an egress run. Several requests that arrive
+// while a run is waiting or running coalesce into one further run, so a run can
+// carry several kinds.
+type TriggerKind string
+
+const (
+	// TriggerManual: a person pressed Sync Now (or ran the admin command).
+	TriggerManual TriggerKind = "manual"
+	// TriggerIngestion: a data submission was taken in that wrote something.
+	TriggerIngestion TriggerKind = "ingestion"
+	// TriggerOntology: the tenant's ontology was activated.
+	TriggerOntology TriggerKind = "ontology"
+	// TriggerResume: the tenant's egress was resumed after a pause.
+	TriggerResume TriggerKind = "resume"
+	// TriggerRecovery: the component's external system became reachable again.
+	TriggerRecovery TriggerKind = "recovery"
+	// TriggerSchedule: the platform's daily backstop.
+	TriggerSchedule TriggerKind = "schedule"
+)
+
+// PublicationKind names what a publication was.
+type PublicationKind string
+
+const (
+	// PublicationData is a data submission (one loader.complete artifact).
+	// [Publication.Ref] is its job id.
+	PublicationData PublicationKind = "data"
+	// PublicationOntology is an ontology snapshot the platform applied.
+	// [Publication.Ref] is the change request id.
+	PublicationOntology PublicationKind = "ontology"
+)
+
+// Publication is one publication by the source that an egress run covers: what
+// lets a receiver say which of its publishes reached the external system.
+type Publication struct {
+	// Kind is data or ontology.
+	Kind PublicationKind `json:"kind"`
+	// Ref is the platform's identity for it: the data submission's job id, or
+	// the ontology change request's id.
+	Ref string `json:"ref"`
+	// UpstreamRef is the source's own version, BYTE FOR BYTE: the
+	// upstream_ref the submitter set on the data submission, or the upstream
+	// version the ontology snapshot carried. Absent when the source supplied
+	// none — never synthesised.
+	UpstreamRef string `json:"upstream_ref,omitempty"`
+	// TakenInAt is when the platform finished taking it in (RFC3339): the
+	// submission's completion, or the snapshot's apply.
+	TakenInAt string `json:"taken_in_at"`
+}
+
+// Count keys of the egress stage, all DENSE: every egress report carries each
+// one, zero included (a [StatusDeferred] report carries none).
+//
+// The first six are counts of push verdicts. [CountWithdrawn] counts records the
+// run retracted. [CountOutstanding] and [CountNeedsAttention] describe the
+// component AFTER the run, not the run's work: how many records are still not
+// in their latest state in the external system (every one is retried by the
+// next run), and how many of those have failed long enough to need attention
+// (see [FailedRecord.NeedsAttention]).
+const (
+	CountPushed         = "pushed"
+	CountCreated        = "created"
+	CountUpdated        = "updated"
+	CountSkipped        = "skipped"
+	CountFailed         = "failed"
+	CountCorrelated     = "correlated"
+	CountWithdrawn      = "withdrawn"
+	CountOutstanding    = "outstanding"
+	CountNeedsAttention = "needs_attention"
+)
+
+// Removal count keys of the ingestion stage, SPARSE like the rest of that
+// stage's counts (absent means zero).
+const (
+	// CountVerticesRemoved: entities the submission said the source removed, now
+	// tombstoned.
+	CountVerticesRemoved = "vertices_removed"
+	// CountVerticesRevived: tombstoned entities the submission brought back.
+	CountVerticesRevived = "vertices_revived"
+	// CountEdgesClosedByRemoval: relationships closed because one of their
+	// entities was removed.
+	CountEdgesClosedByRemoval = "edges_closed_by_removal"
+)
+
+// OntologyWait (ingestion, data submissions only) says whether the platform
+// held the submission back for an ontology snapshot the same source was
+// applying, and how the wait ended. The platform holds a data submission while
+// the kit has an ontology change being applied, so the entities meet the
+// classes of the same publication instead of being quarantined.
+type OntologyWait string
+
+const (
+	// OntologyWaitNone: nothing was being applied; the submission was not held.
+	OntologyWaitNone OntologyWait = "none"
+	// OntologyWaitCompleted: the submission was held and released when the
+	// apply finished.
+	OntologyWaitCompleted OntologyWait = "completed"
+	// OntologyWaitBound: the submission was held until the platform's bound
+	// elapsed and was then processed anyway; entities of classes the apply had
+	// not yet made available are quarantined (see
+	// [Report.QuarantinedByType]).
+	OntologyWaitBound OntologyWait = "bound"
+)
+
+// OntologyChangeStatus is the state of an ontology change reported on an
+// ingestion report.
+type OntologyChangeStatus string
+
+// OntologyChangeAwaitingReview: the change waits for a platform reviewer. The
+// platform does not hold a data submission for it; the submission's entities of
+// the classes it would add are quarantined until it is approved and the source
+// publishes again.
+const OntologyChangeAwaitingReview OntologyChangeStatus = "awaiting_review"
+
+// OntologyChange is an ontology change from the same source that was waiting
+// for review when a data submission was processed, so a receiver can tell its
+// users which assets are held and why.
+type OntologyChange struct {
+	// Status is the change's state. Today always awaiting_review.
+	Status OntologyChangeStatus `json:"status"`
+	// ChangeRequestID is the platform's id for the change.
+	ChangeRequestID string `json:"change_request_id"`
+	// UpstreamVersion is the source's version the change came from, byte for
+	// byte. Absent when the source supplied none.
+	UpstreamVersion string `json:"upstream_version,omitempty"`
+	// AddedTypes are the entity types (source-native class IDs) the change
+	// would add, bounded — see AddedTypesTruncated and AddedTypesCap. The
+	// submission's entities of these types are counted in
+	// [Report.QuarantinedByType].
+	AddedTypes []string `json:"added_types,omitempty"`
+	// AddedTypesTruncated reports that AddedTypes is a sample. Always sent.
+	AddedTypesTruncated bool `json:"added_types_truncated"`
+	// AddedTypesCap is the cap behind that flag.
+	AddedTypesCap int `json:"added_types_cap,omitempty"`
+}
 
 // Disposition says what the platform did with a rejected record, because the
 // remedies differ.
@@ -180,13 +371,31 @@ type Report struct {
 	//	                    the dispatch does not measure at all (types_registered
 	//	                    on a data dispatch) is also absent. The two are
 	//	                    INDISTINGUISHABLE.
-	//	egress     DENSE  — its six buckets (pushed, created, updated, skipped,
-	//	                    failed, correlated) are ALWAYS present, including zero,
-	//	                    because every run measures all six.
+	//	egress     DENSE  — its buckets ([CountPushed] … [CountNeedsAttention])
+	//	                    are ALWAYS present, including zero, because every run
+	//	                    measures all of them. A [StatusDeferred] report has no
+	//	                    counts at all: nothing was attempted. A report from a
+	//	                    platform older than the withdrawn / outstanding /
+	//	                    needs_attention buckets carries only the first six.
 	//
 	// So absence never means "not applicable"; on the ingestion lane it usually
 	// just means zero. See [Report.Count].
 	Counts map[string]int `json:"counts,omitempty"`
+
+	// OntologyWait (ingestion, data submissions) says whether the platform held
+	// the submission for an ontology apply from the same source, and how that
+	// ended. Absent on an ontology submission and from an older platform.
+	OntologyWait OntologyWait `json:"ontology_wait,omitempty"`
+
+	// OntologyChange (ingestion) is an ontology change from the same source that
+	// was waiting for a platform reviewer when this submission was processed.
+	// The submission's entities of the classes it would add are quarantined
+	// until it is approved and the source publishes again. Absent when none was
+	// waiting.
+	OntologyChange *OntologyChange `json:"ontology_change,omitempty"`
+
+	// Deferral is the cause on a [StatusDeferred] report. Absent otherwise.
+	Deferral *Deferral `json:"deferral,omitempty"`
 
 	// QuarantinedByType breaks the VERTEX-stage ingestion quarantine down per
 	// attempted ENTITY TYPE, so a receiver sees WHICH types were rejected rather
@@ -231,6 +440,9 @@ type Report struct {
 	FailReasons map[string]int `json:"fail_reasons,omitempty"`
 
 	// FailedRecords is the egress per-record failure sample, bounded.
+	//
+	// Records that need attention ([FailedRecord.NeedsAttention]) come FIRST, so
+	// the cap never hides one.
 	//
 	// FAILURES ONLY, and there is deliberately no skipped counterpart: a skip is
 	// the normal path, so a per-record skip sample would be a bounded list of
@@ -294,19 +506,54 @@ type Submission struct {
 	UpstreamRef string `json:"upstream_ref,omitempty"`
 }
 
-// Run identifies one Day-1 bulk egress run.
+// Run identifies one egress run.
 //
-// A run is NOT keyed to an ingestion submission and does not pretend to be: it
-// covers whatever changed since the last run, so it may span several
-// submissions or none. Correlate by UpstreamRef on the ingestion side instead.
+// A run is NOT keyed to a single ingestion submission: it covers whatever
+// changed since the component's last run, so it may span several submissions or
+// none. [Run.Publications] lists the source's publications it delivered, with
+// each one's UpstreamRef, which is how a receiver correlates the two stages.
 type Run struct {
 	// RunID is unique per invocation. It identifies the invocation that STARTED
 	// the run, so it is stable even for a long run the platform internally
-	// continued across segments.
+	// continued across segments. Empty on a [StatusDeferred] report: no run was
+	// started.
 	RunID string `json:"run_id"`
 
 	// Component is the egress component name, matching the manifest.
 	Component string `json:"component"`
+
+	// Mode is how the run selected its records. Absent on a [StatusDeferred]
+	// report (no run started) and from an older platform, whose runs were all
+	// full.
+	Mode RunMode `json:"mode,omitempty"`
+
+	// TriggerKinds are what requested the run, coalesced. Absent on a deferred
+	// report and from an older platform.
+	TriggerKinds []TriggerKind `json:"trigger_kinds,omitempty"`
+
+	// Publications are the source's publications this report covers, oldest
+	// first:
+	//
+	//	completed  the publications the run DELIVERED. Each publication is listed
+	//	           as delivered by exactly one completed run.
+	//	failed     the publications the run was planned for. They stay pending and
+	//	           are listed again by the next run that completes.
+	//	deferred   the one publication whose run was not started.
+	//
+	// Empty for a run that covered no publication (a Sync Now with nothing new
+	// from the source, the daily backstop, a recovery run). Bounded — see
+	// PublicationsCount, PublicationsTruncated and PublicationsCap.
+	Publications []Publication `json:"publications,omitempty"`
+
+	// PublicationsCount is how many publications the report covers, including
+	// any the cap left out of Publications.
+	PublicationsCount int `json:"publications_count"`
+
+	// PublicationsTruncated reports that Publications is a sample. Always sent.
+	PublicationsTruncated bool `json:"publications_truncated"`
+
+	// PublicationsCap is the cap behind that flag.
+	PublicationsCap int `json:"publications_cap,omitempty"`
 }
 
 // RejectedRecord is one ingestion record the platform did not persist.
@@ -344,6 +591,21 @@ type FailedRecord struct {
 
 	// Reason is human-readable detail.
 	Reason string `json:"reason,omitempty"`
+
+	// FirstFailedAt is when this record first failed (RFC3339), in this run or
+	// an earlier one. A record keeps failing until the cause is fixed, and every
+	// run retries it; this is what lets a receiver say "has not synced since
+	// Tuesday" instead of repeating the same rejection as news. Absent from an
+	// older platform.
+	FirstFailedAt string `json:"first_failed_at,omitempty"`
+
+	// Attempts is how many runs have failed this record, this one included.
+	Attempts int `json:"attempts,omitempty"`
+
+	// NeedsAttention marks a record that is not resolving on its own: it has
+	// failed in at least a configured number of runs over at least a configured
+	// time. The platform keeps retrying it either way.
+	NeedsAttention bool `json:"needs_attention,omitempty"`
 }
 
 // Failure is the cause of a failed stage.

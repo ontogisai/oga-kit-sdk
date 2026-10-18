@@ -287,16 +287,18 @@ type EgressSyncSpec struct {
 	Container SidecarContainerSpec `yaml:"container,omitempty"`
 
 	// ReceivesOutcomeReport opts this component in to receiving a sync-outcome
-	// report for each Day-1 bulk RUN it performs — the run's counts, reason
-	// tallies, bounded failed-record sample, and the truncation flags carried
-	// verbatim from the run report (OGA-917). The platform POSTs it to the
-	// component's [outcomereport.Path] endpoint.
+	// report for each RUN it performs, full or delta — the run's counts, reason
+	// tallies, bounded failed-record sample, the source publications it covers,
+	// and the truncation flags carried verbatim from the run report (OGA-917).
+	// The platform POSTs it to the component's [outcomereport.Path] endpoint.
 	//
-	// A run is NOT keyed to an ingestion submission and the report does not
-	// pretend otherwise: it covers whatever changed since the last run, so it may
-	// span several submissions or none.
+	// A run is NOT keyed to a single ingestion submission: it covers whatever
+	// changed since the last run, so it may span several submissions or none, and
+	// the report's run.publications lists the ones it delivered.
 	//
-	// Delivered for a `completed` and a `failed` run. A CANCELLED run currently
+	// Delivered for a `completed` and a `failed` run, and as a `deferred` report
+	// (no counts) when a run is not started for a publication because auto-run
+	// is off or egress is paused. A CANCELLED run currently
 	// delivers nothing — the workflow context is already done on that path, so the
 	// publish needs separate handling (tracked as OGA-939). `cancelled` is in the
 	// declared status vocabulary so a receiver's parser needs no change when it
