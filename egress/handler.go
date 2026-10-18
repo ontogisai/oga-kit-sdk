@@ -141,6 +141,13 @@ type EntityWithdrawer interface {
 	// Sync does, and retract by the correlation's external record id, never by a
 	// name or business key: those can have changed since the record was pushed.
 	//
+	// It also carries [Entity.Version], the TOMBSTONE's stamp. Apply the same
+	// rule as an update before retracting ([IsStale] against the stamp the record
+	// holds: a stale withdrawal is a skip with [ReasonStaleVersion]), and when the
+	// external system retires a record rather than deleting it, write the stamp
+	// with the retirement. A stale push still in flight then finds the newer stamp
+	// and cannot revive the record.
+	//
 	// Verdicts, and what the platform does with each:
 	//
 	//   - [Batch.Withdrawn]: the record was retracted. The platform releases the
