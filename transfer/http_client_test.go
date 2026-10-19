@@ -442,8 +442,8 @@ func TestHTTPCommitClient_TokenProviderTakesPrecedence(t *testing.T) {
 	}
 }
 
-// TestHTTPCommitClient_NoTokenNoHeader verifies the dev fallback: with neither a
-// provider nor a token path, no Authorization header is sent.
+// TestHTTPCommitClient_NoTokenNoHeader verifies that with neither a provider nor
+// a token path no Authorization header is sent (the gateway then answers 401).
 func TestHTTPCommitClient_NoTokenNoHeader(t *testing.T) {
 	t.Parallel()
 	gate, gatewaySrv, _ := newFakeLoaderGateway(t)

@@ -69,9 +69,10 @@ func WithTimeout(d time.Duration) HTTPCommitClientOption {
 }
 
 // WithTokenPath points the client at a file the SDK reads on every
-// request to obtain the bearer token. Leaving this empty puts the
-// client in "no Authorization header" mode — fine for dev-mode
-// gateways (OGA-228) but not for production deployments.
+// request to obtain the bearer token. With neither a path nor a
+// [WithTokenProvider], the client sends no Authorization header, and the
+// Platform Gateway refuses the request with 401: it has no tokenless
+// dev mode.
 //
 // Deprecated for production loaders: the platform no longer deploys a
 // token file (OGA-404 Phase 2/3). Use [WithTokenProvider] with a
@@ -125,8 +126,12 @@ func NewHTTPCommitClient(gatewayURL, tenantID, kitID string, opts ...HTTPCommitC
 }
 
 // Loader endpoint paths on the Platform Gateway. Each operation is a POST
-// whose body is the operation's arguments; a 2xx body is the result, and a
-// status of 400 or more carries the platform's structured error payload.
+// whose body is the operation's arguments; a 2xx body is the result. A
+// status of 400 or more is returned as an [HTTPError] with the body as the
+// platform answered: the loader endpoint's structured error payload (code,
+// message, http_status, ...) when the operation ran, or the gateway's own
+// refusal (unauthorized, tool_not_allowed, a rate limit, an open circuit)
+// when it did not.
 const (
 	loaderPrepareUploadPath = "/loader/v1/prepare_upload"
 	loaderCompletePath      = "/loader/v1/complete"
