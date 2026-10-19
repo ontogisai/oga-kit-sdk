@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/ontogisai/oga-kit-sdk/internal/redact"
 )
 
 // Point is one time-series measurement a connector emits (Tier-C). It mirrors
@@ -115,7 +117,9 @@ func (s *httpTimeseriesSink) EmitPoints(ctx context.Context, points []Point) err
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("timeseries sink: intake HTTP %d: %s", resp.StatusCode, string(b))
+		// At most 512 bytes quoted: the platform's ceiling for a body quoted
+		// in an error (OGA-1036).
+		return fmt.Errorf("timeseries sink: intake HTTP %d: %s", resp.StatusCode, redact.ErrorBody(b, 512))
 	}
 	return nil
 }

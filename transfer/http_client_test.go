@@ -474,3 +474,32 @@ func TestHTTPCommitClient_EmptyProviderTokenNoHeader(t *testing.T) {
 		t.Errorf("Authorization = %q, want empty (provider returned empty token)", gate.lastAuthHeader)
 	}
 }
+
+// An error answer is read up to 64 KiB, and the error text quotes at most
+// 512 bytes of it: the platform's ceiling for a body quoted in an error
+// (OGA-1036). A proxy in front of the gateway can answer with any size.
+func TestHTTPCommitClient_ErrorBodyIsBounded(t *testing.T) {
+	t.Parallel()
+	big := strings.Repeat("x", 200<<10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(big))
+	}))
+	t.Cleanup(srv.Close)
+	cc, _ := transfer.NewHTTPCommitClient(srv.URL, "tenant-A", "test-kit")
+	_, err := cc.PrepareUpload(t.Context())
+	herr, ok := errors.AsType[*transfer.HTTPError](err)
+	if !ok {
+		t.Fatalf("expected *HTTPError, got %T %v", err, err)
+	}
+	if len(herr.Body) != 64<<10 {
+		t.Errorf("Body holds %d bytes, want the 64 KiB read bound", len(herr.Body))
+	}
+	msg := herr.Error()
+	if strings.Contains(msg, strings.Repeat("x", 513)) {
+		t.Errorf("Error() quotes more than 512 bytes of the body (%d bytes)", len(msg))
+	}
+	if !strings.Contains(msg, "…(truncated)") {
+		t.Errorf("Error() = %.80q…, want the truncation marker", msg)
+	}
+}

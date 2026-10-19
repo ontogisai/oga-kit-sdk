@@ -52,7 +52,8 @@ type EnvTokenManagerConfig struct {
 //     token until it expires.
 //
 //   - Neither: returns (nil, nil) — the caller runs without a managed token
-//     (dev / tokenless).
+//     and sends no Authorization header, which the Platform Gateway refuses
+//     with 401 (it has no tokenless mode).
 func NewTokenManagerFromEnv(ctx context.Context, cfg EnvTokenManagerConfig) (*TokenManager, error) {
 	base := strings.TrimRight(cfg.GatewayURL, "/")
 

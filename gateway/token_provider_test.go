@@ -49,8 +49,9 @@ func TestClient_TokenProviderDrivesAuthHeader(t *testing.T) {
 }
 
 // TestClient_NoProviderNoToken verifies the client sends no Authorization
-// header when neither a provider nor a token path is configured (dev-mode
-// tokenless path is preserved).
+// header when neither a provider nor a token path is configured: it never
+// invents a credential. The Platform Gateway refuses such a request with 401;
+// it has no tokenless mode.
 func TestClient_NoProviderNoToken(t *testing.T) {
 	var hadAuth atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

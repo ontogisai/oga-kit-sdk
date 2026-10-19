@@ -137,6 +137,14 @@ const (
 	loaderCompletePath      = "/loader/v1/complete"
 )
 
+// Error-body bounds. An error answer is read up to maxErrorBodyRead bytes,
+// and an error message quotes at most maxQuotedErrorBody bytes of it: the
+// platform's ceiling for a body quoted in an error (OGA-1036).
+const (
+	maxErrorBodyRead   = 64 << 10
+	maxQuotedErrorBody = 512
+)
+
 // PrepareUpload calls loader.prepare_upload, which takes no arguments.
 func (c *HTTPCommitClient) PrepareUpload(ctx context.Context) (*PrepareUploadResponse, error) {
 	raw, err := c.postJSON(ctx, loaderPrepareUploadPath, map[string]any{})
@@ -186,7 +194,7 @@ func (c *HTTPCommitClient) PutBytes(ctx context.Context, uploadURL string, body 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		// Summarized, never quoted: an S3 signature error echoes the canonical
 		// request, security token included (OGA-1036).
-		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		return fmt.Errorf("presigned PUT failed: HTTP %d: %s",
 			resp.StatusCode, redact.ErrorBody(errBody, 256))
 	}
@@ -219,9 +227,8 @@ func (c *HTTPCommitClient) Complete(ctx context.Context, req *CompleteRequest) (
 }
 
 // postJSON performs a POST against the gateway with the standard
-// auth + tenant headers and returns the raw response body. Non-2xx
-// responses are returned as a wrapped error containing the status
-// code and body for kit-author debugging.
+// auth + tenant headers and returns the raw response body. A status of
+// 400 or more is returned as an [HTTPError].
 func (c *HTTPCommitClient) postJSON(ctx context.Context, path string, body any) ([]byte, error) {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -247,16 +254,19 @@ func (c *HTTPCommitClient) postJSON(ctx context.Context, path string, body any) 
 	}
 	defer drainAndClose(resp.Body)
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
 	if resp.StatusCode >= 400 {
+		// Bounded: an error answer is not a result, and a proxy in front of
+		// the gateway can answer with a body of any size.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		return nil, &HTTPError{
 			StatusCode: resp.StatusCode,
 			Path:       path,
-			Body:       strings.TrimSpace(string(respBody)),
+			Body:       strings.TrimSpace(string(errBody)),
 		}
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 	return respBody, nil
 }
@@ -279,17 +289,24 @@ func (c *HTTPCommitClient) loadToken() string {
 	return strings.TrimSpace(string(data))
 }
 
-// HTTPError is the typed error returned for non-2xx responses from
+// HTTPError is the typed error returned for a status of 400 or more from
 // the gateway.
 type HTTPError struct {
 	StatusCode int
 	Path       string
-	Body       string
+	// Body is the response body as the platform answered, trimmed and read
+	// up to 64 KiB, for a caller that parses the platform's structured
+	// error. It is the upstream's text: log [HTTPError.Error], which quotes
+	// a bounded summary of it, not Body.
+	Body string
 }
 
+// Error quotes at most 512 bytes of the body (an S3-style XML error is
+// reduced to its code), so the error is safe to log (OGA-1036).
 func (e *HTTPError) Error() string {
 	if e.Body != "" {
-		return fmt.Sprintf("transfer %s: HTTP %d — %s", e.Path, e.StatusCode, e.Body)
+		return fmt.Sprintf("transfer %s: HTTP %d — %s", e.Path, e.StatusCode,
+			redact.ErrorBody([]byte(e.Body), maxQuotedErrorBody))
 	}
 	return fmt.Sprintf("transfer %s: HTTP %d", e.Path, e.StatusCode)
 }

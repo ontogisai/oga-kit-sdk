@@ -62,3 +62,25 @@ func TestHTTPTimeseriesSink_IntakeErrorSurfaces(t *testing.T) {
 		t.Errorf("expected intake error to surface, got %v", err)
 	}
 }
+
+// The intake's error body is quoted at most 512 bytes (OGA-1036).
+func TestHTTPTimeseriesSink_IntakeErrorBodyIsCapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(strings.Repeat("x", 4000)))
+	}))
+	defer srv.Close()
+
+	sink := NewHTTPTimeseriesSink(srv.URL, nil)
+	err := sink.EmitPoints(t.Context(), []Point{{Metric: "temp", Value: 1}})
+	if err == nil {
+		t.Fatal("expected the intake error to surface")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, strings.Repeat("x", 513)) {
+		t.Errorf("error quotes more than 512 bytes of the body (%d bytes)", len(msg))
+	}
+	if !strings.Contains(msg, "…(truncated)") || !strings.Contains(msg, "400") {
+		t.Errorf("error = %.80q…, want the status and the truncation marker", msg)
+	}
+}
