@@ -226,7 +226,7 @@ func TestWriter_Discard(t *testing.T) {
 func TestWriter_SpooledArtifactThroughHTTPCommitClient(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	g, _ := loadGolden(t)
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "golden-kit")
 	if err != nil {
 		t.Fatal(err)
