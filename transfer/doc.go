@@ -6,7 +6,9 @@
 //
 // # Wire shape
 //
-// The platform exposes three MCP tools that this package wraps:
+// The platform exposes three loader operations on the Platform Gateway's
+// loader endpoint, POST {gateway}/loader/v1/{operation} with the
+// operation's arguments as the JSON body (see [HTTPCommitClient]):
 //
 //   - loader.prepare_upload — issues a presigned PUT URL bound to a
 //     tenant-scoped object key. The kit author never sees the URL or

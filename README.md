@@ -51,7 +51,7 @@ WriteVertex/WriteEntityType/...   →    (in memory ≤ 700 KiB, else spooled to
                   ┌────────────────────────────────────────────────────────────┐
                   │ Inline path (artifact ≤ 700 KiB):                          │
 Close()           │   loader.complete  with inline_body  ────────────►         │
-                  │   (single MCP call)                                        │
+                  │   (single call)                                            │
                   ├────────────────────────────────────────────────────────────┤
                   │ Presigned path (artifact > 700 KiB, read from the spool):  │
 Close()           │   loader.prepare_upload  ────►  (issues presigned URL)     │
@@ -61,6 +61,8 @@ Close()           │   loader.prepare_upload  ────►  (issues presigne
 
 Returns:  receipt (job_id, content_hash, mode)
 ```
+
+`transfer.HTTPCommitClient` sends each operation to the Platform Gateway as `POST /loader/v1/{prepare_upload|complete}`, with the operation's arguments as the JSON body and the sidecar's workload token as the bearer. A 2xx body is the result; any status of 400 or more is returned as a `*transfer.HTTPError` carrying the body as the platform answered: the loader endpoint's structured error payload when the operation ran, or the gateway's own refusal (unauthorized, `tool_not_allowed`, a rate limit, an open circuit) when it did not. Releases before v0.102.0-beta sent the operations as tool calls to `/mcp/tools/call`; the gateway still accepts that shape from older images for a transition period. A gateway that predates the loader route answers v0.102.0-beta and later with 404, so roll the platform out before images built on this release.
 
 The platform owns the job ledger; both ontology and data loads are uniformly async. The kit's caller (the install workflow for ontology, the import workflow for data) polls `loader.status` until terminal.
 

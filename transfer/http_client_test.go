@@ -16,12 +16,14 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
 
-// fakeMCPGateway records the MCP tool calls it received so tests can
-// assert on the request shape without standing up a real platform.
-type fakeMCPGateway struct {
+// fakeLoaderGateway records the loader calls it received on the gateway's
+// loader endpoint (POST /loader/v1/{op}, the arguments as the body) so tests
+// can assert on the request shape without standing up a real platform.
+type fakeLoaderGateway struct {
 	prepareCalls   int
 	completeCalls  int
-	lastTool       string
+	toolCallHits   int // requests to the pre-v0.102 /mcp/tools/call shape
+	lastPath       string
 	lastTenantID   string
 	lastKitID      string
 	lastAuthHeader string
@@ -32,9 +34,9 @@ type fakeMCPGateway struct {
 	uploadBody     []byte
 }
 
-func newFakeMCPGateway(t *testing.T) (*fakeMCPGateway, *httptest.Server, *httptest.Server) {
+func newFakeLoaderGateway(t *testing.T) (*fakeLoaderGateway, *httptest.Server, *httptest.Server) {
 	t.Helper()
-	g := &fakeMCPGateway{
+	g := &fakeLoaderGateway{
 		prepareToken: "tok-fake-123",
 	}
 
@@ -52,41 +54,45 @@ func newFakeMCPGateway(t *testing.T) (*fakeMCPGateway, *httptest.Server, *httpte
 	t.Cleanup(storageSrv.Close)
 	g.lastUploadURL = storageSrv.URL + "/upload-target"
 
-	// Gateway server — handles loader.prepare_upload + loader.complete.
-	gatewayMux := http.NewServeMux()
-	gatewayMux.HandleFunc("POST /mcp/tools/call", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Tool   string          `json:"tool"`
-			Params json.RawMessage `json:"params"`
+	// Gateway server — the loader endpoint for prepare_upload + complete.
+	record := func(r *http.Request) bool {
+		body, err := io.ReadAll(r.Body)
+		if err != nil || !json.Valid(body) {
+			return false
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		g.lastTool = body.Tool
+		g.lastPath = r.URL.Path
 		g.lastTenantID = r.Header.Get("X-Tenant-ID")
 		g.lastKitID = r.Header.Get("X-Kit-ID")
 		g.lastAuthHeader = r.Header.Get("Authorization")
-		g.lastBody = body.Params
-
-		switch body.Tool {
-		case "loader.prepare_upload":
-			g.prepareCalls++
-			resp := transfer.PrepareUploadResponse{
-				UploadURL:   g.lastUploadURL,
-				UploadToken: g.prepareToken,
-			}
-			_ = json.NewEncoder(w).Encode(resp)
-		case "loader.complete":
-			g.completeCalls++
-			resp := transfer.CompleteResponse{
-				JobID:  "job-platform-1",
-				Status: "running",
-			}
-			_ = json.NewEncoder(w).Encode(resp)
-		default:
-			http.Error(w, "unknown tool", http.StatusNotFound)
+		g.lastBody = body
+		return true
+	}
+	gatewayMux := http.NewServeMux()
+	gatewayMux.HandleFunc("POST /loader/v1/prepare_upload", func(w http.ResponseWriter, r *http.Request) {
+		if !record(r) {
+			http.Error(w, "body is not JSON", http.StatusBadRequest)
+			return
 		}
+		g.prepareCalls++
+		_ = json.NewEncoder(w).Encode(transfer.PrepareUploadResponse{
+			UploadURL:   g.lastUploadURL,
+			UploadToken: g.prepareToken,
+		})
+	})
+	gatewayMux.HandleFunc("POST /loader/v1/complete", func(w http.ResponseWriter, r *http.Request) {
+		if !record(r) {
+			http.Error(w, "body is not JSON", http.StatusBadRequest)
+			return
+		}
+		g.completeCalls++
+		_ = json.NewEncoder(w).Encode(transfer.CompleteResponse{
+			JobID:  "job-platform-1",
+			Status: "running",
+		})
+	})
+	gatewayMux.HandleFunc("POST /mcp/tools/call", func(w http.ResponseWriter, _ *http.Request) {
+		g.toolCallHits++
+		http.Error(w, "the transfer client must not use the tool-call shape", http.StatusGone)
 	})
 	gatewaySrv := httptest.NewServer(gatewayMux)
 	t.Cleanup(gatewaySrv.Close)
@@ -96,7 +102,7 @@ func newFakeMCPGateway(t *testing.T) (*fakeMCPGateway, *httptest.Server, *httpte
 
 func TestHTTPCommitClient_PrepareUpload(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
 	if err != nil {
 		t.Fatalf("NewHTTPCommitClient: %v", err)
@@ -115,14 +121,20 @@ func TestHTTPCommitClient_PrepareUpload(t *testing.T) {
 	if gate.lastKitID != "test-kit" {
 		t.Errorf("X-Kit-ID header = %q, want test-kit", gate.lastKitID)
 	}
-	if gate.lastTool != "loader.prepare_upload" {
-		t.Errorf("tool = %q, want loader.prepare_upload", gate.lastTool)
+	if gate.lastPath != "/loader/v1/prepare_upload" {
+		t.Errorf("path = %q, want /loader/v1/prepare_upload", gate.lastPath)
+	}
+	if string(gate.lastBody) != `{}` {
+		t.Errorf("body = %s, want {} (prepare_upload takes no arguments)", gate.lastBody)
+	}
+	if gate.toolCallHits != 0 {
+		t.Errorf("the client used the tool-call shape %d time(s)", gate.toolCallHits)
 	}
 }
 
 func TestHTTPCommitClient_CompleteRejectsBothBodyForms(t *testing.T) {
 	t.Parallel()
-	_, gatewaySrv, _ := newFakeMCPGateway(t)
+	_, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
 
 	cases := []struct {
@@ -154,7 +166,7 @@ func TestHTTPCommitClient_CompleteRejectsBothBodyForms(t *testing.T) {
 
 func TestHTTPCommitClient_PutBytes(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
 
 	prep, err := cc.PrepareUpload(context.Background())
@@ -277,7 +289,7 @@ func TestNewHTTPCommitClient_Validation(t *testing.T) {
 
 func TestHTTPCommitClient_CompleteInline(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
 
 	resp, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
@@ -300,7 +312,7 @@ func TestHTTPCommitClient_CompleteInline(t *testing.T) {
 
 func TestHTTPCommitClient_CompletePresigned(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
 
 	resp, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
@@ -316,8 +328,64 @@ func TestHTTPCommitClient_CompletePresigned(t *testing.T) {
 	if resp.JobID == "" {
 		t.Error("JobID should not be empty")
 	}
-	if gate.lastTool != "loader.complete" {
-		t.Errorf("lastTool = %q, want loader.complete", gate.lastTool)
+	if gate.lastPath != "/loader/v1/complete" {
+		t.Errorf("path = %q, want /loader/v1/complete", gate.lastPath)
+	}
+	if gate.toolCallHits != 0 {
+		t.Errorf("the client used the tool-call shape %d time(s)", gate.toolCallHits)
+	}
+}
+
+// The body of loader.complete is the request itself, exactly as it marshals:
+// no {"tool","params"} envelope. The platform reads it as the operation's
+// arguments.
+func TestHTTPCommitClient_CompleteBodyIsTheRequest(t *testing.T) {
+	t.Parallel()
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
+	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
+	req := &transfer.CompleteRequest{
+		InlineBody:  []byte(`{"format":"ndjson"}`),
+		Kind:        transfer.KindData,
+		Format:      transfer.FormatNDJSON,
+		ContentHash: "abc123",
+		EntryCount:  1,
+		UpstreamRef: "run-7",
+	}
+	if _, err := cc.Complete(context.Background(), req); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	want, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gate.lastBody, want) {
+		t.Errorf("body = %s\nwant %s", gate.lastBody, want)
+	}
+}
+
+// An error answer from the loader endpoint is an HTTPError carrying the
+// status, the endpoint's path and the platform's error payload as the body.
+func TestHTTPCommitClient_EndpointErrorIsHTTPError(t *testing.T) {
+	t.Parallel()
+	const payload = `{"code":"OGA-CORE-DENY-1202","message":"denied","http_status":403}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/loader/v1/complete" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(payload))
+	}))
+	t.Cleanup(srv.Close)
+	cc, _ := transfer.NewHTTPCommitClient(srv.URL, "tenant-A", "test-kit")
+	_, err := cc.Complete(context.Background(), &transfer.CompleteRequest{InlineBody: json.RawMessage(`{"x":1}`)})
+	var herr *transfer.HTTPError
+	if !errors.As(err, &herr) {
+		t.Fatalf("expected *HTTPError, got %T %v", err, err)
+	}
+	if herr.StatusCode != http.StatusForbidden || herr.Path != "/loader/v1/complete" || herr.Body != payload {
+		t.Errorf("HTTPError = %+v", herr)
 	}
 }
 
@@ -334,7 +402,7 @@ func TestHTTPCommitClient_NilCompleteRequest(t *testing.T) {
 // without any token file.
 func TestHTTPCommitClient_WithTokenProvider(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit",
 		transfer.WithTokenProvider(func() string { return "minted-workload-jwt" }))
 	if err != nil {
@@ -355,7 +423,7 @@ func TestHTTPCommitClient_WithTokenProvider(t *testing.T) {
 // over a configured token path.
 func TestHTTPCommitClient_TokenProviderTakesPrecedence(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit",
 		transfer.WithTokenPath("/nonexistent/token/file"),
 		transfer.WithTokenProvider(func() string { return "provider-wins" }))
@@ -374,11 +442,11 @@ func TestHTTPCommitClient_TokenProviderTakesPrecedence(t *testing.T) {
 	}
 }
 
-// TestHTTPCommitClient_NoTokenNoHeader verifies the dev fallback: with neither a
-// provider nor a token path, no Authorization header is sent.
+// TestHTTPCommitClient_NoTokenNoHeader verifies that with neither a provider nor
+// a token path no Authorization header is sent (the gateway then answers 401).
 func TestHTTPCommitClient_NoTokenNoHeader(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit")
 	if _, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
 		InlineBody: json.RawMessage(`{"x":1}`),
@@ -394,7 +462,7 @@ func TestHTTPCommitClient_NoTokenNoHeader(t *testing.T) {
 // "" yields no Authorization header (rather than "Bearer ").
 func TestHTTPCommitClient_EmptyProviderTokenNoHeader(t *testing.T) {
 	t.Parallel()
-	gate, gatewaySrv, _ := newFakeMCPGateway(t)
+	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
 	cc, _ := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit",
 		transfer.WithTokenProvider(func() string { return "" }))
 	if _, err := cc.Complete(context.Background(), &transfer.CompleteRequest{

@@ -15,8 +15,15 @@ import (
 )
 
 // HTTPCommitClient is the production CommitClient. It calls the
-// platform's MCP gateway for prepare_upload + complete, and PUTs
-// directly to MinIO/S3 for the presigned-upload step.
+// Platform Gateway's loader endpoint for prepare_upload + complete
+// (POST {gateway}/loader/v1/{op}, the call's arguments as the body), and
+// PUTs directly to MinIO/S3 for the presigned-upload step.
+//
+// Before v0.102.0-beta the client sent the operations as MCP tool calls
+// ({"tool":"loader.complete","params":{...}} to /mcp/tools/call). The
+// gateway still accepts that shape from older images for a transition
+// period and logs each sidecar that uses it; a platform whose gateway
+// predates the loader route answers this client 404.
 //
 // The client is goroutine-safe; share one instance across multiple
 // writers.
@@ -62,9 +69,10 @@ func WithTimeout(d time.Duration) HTTPCommitClientOption {
 }
 
 // WithTokenPath points the client at a file the SDK reads on every
-// request to obtain the bearer token. Leaving this empty puts the
-// client in "no Authorization header" mode — fine for dev-mode
-// gateways (OGA-228) but not for production deployments.
+// request to obtain the bearer token. With neither a path nor a
+// [WithTokenProvider], the client sends no Authorization header, and the
+// Platform Gateway refuses the request with 401: it has no tokenless
+// dev mode.
 //
 // Deprecated for production loaders: the platform no longer deploys a
 // token file (OGA-404 Phase 2/3). Use [WithTokenProvider] with a
@@ -92,9 +100,8 @@ func WithTokenProvider(fn func() string) HTTPCommitClientOption {
 
 // NewHTTPCommitClient constructs an HTTPCommitClient targeting the
 // supplied gateway base URL. The tenantID is sent on every call as
-// the X-Tenant-ID header — the platform's gateway treats this header
-// as authoritative; any tenant claim in a request body is stripped
-// before dispatch.
+// the X-Tenant-ID header. It is informational: the platform takes the
+// tenant from the verified workload token and ignores the header.
 //
 // kitID is informational; the platform attributes loads to the
 // installed kit by matching the tenant + auth context, not by the
@@ -118,13 +125,21 @@ func NewHTTPCommitClient(gatewayURL, tenantID, kitID string, opts ...HTTPCommitC
 	return c, nil
 }
 
-// PrepareUpload calls the loader.prepare_upload MCP tool.
+// Loader endpoint paths on the Platform Gateway. Each operation is a POST
+// whose body is the operation's arguments; a 2xx body is the result. A
+// status of 400 or more is returned as an [HTTPError] with the body as the
+// platform answered: the loader endpoint's structured error payload (code,
+// message, http_status, ...) when the operation ran, or the gateway's own
+// refusal (unauthorized, tool_not_allowed, a rate limit, an open circuit)
+// when it did not.
+const (
+	loaderPrepareUploadPath = "/loader/v1/prepare_upload"
+	loaderCompletePath      = "/loader/v1/complete"
+)
+
+// PrepareUpload calls loader.prepare_upload, which takes no arguments.
 func (c *HTTPCommitClient) PrepareUpload(ctx context.Context) (*PrepareUploadResponse, error) {
-	body := map[string]any{
-		"tool":   "loader.prepare_upload",
-		"params": map[string]any{},
-	}
-	raw, err := c.postJSON(ctx, "/mcp/tools/call", body)
+	raw, err := c.postJSON(ctx, loaderPrepareUploadPath, map[string]any{})
 	if err != nil {
 		return nil, err
 	}
@@ -178,8 +193,8 @@ func (c *HTTPCommitClient) PutBytes(ctx context.Context, uploadURL string, body 
 	return nil
 }
 
-// Complete calls the loader.complete MCP tool. The platform decides
-// which dispatcher (ontology vs data) to route to based on
+// Complete calls loader.complete with req as the body. The platform
+// decides which dispatcher (ontology vs data) to route to based on
 // req.Kind, accepts the artifact, and returns immediately with a
 // platform-issued job_id.
 func (c *HTTPCommitClient) Complete(ctx context.Context, req *CompleteRequest) (*CompleteResponse, error) {
@@ -189,11 +204,7 @@ func (c *HTTPCommitClient) Complete(ctx context.Context, req *CompleteRequest) (
 	if (req.UploadToken == "") == (len(req.InlineBody) == 0) {
 		return nil, errors.New("transfer.Complete: exactly one of upload_token or inline_body is required")
 	}
-	body := map[string]any{
-		"tool":   "loader.complete",
-		"params": req,
-	}
-	raw, err := c.postJSON(ctx, "/mcp/tools/call", body)
+	raw, err := c.postJSON(ctx, loaderCompletePath, req)
 	if err != nil {
 		return nil, err
 	}
