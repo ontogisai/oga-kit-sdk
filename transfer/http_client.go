@@ -137,13 +137,9 @@ const (
 	loaderCompletePath      = "/loader/v1/complete"
 )
 
-// Error-body bounds. An error answer is read up to maxErrorBodyRead bytes,
-// and an error message quotes at most maxQuotedErrorBody bytes of it: the
-// platform's ceiling for a body quoted in an error (OGA-1036).
-const (
-	maxErrorBodyRead   = 64 << 10
-	maxQuotedErrorBody = 512
-)
+// maxErrorBodyRead is how much of an error answer is read. An error message
+// quotes at most redact.MaxQuotedBody bytes of it (OGA-1036).
+const maxErrorBodyRead = 64 << 10
 
 // PrepareUpload calls loader.prepare_upload, which takes no arguments.
 func (c *HTTPCommitClient) PrepareUpload(ctx context.Context) (*PrepareUploadResponse, error) {
@@ -196,7 +192,7 @@ func (c *HTTPCommitClient) PutBytes(ctx context.Context, uploadURL string, body 
 		// request, security token included (OGA-1036).
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		return fmt.Errorf("presigned PUT failed: HTTP %d: %s",
-			resp.StatusCode, redact.ErrorBody(errBody, 256))
+			resp.StatusCode, redact.ErrorBodyMax(errBody, 256))
 	}
 	return nil
 }
@@ -306,7 +302,7 @@ type HTTPError struct {
 func (e *HTTPError) Error() string {
 	if e.Body != "" {
 		return fmt.Sprintf("transfer %s: HTTP %d — %s", e.Path, e.StatusCode,
-			redact.ErrorBody([]byte(e.Body), maxQuotedErrorBody))
+			redact.ErrorBody([]byte(e.Body)))
 	}
 	return fmt.Sprintf("transfer %s: HTTP %d", e.Path, e.StatusCode)
 }

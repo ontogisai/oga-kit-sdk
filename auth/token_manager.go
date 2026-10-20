@@ -371,12 +371,12 @@ func (tm *TokenManager) doRefresh(ctx context.Context, currentToken string) (str
 }
 
 // errorBodySummary reads an error response up to 64 KiB and returns at most
-// 512 bytes of it for an error message, the platform's ceiling for a body
-// quoted in an error (OGA-1036). The gateway's answer is its own error JSON;
-// anything between the sidecar and the gateway can answer with more.
+// redact.MaxQuotedBody bytes of it for an error message (OGA-1036). The
+// gateway's answer is its own error JSON; anything between the sidecar and the
+// gateway can answer with more.
 func errorBodySummary(body io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(body, 64<<10))
-	return redact.ErrorBody(b, 512)
+	return redact.ErrorBody(b)
 }
 
 func (tm *TokenManager) atomicWriteToken(token string) error {

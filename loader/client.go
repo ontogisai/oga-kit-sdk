@@ -243,14 +243,13 @@ type HTTPError struct {
 	Body *ErrorResponse
 }
 
-// Error quotes at most 512 bytes of the loader's answer: up to 448 bytes of
-// its message (an S3-style XML body is reduced to its code) and up to 64 of
-// its code. 512 bytes is the platform's ceiling for a body quoted in an
-// error (OGA-1036); the platform wraps this text into its own errors and
-// workflow results.
+// Error quotes at most redact.MaxQuotedBody (512) bytes of the loader's
+// answer: up to 448 bytes of its message (an S3-style XML body is reduced to
+// its code) and up to 64 of its code (OGA-1036). The platform wraps this text
+// into its own errors and workflow results.
 func (e *HTTPError) Error() string {
 	if e.Body != nil && e.Body.Message != "" {
-		msg := redact.ErrorBody([]byte(e.Body.Message), maxQuotedMessage)
+		msg := redact.ErrorBodyMax([]byte(e.Body.Message), maxQuotedMessage)
 		if e.Body.Code != "" {
 			return fmt.Sprintf("loader %s: %d %s (code=%s)",
 				e.Path, e.StatusCode, msg, redact.Truncate(e.Body.Code, maxQuotedCode))
@@ -261,11 +260,11 @@ func (e *HTTPError) Error() string {
 }
 
 // Error-body bounds: how much of an error answer is read, and how much of it
-// HTTPError.Error quotes (448 + 64 = 512 bytes in all).
+// HTTPError.Error quotes. The code and the message share redact.MaxQuotedBody.
 const (
 	maxErrorBodyRead = 64 << 10
-	maxQuotedMessage = 448
 	maxQuotedCode    = 64
+	maxQuotedMessage = redact.MaxQuotedBody - maxQuotedCode
 )
 
 // IsNotFound reports whether err is an HTTPError with status 404.

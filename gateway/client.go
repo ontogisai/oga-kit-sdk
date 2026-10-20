@@ -557,7 +557,7 @@ func (c *PlatformGatewayClient) post(ctx context.Context, path string, body any)
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, redact.ErrorBody(respBody, 512))
+		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, redact.ErrorBody(respBody))
 	}
 
 	return respBody, nil
@@ -583,7 +583,7 @@ func (c *PlatformGatewayClient) get(ctx context.Context, path string) (json.RawM
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, redact.ErrorBody(respBody, 512))
+		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, redact.ErrorBody(respBody))
 	}
 
 	return respBody, nil

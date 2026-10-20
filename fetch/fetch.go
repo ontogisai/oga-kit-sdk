@@ -517,7 +517,7 @@ func (d *Downloader) attempt(ctx context.Context, target, safe string) (*Result,
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, StatusError(resp.StatusCode, redact.ErrorBody(snippet, 256))
+		return nil, StatusError(resp.StatusCode, redact.ErrorBodyMax(snippet, 256))
 	}
 
 	// A declared length over the cap is refused before a single byte is

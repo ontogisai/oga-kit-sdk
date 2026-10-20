@@ -73,13 +73,29 @@ var (
 	xmlRequestID = regexp.MustCompile(`<RequestId>([^<]{1,128})</RequestId>`)
 )
 
-// ErrorBody summarizes an upstream error body for an error message.
+// MaxQuotedBody is the most of an upstream body an error quotes, in bytes: the
+// platform's ceiling for a body quoted in an error (OGA-1036). ErrorBody and
+// ErrorBodyMax never quote more.
+const MaxQuotedBody = 512
+
+// ErrorBody summarizes an upstream error body for an error message, quoting at
+// most MaxQuotedBody bytes of it.
 //
 // An S3-style XML error (AWS, MinIO) is reduced to its <Code> and <RequestId>:
 // the rest of such a body can carry the canonical request, the provided
 // signature, the security token and the object key. Anything else is trimmed
-// and capped at max bytes on a rune boundary.
-func ErrorBody(b []byte, max int) string {
+// and capped on a rune boundary.
+func ErrorBody(b []byte) string {
+	return ErrorBodyMax(b, MaxQuotedBody)
+}
+
+// ErrorBodyMax is ErrorBody for a caller that quotes less than MaxQuotedBody
+// bytes. A max above MaxQuotedBody, or of zero or less, is MaxQuotedBody, so no
+// caller can quote more than the ceiling.
+func ErrorBodyMax(b []byte, max int) string {
+	if max <= 0 || max > MaxQuotedBody {
+		max = MaxQuotedBody
+	}
 	s := strings.TrimSpace(string(b))
 	if strings.Contains(s, "<Error>") {
 		if m := xmlCode.FindStringSubmatch(s); m != nil {
