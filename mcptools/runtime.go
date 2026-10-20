@@ -67,8 +67,13 @@ type Tool struct {
 	DescriptionI18n map[string]string
 	// Mutates marks a state-changing tool (confirm-before-write gate, OGA-446).
 	Mutates bool
-	// Composition records the platform Tier 1/2 tools the handler calls
-	// internally (manifest composition_reference). Documentation only.
+	// Composition lists the platform tools (kg_*) the handler calls through the
+	// Platform Gateway (manifest composition_reference). The union over the
+	// sidecar's tools is its grant at the gateway, which refuses any other tool
+	// (OGA-1121). The runtime also refuses, in process and in production, a
+	// gateway call outside the RUNNING tool's own Composition
+	// (gateway.CompositionError), so a handler that drifts from its declaration
+	// fails in its own tests and its call is never sent.
 	Composition []string
 }
 
