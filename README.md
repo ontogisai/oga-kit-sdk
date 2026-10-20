@@ -622,9 +622,10 @@ upgrade (`OGA-DKIT-VAL-1056`). The SDK applies the same rules, with the same mes
 At run time, `mcptools` holds each tool's handler to that tool's own `Composition`: a
 `gateway.CallTool` to a platform tool the running tool does not list returns a
 `*gateway.CompositionError` and sends nothing. The gateway grants the sidecar the union over all
-its tools, so this is the stricter, per-tool check, meant to fail your handler tests when a
-handler drifts from its declaration. Calls made outside a tool handler (agents, loaders) are not
-checked by the SDK.
+its tools, so this is the stricter, per-tool check. It is enforced in production as well as in
+tests: a handler that drifts from its declaration fails its tool call wherever it runs, which is
+why your handler tests catch it. It is not the security boundary (the gateway is). Calls made
+outside a tool handler (agents, loaders) are not checked by the SDK.
 
 A kit upgrade that removes a tool from a declaration takes effect on the sidecar's next call,
 without a restart. Needs a platform release with OGA-1121; an older platform grants agents and

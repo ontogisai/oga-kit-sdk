@@ -36,64 +36,55 @@ const (
 	CompositionToolsField = "spec.tools[].composition_reference"
 )
 
-// PlatformTool is one tool the platform's MCP tool server registers.
-type PlatformTool struct {
-	Name string
-	// Mutates is the tool server's flag: the tool changes the knowledge graph.
-	Mutates bool
+// platformTools mirrors the names in the platform's toolscope.PlatformTools
+// (oga-platform internal/toolscope/platform_tools.go), which is pinned to the
+// tool server's registry. Sorted.
+var platformTools = []string{
+	"kg_aggregate",
+	"kg_compare_versions",
+	"kg_create_entity",
+	"kg_create_relationship",
+	"kg_delete_entity",
+	"kg_delete_relationship",
+	"kg_describe_type",
+	"kg_doc_content",
+	"kg_doc_delete",
+	"kg_doc_search",
+	"kg_doc_status",
+	"kg_doc_upload",
+	"kg_entity_versions",
+	"kg_geotemporal",
+	"kg_get_entity",
+	"kg_get_type_hierarchy",
+	"kg_ops_alerts",
+	"kg_ops_checklist",
+	"kg_ops_dispatch",
+	"kg_ops_escalate",
+	"kg_ops_handover",
+	"kg_ops_monitor",
+	"kg_query_entities",
+	"kg_query_relationships",
+	"kg_reason",
+	"kg_search",
+	"kg_search_entity_types",
+	"kg_search_relationship_types",
+	"kg_set_external_ref",
+	"kg_traverse",
+	"kg_ts_analyze",
+	"kg_ts_metrics",
+	"kg_ts_read",
+	"kg_update_entity",
+	"kg_vector",
 }
 
-// platformTools mirrors the platform's toolscope.PlatformTools (oga-platform
-// internal/toolscope/platform_tools.go), which is pinned to the tool server's
-// registry. Sorted by name.
-var platformTools = []PlatformTool{
-	{Name: "kg_aggregate"},
-	{Name: "kg_compare_versions"},
-	{Name: "kg_create_entity", Mutates: true},
-	{Name: "kg_create_relationship", Mutates: true},
-	{Name: "kg_delete_entity", Mutates: true},
-	{Name: "kg_delete_relationship", Mutates: true},
-	{Name: "kg_describe_type"},
-	{Name: "kg_doc_content"},
-	{Name: "kg_doc_delete", Mutates: true},
-	{Name: "kg_doc_search"},
-	{Name: "kg_doc_status"},
-	{Name: "kg_doc_upload", Mutates: true},
-	{Name: "kg_entity_versions"},
-	{Name: "kg_geotemporal"},
-	{Name: "kg_get_entity"},
-	{Name: "kg_get_type_hierarchy"},
-	{Name: "kg_ops_alerts"},
-	{Name: "kg_ops_checklist", Mutates: true},
-	{Name: "kg_ops_dispatch", Mutates: true},
-	{Name: "kg_ops_escalate", Mutates: true},
-	{Name: "kg_ops_handover", Mutates: true},
-	{Name: "kg_ops_monitor", Mutates: true},
-	{Name: "kg_query_entities"},
-	{Name: "kg_query_relationships"},
-	{Name: "kg_reason"},
-	{Name: "kg_search"},
-	{Name: "kg_search_entity_types"},
-	{Name: "kg_search_relationship_types"},
-	{Name: "kg_set_external_ref", Mutates: true},
-	{Name: "kg_traverse"},
-	{Name: "kg_ts_analyze"},
-	{Name: "kg_ts_metrics"},
-	{Name: "kg_ts_read"},
-	{Name: "kg_update_entity", Mutates: true},
-	{Name: "kg_vector"},
-}
-
-// PlatformTools returns the platform tools a kit may declare, sorted by name.
-func PlatformTools() []PlatformTool {
+// PlatformTools returns the platform tools a kit may declare, sorted.
+func PlatformTools() []string {
 	return slices.Clone(platformTools)
 }
 
 // IsPlatformTool reports whether name is one of the platform's tools.
 func IsPlatformTool(name string) bool {
-	_, found := slices.BinarySearchFunc(platformTools, name, func(t PlatformTool, n string) int {
-		return strings.Compare(t.Name, n)
-	})
+	_, found := slices.BinarySearch(platformTools, name)
 	return found
 }
 

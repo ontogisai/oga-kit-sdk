@@ -14,22 +14,22 @@ func TestPlatformTools_Table(t *testing.T) {
 	if len(tools) == 0 {
 		t.Fatal("empty platform tool table")
 	}
-	if !slices.IsSortedFunc(tools, func(a, b PlatformTool) int { return strings.Compare(a.Name, b.Name) }) {
-		t.Error("the table is not sorted by name")
+	if !slices.IsSorted(tools) {
+		t.Error("the table is not sorted")
 	}
-	for i, tool := range tools {
-		if !strings.HasPrefix(tool.Name, PlatformToolPrefix) {
-			t.Errorf("%q is outside the kg_ namespace", tool.Name)
+	for i, name := range tools {
+		if !strings.HasPrefix(name, PlatformToolPrefix) {
+			t.Errorf("%q is outside the kg_ namespace", name)
 		}
-		if i > 0 && tools[i-1].Name == tool.Name {
-			t.Errorf("duplicate %q", tool.Name)
+		if i > 0 && tools[i-1] == name {
+			t.Errorf("duplicate %q", name)
 		}
-		if !IsPlatformTool(tool.Name) {
-			t.Errorf("IsPlatformTool(%q) = false", tool.Name)
+		if !IsPlatformTool(name) {
+			t.Errorf("IsPlatformTool(%q) = false", name)
 		}
 	}
-	tools[0].Name = "changed"
-	if PlatformTools()[0].Name == "changed" {
+	tools[0] = "changed"
+	if PlatformTools()[0] == "changed" {
 		t.Error("PlatformTools returns the table itself, not a copy")
 	}
 	for _, name := range []string{"", "kg_get_entities", "loader.complete", "fm_create_work_order"} {

@@ -11,12 +11,13 @@ import (
 // A kit MCP server tool declares, in its Composition (manifest
 // composition_reference), the platform tools its handler calls. The Platform
 // Gateway grants the sidecar the union over all its tools and refuses anything
-// else; that is the security boundary. The SDK adds a local check per RUNNING
-// tool: mcptools stamps the tool's composition on the handler's context, and
-// CallTool refuses a platform tool the composition does not list, without a
-// network call. It is developer feedback, so a handler that drifts from its
-// declaration fails in the kit's own tests, and the gateway's answer for the
-// sidecar never depends on which of its tools was running.
+// else; that is the security boundary. The SDK adds a check per RUNNING tool:
+// mcptools stamps the tool's composition on the handler's context, and CallTool
+// refuses a platform tool the composition does not list, without a network
+// call. It is enforced in process, in production as in tests, so a handler
+// that drifts from its declaration fails in the kit's own handler tests and
+// never reaches the gateway. It is not the security boundary: the sidecar's
+// code runs it, and the gateway decides for the sidecar regardless.
 
 type compositionKey struct{}
 
