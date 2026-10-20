@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+
+	"github.com/ontogisai/oga-kit-sdk/gateway"
 )
 
 // Standard JSON-RPC 2.0 error codes (subset) used by the MCP transport.
@@ -168,6 +170,9 @@ func (r *Runtime) handleToolsCall(ctx context.Context, w http.ResponseWriter, id
 		"request_id", RequestIDFromContext(ctx),
 	)
 
+	// Calls the handler makes through the gateway client are held to this
+	// tool's declared composition (OGA-1121).
+	ctx = gateway.WithToolComposition(ctx, tool.Name, tool.Composition)
 	result, err := tool.Handler(ctx, params.Arguments)
 	if err != nil {
 		// MCP convention: tool errors are results with isError=true, not

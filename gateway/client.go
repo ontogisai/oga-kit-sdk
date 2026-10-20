@@ -60,7 +60,14 @@ func (c *PlatformGatewayClient) SetTokenProvider(provider func() string) {
 // CallTool invokes an MCP tool via the Platform Access Gateway.
 // Returns a ToolError (which implements error) when the tool returns a structured
 // error response, allowing callers to inspect the error code, category, and details.
+//
+// Inside a kit MCP tool handler (ctx from mcptools), a tool outside the running
+// tool's Composition is refused locally with a *CompositionError and no request
+// is sent (OGA-1121).
 func (c *PlatformGatewayClient) CallTool(ctx context.Context, tool string, params any) (json.RawMessage, error) {
+	if err := checkComposition(ctx, tool); err != nil {
+		return nil, err
+	}
 	body := map[string]any{
 		"tool":   tool,
 		"params": params,

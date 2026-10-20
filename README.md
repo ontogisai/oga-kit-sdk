@@ -597,6 +597,39 @@ The reasoning LLM picks one action (or `no_action`) and produces a payload
 conforming to that action's schema; the platform validates the payload again at
 execution time before writing the outcome.
 
+## Tool grants: what your agent and MCP server may call
+
+The Platform Gateway lets a kit agent or MCP server sidecar call the platform tools its kit
+declares, and refuses any other tool with `403 tool_not_allowed` (reason `not_in_scope`). Its tool
+discovery lists only those tools.
+
+- **An agent** is granted the union of its `AgentProfile`'s `spec.capabilities[].tools`. A name is a
+  platform tool (`kg_*`) or a Tier-3 tool your kit defines. List every tool the agent calls,
+  grounding-strategy steps included.
+- **An MCP server** is granted the union of its tools' `composition_reference`, rendered from each
+  `mcptools.Tool.Composition`. Only platform tools may be named there.
+
+A `loader.*` operation is never declared (loaders and source connectors are granted those by their
+kind), and an unknown name is refused. The platform applies these rules at upload, install and
+upgrade (`OGA-DKIT-VAL-1056`). The SDK applies the same rules, with the same message
+(`*manifest.ToolGrantError`):
+
+- `mcptools.RenderToolsManifest` and `manifest.ParseToolDefinitions` refuse a composition the
+  platform would refuse, so `go generate` fails rather than the upload.
+- `manifest.ValidateAgentTools(agentName, tools, kitTools)` checks an agent's list; call it from
+  your kit's tests. `manifest.PlatformTools()` lists the platform tools.
+
+At run time, `mcptools` holds each tool's handler to that tool's own `Composition`: a
+`gateway.CallTool` to a platform tool the running tool does not list returns a
+`*gateway.CompositionError` and sends nothing. The gateway grants the sidecar the union over all
+its tools, so this is the stricter, per-tool check, meant to fail your handler tests when a
+handler drifts from its declaration. Calls made outside a tool handler (agents, loaders) are not
+checked by the SDK.
+
+A kit upgrade that removes a tool from a declaration takes effect on the sidecar's next call,
+without a restart. Needs a platform release with OGA-1121; an older platform grants agents and
+MCP servers nothing.
+
 ## Test with mocks
 
 `transfer.FakeCommitClient` records every prepare / put / complete call so kit tests can assert on the artifact body, transport mode, and request shape without standing up a gateway:

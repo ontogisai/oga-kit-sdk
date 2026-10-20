@@ -109,9 +109,11 @@ type toolBlock struct {
 
 // RenderToolsManifest renders a kit's tools/*.yaml from its tool definitions and
 // manifest metadata. Output is deterministic (stable field + key order) so it
-// can be committed and drift-checked. Every tool's InputSchema is validated
-// (via manifest.ValidateToolInputSchema — the SAME check the platform runs at
-// install/upload), so a malformed schema fails here, at emit/`go generate` time.
+// can be committed and drift-checked. Every tool's InputSchema and Composition
+// are validated (via manifest.ValidateToolInputSchema and
+// manifest.ValidateCompositionReference — the SAME checks the platform runs at
+// install/upload), so a malformed schema or a composition naming a tool the
+// platform does not grant fails here, at emit/`go generate` time.
 func RenderToolsManifest(tools []Tool, meta ManifestMeta) ([]byte, error) {
 	if meta.Name == "" {
 		return nil, fmt.Errorf("manifest meta: name is required")
@@ -134,6 +136,11 @@ func RenderToolsManifest(tools []Tool, meta ManifestMeta) ([]byte, error) {
 			return nil, fmt.Errorf("tool %q: input_schema is not valid JSON: %w", t.Name, err)
 		}
 		if err := sdkmanifest.ValidateToolInputSchema(t.Name, schemaMap); err != nil {
+			return nil, err
+		}
+		// The composition is the sidecar's tool grant (OGA-1121): a name the
+		// platform would refuse fails the render, not the kit upload.
+		if err := sdkmanifest.ValidateCompositionReference(meta.Name, t.Name, t.Composition); err != nil {
 			return nil, err
 		}
 

@@ -74,9 +74,10 @@ type ToolDefinitionYAML struct {
 	// Mutates marks a state-changing tool (confirm-before-write gate).
 	Mutates bool `yaml:"mutates,omitempty" json:"mutates,omitempty"`
 
-	// CompositionReference records the platform Tier 1/2 tools the sidecar
-	// handler calls internally. Documentation only — the platform does not read
-	// it; carried here so a strict author-side round-trip does not lose it.
+	// CompositionReference lists the platform tools (kg_*) the sidecar handler
+	// calls through the Platform Gateway. The union over a file's tools is the
+	// MCP server sidecar's tool grant: the gateway refuses it any other tool
+	// (OGA-1121). Only platform tools may be named (ValidateCompositionReference).
 	CompositionReference []string `yaml:"composition_reference,omitempty" json:"composition_reference,omitempty"`
 }
 
@@ -88,6 +89,9 @@ type ToolDefinitionYAML struct {
 //   - input_schema is structurally valid JSON Schema (has a valid "type"), and
 //     every `description` within it (recursively) is a plain string, never a
 //     localized object (OGA-582)
+//   - every composition_reference name is a platform tool, never a loader
+//     operation (OGA-1121; the platform applies it at upload and install,
+//     returning a *ToolGrantError here)
 //
 // An empty tool list is valid (returns nil, nil). Returns the parsed tools so a
 // caller can do further checks (e.g. schema/runtime parity).
@@ -138,6 +142,9 @@ func ParseToolDefinitions(data []byte) ([]*ToolDefinitionYAML, error) {
 		}
 
 		if err := ValidateToolInputSchema(tool.Name, tool.InputSchema); err != nil {
+			return nil, err
+		}
+		if err := ValidateCompositionReference(file.Metadata.Name, tool.Name, tool.CompositionReference); err != nil {
 			return nil, err
 		}
 	}

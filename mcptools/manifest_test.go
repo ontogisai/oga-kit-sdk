@@ -2,6 +2,7 @@ package mcptools_test
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -115,5 +116,20 @@ func TestRenderToolsManifest_DuplicateName(t *testing.T) {
 	dup := append(goodTools(), goodTools()...)
 	if _, err := mcptools.RenderToolsManifest(dup, sampleMeta()); err == nil {
 		t.Fatal("expected duplicate tool name to be rejected")
+	}
+}
+
+// TestRenderToolsManifest_RefusesCompositionThePlatformRefuses fails the render
+// when a tool's Composition names a tool the platform will not grant
+// (OGA-1121), with the platform's own error.
+func TestRenderToolsManifest_RefusesCompositionThePlatformRefuses(t *testing.T) {
+	for _, bad := range []string{"loader.complete", "kg_get_entities", "fm_other_tool"} {
+		tools := goodTools()
+		tools[0].Composition = []string{"kg_get_entity", bad}
+		_, err := mcptools.RenderToolsManifest(tools, sampleMeta())
+		var ge *sdkmanifest.ToolGrantError
+		if !errors.As(err, &ge) || ge.Tool != bad || ge.Field != sdkmanifest.CompositionToolsField {
+			t.Errorf("composition with %q: err = %v, want *ToolGrantError", bad, err)
+		}
 	}
 }
