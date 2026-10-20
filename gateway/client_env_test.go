@@ -60,9 +60,10 @@ func TestNewClientFromEnv_BootstrapMintsAndAuthenticates(t *testing.T) {
 	}
 }
 
-// TestNewClientFromEnv_TokenlessWhenNoBootstrap verifies the dev/tokenless path:
-// no bootstrap env and no token file → no managed token, a no-op Closer, and no
-// Authorization header on requests.
+// TestNewClientFromEnv_TokenlessWhenNoBootstrap verifies the client with no
+// credential: no bootstrap env and no token file → no managed token, a no-op
+// Closer, and no Authorization header on requests (which the gateway refuses
+// with 401; the client never invents a credential).
 func TestNewClientFromEnv_TokenlessWhenNoBootstrap(t *testing.T) {
 	var hadAuth atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/ontogisai/oga-kit-sdk/internal/redact"
 )
 
 // Client is a thin HTTP client for the loader contract. The platform's
@@ -200,7 +202,7 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	if resp.StatusCode != http.StatusOK {
 		// Try to decode the body as HealthResponse first (some loaders
 		// return 503 with a body); fall back to HTTPError.
-		body, readErr := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		if readErr == nil {
 			var hr HealthResponse
 			if json.Unmarshal(body, &hr) == nil && hr.Status != "" {
@@ -233,21 +235,37 @@ type HTTPError struct {
 	// Path is the request path (for debugging).
 	Path string
 
-	// Body is the decoded ErrorResponse, when one was provided. May be
-	// nil if the loader returned an empty or non-JSON body.
+	// Body is the decoded ErrorResponse, when one was provided. It is nil
+	// when the loader returned an empty body or a JSON body with no
+	// message; a non-JSON body becomes its Message. The body is read up to
+	// 64 KiB. Its fields are the loader's text: log [HTTPError.Error],
+	// which quotes a bounded summary of them, not the fields.
 	Body *ErrorResponse
 }
 
+// Error quotes at most redact.MaxQuotedBody (512) bytes of the loader's
+// answer: up to 448 bytes of its message (an S3-style XML body is reduced to
+// its code) and up to 64 of its code (OGA-1036). The platform wraps this text
+// into its own errors and workflow results.
 func (e *HTTPError) Error() string {
 	if e.Body != nil && e.Body.Message != "" {
+		msg := redact.ErrorBodyMax([]byte(e.Body.Message), maxQuotedMessage)
 		if e.Body.Code != "" {
 			return fmt.Sprintf("loader %s: %d %s (code=%s)",
-				e.Path, e.StatusCode, e.Body.Message, e.Body.Code)
+				e.Path, e.StatusCode, msg, redact.Truncate(e.Body.Code, maxQuotedCode))
 		}
-		return fmt.Sprintf("loader %s: %d %s", e.Path, e.StatusCode, e.Body.Message)
+		return fmt.Sprintf("loader %s: %d %s", e.Path, e.StatusCode, msg)
 	}
 	return fmt.Sprintf("loader %s: HTTP %d", e.Path, e.StatusCode)
 }
+
+// Error-body bounds: how much of an error answer is read, and how much of it
+// HTTPError.Error quotes. The code and the message share redact.MaxQuotedBody.
+const (
+	maxErrorBodyRead = 64 << 10
+	maxQuotedCode    = 64
+	maxQuotedMessage = redact.MaxQuotedBody - maxQuotedCode
+)
 
 // IsNotFound reports whether err is an HTTPError with status 404.
 func IsNotFound(err error) bool {
@@ -261,7 +279,7 @@ func IsNotFound(err error) bool {
 // --- helpers ---
 
 func decodeHTTPError(resp *http.Response, path string) error {
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 	return &HTTPError{
 		StatusCode: resp.StatusCode,
 		Path:       path,

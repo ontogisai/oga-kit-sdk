@@ -26,7 +26,9 @@ import (
 //
 // When no bootstrap identity is configured (AGENT_BOOTSTRAP_KIND unset), it
 // returns (nil, noop, nil) so the caller can fall back to a legacy token file
-// (transfer.WithTokenPath) or, in a dev-mode gateway, no Authorization header.
+// (transfer.WithTokenPath). Without either, the caller sends no Authorization
+// header and the Platform Gateway refuses it with 401: the gateway has no
+// tokenless mode.
 //
 // AGENT_REGISTRATION_ID ("{tenant}.{name}", manager-injected) is the identity
 // the mint endpoint authorizes the bootstrap credential against.
@@ -38,7 +40,7 @@ func WorkloadTokenProviderFromEnv(ctx context.Context, gatewayURL string) (provi
 		return nil, noop, fmt.Errorf("resolve bootstrap identity: %w", err)
 	}
 	if bp == nil {
-		// No bootstrap identity injected — caller falls back to token file / dev.
+		// No bootstrap identity injected: the caller falls back to a token file.
 		return nil, noop, nil
 	}
 

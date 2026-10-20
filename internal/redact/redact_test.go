@@ -53,7 +53,7 @@ func TestScrubURLError_Wrapped(t *testing.T) {
 func TestErrorBody_S3SignatureMismatch(t *testing.T) {
 	body := `<?xml version="1.0" encoding="UTF-8"?>
 <Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message><AWSAccessKeyId>ASIAEXAMPLE</AWSAccessKeyId><StringToSign>AWS4-HMAC-SHA256 x</StringToSign><SignatureProvided>deadbeef</SignatureProvided><CanonicalRequest>PUT /k X-Amz-Security-Token=SESSIONTOKEN</CanonicalRequest><RequestId>REQ123</RequestId></Error>`
-	got := ErrorBody([]byte(body), 512)
+	got := ErrorBody([]byte(body))
 	for _, leak := range []string{"ASIAEXAMPLE", "deadbeef", "SESSIONTOKEN", "CanonicalRequest"} {
 		if strings.Contains(got, leak) {
 			t.Errorf("kept %q: %q", leak, got)
@@ -66,14 +66,49 @@ func TestErrorBody_S3SignatureMismatch(t *testing.T) {
 
 func TestErrorBody_PlainIsCappedOnRuneBoundary(t *testing.T) {
 	s := strings.Repeat("é", 300) // 2 bytes each
-	got := ErrorBody([]byte(s), 101)
+	got := ErrorBodyMax([]byte(s), 101)
 	if !strings.HasSuffix(got, "…(truncated)") {
 		t.Fatalf("not truncated: %d bytes", len(got))
 	}
 	if strings.ContainsRune(strings.TrimSuffix(got, "…(truncated)"), '\uFFFD') {
 		t.Errorf("split a rune")
 	}
-	if ErrorBody([]byte("  short  "), 512) != "short" {
+	if ErrorBody([]byte("  short  ")) != "short" {
 		t.Errorf("short body not trimmed")
+	}
+}
+
+// quoted is how many bytes of the body a summary kept.
+func quoted(summary string) int {
+	return len(strings.TrimSuffix(summary, "…(truncated)"))
+}
+
+func TestErrorBody_DefaultsToMaxQuotedBody(t *testing.T) {
+	// The platform's ceiling for a body quoted in an error is 512 bytes or
+	// less (tenant-data-privacy §3, OGA-1036). Raising it is a policy change.
+	if MaxQuotedBody > 512 {
+		t.Fatalf("MaxQuotedBody = %d, above the 512-byte ceiling", MaxQuotedBody)
+	}
+	body := []byte(strings.Repeat("x", 4096))
+	if got := quoted(ErrorBody(body)); got != MaxQuotedBody {
+		t.Errorf("ErrorBody quoted %d bytes, want %d", got, MaxQuotedBody)
+	}
+	exact := []byte(strings.Repeat("x", MaxQuotedBody))
+	if got := ErrorBody(exact); got != string(exact) {
+		t.Errorf("a %d-byte body was truncated", MaxQuotedBody)
+	}
+}
+
+// A caller cannot quote more than MaxQuotedBody, and a non-positive max does
+// not turn the cap off (Truncate treats max <= 0 as unbounded).
+func TestErrorBodyMax_NeverExceedsMaxQuotedBody(t *testing.T) {
+	body := []byte(strings.Repeat("x", 4096))
+	for _, max := range []int{MaxQuotedBody + 1, 1 << 20, 0, -1} {
+		if got := quoted(ErrorBodyMax(body, max)); got != MaxQuotedBody {
+			t.Errorf("ErrorBodyMax(_, %d) quoted %d bytes, want %d", max, got, MaxQuotedBody)
+		}
+	}
+	if got := quoted(ErrorBodyMax(body, 256)); got != 256 {
+		t.Errorf("ErrorBodyMax(_, 256) quoted %d bytes, want 256", got)
 	}
 }

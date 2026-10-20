@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ontogisai/oga-kit-sdk/internal/redact"
 	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
@@ -311,12 +312,12 @@ func (tm *TokenManager) doMint(ctx context.Context) (string, time.Time, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode != http.StatusOK {
+		return "", time.Time{}, fmt.Errorf("mint returned %d: %s", resp.StatusCode, errorBodySummary(resp.Body))
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("read mint response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", time.Time{}, fmt.Errorf("mint returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -346,13 +347,12 @@ func (tm *TokenManager) doRefresh(ctx context.Context, currentToken string) (str
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode != http.StatusOK {
+		return "", time.Time{}, fmt.Errorf("refresh returned %d: %s", resp.StatusCode, errorBodySummary(resp.Body))
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("read refresh response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", time.Time{}, fmt.Errorf("refresh returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {
@@ -368,6 +368,15 @@ func (tm *TokenManager) doRefresh(ctx context.Context, currentToken string) (str
 	}
 
 	return result.Token, result.ExpiresAt, nil
+}
+
+// errorBodySummary reads an error response up to 64 KiB and returns at most
+// redact.MaxQuotedBody bytes of it for an error message (OGA-1036). The
+// gateway's answer is its own error JSON; anything between the sidecar and the
+// gateway can answer with more.
+func errorBodySummary(body io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(body, 64<<10))
+	return redact.ErrorBody(b)
 }
 
 func (tm *TokenManager) atomicWriteToken(token string) error {

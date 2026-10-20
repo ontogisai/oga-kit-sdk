@@ -19,8 +19,9 @@ const (
 	defaultGatewayURL   = "http://localhost:8050"
 )
 
-// noopCloser is returned when there is no token manager to stop (dev /
-// tokenless), so callers can always defer Close without a nil check.
+// noopCloser is returned when there is no token manager to stop (no bootstrap
+// identity and no token file), so callers can always defer Close without a nil
+// check.
 type noopCloser struct{}
 
 func (noopCloser) Close() error { return nil }
@@ -46,13 +47,15 @@ func (c tokenManagerCloser) Close() error {
 // so every request carries a fresh bearer.
 //
 // The returned io.Closer stops the token manager's renewal goroutine — call it
-// on shutdown. It is never nil (a no-op Closer is returned in dev/tokenless
-// mode), so callers can unconditionally defer Close.
+// on shutdown. It is never nil (a no-op Closer is returned when there is no
+// token manager), so callers can unconditionally defer Close.
 //
 // A bootstrap-mint failure is fatal and returned as an error: the sidecar
 // cannot prove identity and must not start serving. A legacy-mode init failure
-// is non-fatal (the client still serves on the static file token, or tokenless
-// in dev).
+// is non-fatal (the client still sends the static file token). With no
+// bootstrap identity and no token file the client sends no Authorization
+// header, and the Platform Gateway refuses its requests with 401: the gateway
+// has no tokenless mode.
 func NewClientFromEnv(ctx context.Context) (*PlatformGatewayClient, io.Closer, error) {
 	gatewayURL := os.Getenv(envGatewayURL)
 	if gatewayURL == "" {
