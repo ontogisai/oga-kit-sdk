@@ -23,7 +23,7 @@ func answering(t *testing.T, status int, body []byte) *PlatformGatewayClient {
 		_, _ = w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
-	return NewPlatformGatewayClient(srv.URL, "", "acme")
+	return NewPlatformGatewayClient(srv.URL, "acme")
 }
 
 // toolErrorBody is the structured tool error the Platform Gateway answers
