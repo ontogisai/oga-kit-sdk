@@ -331,6 +331,11 @@ type EgressSyncSpec struct {
 	// delivered by one delta run that orders owners before dependents within the
 	// publication, which a stream of single changes cannot do. It is a
 	// declaration about how the integration is fed, and it is reversible.
+	//
+	// events is DEPRECATED (21 Oct 2026): declare off in a new kit, and move an
+	// existing one to off. The platform removes change delivery by events once
+	// runs started by auto-run are proven in production (OGA-1135); until then
+	// events remains the default and keeps working.
 	ChangeDelivery ChangeDelivery `yaml:"change_delivery,omitempty"`
 
 	// SyncGeneration is a positive integer the platform records with this
@@ -348,7 +353,9 @@ type ChangeDelivery string
 
 const (
 	// ChangeDeliveryEvents feeds the component each change as it is ingested,
-	// in addition to runs. The default.
+	// in addition to runs. The default. DEPRECATED: see
+	// [EgressSyncSpec.ChangeDelivery]. Stated in prose rather than with Go's
+	// deprecation marker, which would flag every use of the default.
 	ChangeDeliveryEvents ChangeDelivery = "events"
 	// ChangeDeliveryOff feeds the component by runs only.
 	ChangeDeliveryOff ChangeDelivery = "off"
