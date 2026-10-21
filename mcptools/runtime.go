@@ -25,9 +25,11 @@ const (
 
 // ToolHandler runs a single tool: it receives the JSON-RPC arguments and
 // returns a JSON-marshalable result, or an error. A returned error is surfaced
-// to the caller as an MCP tools/call result with isError=true (the platform
-// proxy carries it through unchanged) — it does NOT become a JSON-RPC
-// transport error.
+// to the caller as an MCP tools/call result with isError=true — it does NOT
+// become a JSON-RPC transport error. The platform tool server carries the
+// isError to its caller as its structured tool error OGA-MCPG-DEPS-4003, with
+// the error's text (capped at 512 bytes) in the message; a successful result
+// reaches the caller unchanged (OGA-1133).
 type ToolHandler func(ctx context.Context, args json.RawMessage) (any, error)
 
 // Tool is a registered tool: its MCP definition plus the handler that runs it.

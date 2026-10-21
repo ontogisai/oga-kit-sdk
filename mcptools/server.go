@@ -176,7 +176,12 @@ func (r *Runtime) handleToolsCall(ctx context.Context, w http.ResponseWriter, id
 	result, err := tool.Handler(ctx, params.Arguments)
 	if err != nil {
 		// MCP convention: tool errors are results with isError=true, not
-		// JSON-RPC transport errors. The platform proxy carries them through.
+		// JSON-RPC transport errors. The platform tool server turns this result
+		// into its structured tool error OGA-MCPG-DEPS-4003, with err.Error()
+		// (capped at 512 bytes) in the message, so a caller sees isError and a
+		// kit agent behind the Platform Gateway gets HTTP 424 and a
+		// gateway.ToolError (OGA-1133). A successful result reaches the caller
+		// unchanged.
 		writeJSONRPCResult(w, id, mcpErrorResult(err))
 		return
 	}
