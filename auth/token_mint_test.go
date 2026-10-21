@@ -44,7 +44,8 @@ func newMintServer(t *testing.T) *mintServer {
 func TestNewTokenManager_BootstrapMode_K8sSA(t *testing.T) {
 	ms := newMintServer(t)
 
-	// Projected SA token file (read by K8sSABootstrap each mint).
+	// Projected ServiceAccount token, as kubelet mounts it (read by
+	// K8sSABootstrap on each mint).
 	dir := t.TempDir()
 	saPath := filepath.Join(dir, "token")
 	if err := os.WriteFile(saPath, []byte("projected-sa-jwt\n"), 0o600); err != nil {
@@ -107,32 +108,16 @@ func TestNewTokenManager_BootstrapMode_Secret(t *testing.T) {
 	}
 }
 
-func TestNewTokenManager_BootstrapMode_Validation(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *TokenManagerConfig
-	}{
-		{"missing IssueURL", &TokenManagerConfig{Bootstrap: SecretBootstrap{Secret: "x"}, AgentRegistrationID: "t.a"}},
-		{"missing AgentRegistrationID", &TokenManagerConfig{Bootstrap: SecretBootstrap{Secret: "x"}, IssueURL: "http://x"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := NewTokenManager(context.Background(), tt.cfg); err == nil {
-				t.Fatal("expected error")
-			}
-		})
-	}
-}
-
 func TestNewTokenManager_BootstrapMode_InitialMintFailsFatally(t *testing.T) {
 	// Gateway returns 401 — the initial mint must fail and NewTokenManager must
-	// return an error (the agent cannot start serving without a token).
+	// return an error (the agent cannot start serving without a token). A
+	// context that ends during the retry waits ends the retries.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"error":"bootstrap_rejected"}`, http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_, err := NewTokenManager(ctx, &TokenManagerConfig{
 		Bootstrap:           SecretBootstrap{Secret: "x"},

@@ -15,7 +15,7 @@ Domain-agnostic SDK for ONTOGIS AI Platform kit development.
 - **Ontology registrar** convenience layer for kit authors who think in "register a batch of types" terms
 - **Agent runtime chassis** (A2A-compliant HTTP server with LLM + MCP tool access)
 - **Platform Gateway client** (single endpoint for all platform services)
-- **Token management** (sliding renewal, atomic rotation, credential watching)
+- **Workload-token authentication** (`auth/`): the sidecar's platform token, minted from the bootstrap identity the platform gives it and renewed in memory (see [Authenticating to the platform](#authenticating-to-the-platform))
 - **Testing utilities** (mock MCP server, mock loader sidecar, fake commit client)
 
 Zero dependencies on `oga-platform`. Kit developers depend only on this module.
@@ -24,6 +24,98 @@ Zero dependencies on `oga-platform`. Kit developers depend only on this module.
 
 ```bash
 go get github.com/ontogisai/oga-kit-sdk@latest
+```
+
+## Authenticating to the platform
+
+A kit sidecar authenticates to the Platform Gateway with a **workload token** that the SDK mints from a
+bootstrap identity the platform gives the sidecar. The kit never handles a credential itself: it calls
+the entry point for its role ([below](#which-entry-point-by-role)) and treats an error from it as fatal.
+
+1. **The platform provisions the identity.** When it deploys the sidecar, the platform's Sidecar
+   Manager sets:
+
+   | Variable | Value |
+   |---|---|
+   | `PLATFORM_GATEWAY_URL` | The Platform Gateway's base URL |
+   | `OGA_TENANT_ID` | The tenant the sidecar serves |
+   | `AGENT_REGISTRATION_ID` | The sidecar's identity, `{tenant}.{name}` |
+   | `AGENT_BOOTSTRAP_KIND` | `k8s_sa` on Kubernetes, `secret` elsewhere (the Docker runtime) |
+   | `AGENT_SA_TOKEN_PATH` | With `k8s_sa`: the projected ServiceAccount token, `/var/run/secrets/oga/sa-token/token`. The pod runs as its own ServiceAccount; the token's audience is `oga-platform-gateway`, it is valid for an hour, and kubelet rotates it. |
+   | `AGENT_BOOTSTRAP_SECRET` | With `secret`: the sidecar's bootstrap secret |
+
+2. **The SDK mints a workload token:** `POST {PLATFORM_GATEWAY_URL}/auth/token/issue` with
+   `bootstrap_kind` and `agent_registration_id` in a JSON body. A `k8s_sa` token travels in the body
+   as `bootstrap_token`; a `secret` travels in `Authorization: Bearer`, never in the body. The gateway
+   checks that the identity belongs to the requested registration id (a Kubernetes TokenReview of the
+   ServiceAccount token, or a constant-time comparison with the stored secret) and answers
+   `{"token", "expires_at"}`: a signed JWT with audience `oga-platform-gateway`, valid for 12 hours,
+   whose `scope` claim carries the grant of the sidecar's kind.
+
+3. **The token lives in memory only.** At 50% of its lifetime (about 6 hours) the SDK mints again,
+   re-reading the bootstrap identity each time, so a rotated ServiceAccount token is picked up. Each
+   mint is tried up to 5 times, waiting 1, 2, 4 and 8 seconds between attempts. Nothing is read from
+   or written to disk, and the previous token is never presented, so an expired token cannot block
+   renewal.
+
+4. **Every gateway call carries `Authorization: Bearer <workload token>`.** The gateway takes the
+   tenant and the principal from the token, never from the request (`X-Tenant-ID` is
+   informational). It permits a tool or a loader operation only when the sidecar is granted it: a
+   loader or a source connector by its kind (the three loader operations), an agent or an MCP server
+   by what its kit declares ([Tool grants](#tool-grants-what-your-agent-and-mcp-server-may-call)).
+
+5. **Failure is loud.** With a bootstrap identity configured, a failed first mint is returned as an
+   error, and the sidecar must exit rather than serve. The mint endpoint answers:
+
+   | Status | Code | Meaning |
+   |---|---|---|
+   | 401 | `OGA-AGNT-AUTH-4601` | The bootstrap identity was rejected |
+   | 403 | `OGA-AGNT-AUTH-4602` | The identity is valid but bound to another sidecar |
+   | 400 | `OGA-AGNT-AUTH-4603` | Malformed request: missing or malformed registration id, unknown kind |
+   | 403 | `OGA-AGNT-AUTH-4604` | The sidecar's grant could not be resolved |
+   | 503 | `OGA-AGNT-AUTH-4605` | Token minting is not configured on this gateway |
+   | 500 | `OGA-AGNT-AUTH-4606` | The gateway could not issue the token |
+
+   The error the SDK returns names the status and quotes at most 512 bytes of the answer. An
+   `AGENT_BOOTSTRAP_KIND` the SDK does not know, or one whose credential variable is unset, is an
+   error too. With no bootstrap identity (`AGENT_BOOTSTRAP_KIND` unset, for example a sidecar run
+   outside the platform), the SDK mints nothing and sends no `Authorization` header, and the gateway
+   answers 401: there is no tokenless mode.
+
+### Which entry point, by role
+
+Each one reads the environment above, mints, renews, and stops renewing on close.
+
+| Role | Entry point |
+|---|---|
+| Agent | `agent.ConnectRuntimeDeps`, which wires the gateway client. `RuntimeDeps.Close` stops renewal. |
+| MCP tool server | `mcptools.NewRuntimeFromEnv`. `Runtime.Close` (called by `ListenAndServe` on shutdown) stops renewal. |
+| Any other code that calls the gateway | `gateway.NewClientFromEnv`. The returned `io.Closer` stops renewal. |
+| Loader or source connector on `transfer.HTTPCommitClient` | `auth.WorkloadTokenProviderFromEnv`, passed with `transfer.WithTokenProvider`. |
+| Time-series sink | `connector.NewHTTPTimeseriesSink(baseURL, tp)`, with `tp` returning the same provider's token. |
+
+```go
+provider, stop, err := auth.WorkloadTokenProviderFromEnv(ctx, gatewayURL)
+if err != nil {
+    // A configured identity the gateway refused: do not serve.
+    slog.Error("workload token", "error", err)
+    os.Exit(1)
+}
+defer stop()
+
+// With no bootstrap identity, provider is nil and WithTokenProvider ignores it.
+cc, err := transfer.NewHTTPCommitClient(gatewayURL, tenantID, "my-kit",
+    transfer.WithTokenProvider(provider))
+if err != nil {
+    slog.Error("commit client", "error", err)
+    os.Exit(1)
+}
+
+var tp connector.TokenProvider
+if provider != nil {
+    tp = func(context.Context) (string, error) { return provider(), nil }
+}
+sink := connector.NewHTTPTimeseriesSink(intakeURL, tp)
 ```
 
 ## Loader sidecars
@@ -128,8 +220,10 @@ package main
 import (
     "context"
     "encoding/json"
+    "log"
     "os"
 
+    "github.com/ontogisai/oga-kit-sdk/auth"
     "github.com/ontogisai/oga-kit-sdk/loader"
     "github.com/ontogisai/oga-kit-sdk/transfer"
 )
@@ -169,10 +263,21 @@ func (l *myDataLoader) Load(ctx context.Context, lc *loader.LoadContext) (*loade
 // (Job, Formats, Health implementations omitted for brevity.)
 
 func main() {
+    ctx := context.Background()
+    gatewayURL := os.Getenv("PLATFORM_GATEWAY_URL")
+
+    // The sidecar's workload token (see "Authenticating to the platform").
+    provider, stop, err := auth.WorkloadTokenProviderFromEnv(ctx, gatewayURL)
+    if err != nil {
+        log.Fatalf("workload token: %v", err)
+    }
+    defer stop()
+
     cc, _ := transfer.NewHTTPCommitClient(
-        os.Getenv("PLATFORM_GATEWAY_URL"),
+        gatewayURL,
         os.Getenv("OGA_TENANT_ID"),
         "my-kit",
+        transfer.WithTokenProvider(provider),
     )
     cfg := &loader.ServerConfig{
         Port: "8400",
@@ -184,7 +289,7 @@ func main() {
             loader.WithLoaderKind(transfer.KindData),
         },
     }
-    loader.ListenAndServe(context.Background(), cfg, &myDataLoader{})
+    loader.ListenAndServe(ctx, cfg, &myDataLoader{})
 }
 ```
 
@@ -476,11 +581,11 @@ func main() {
         GatewayURL:       envOr("PLATFORM_GATEWAY_URL", "http://localhost:8050"),
         EventStreamURL:   envOr("EVENT_STREAM_URL", "nats://localhost:4222"),
         EventStreamCreds: envOr("EVENT_STREAM_CREDENTIALS_PATH", "/run/oga/agents/creds"),
-        TokenPath:        envOr("AGENT_SERVICE_TOKEN_PATH", "/run/oga/agents/token"),
         AgentID:          profile.AgentID,
         TenantID:         envOr("OGA_TENANT_ID", ""),
     })
     if err != nil {
+        // Includes a failed first workload-token mint: do not serve.
         slog.Error("connect failed", "error", err)
         os.Exit(1)
     }
@@ -708,7 +813,7 @@ ship a malformed manifest get a clear error during install.
 | `manifest/` | `KitManifest` types, `Parse`, `Validate` |
 | `agent/` | `AgentRuntime` interface, `DefaultRuntime`, `ListenAndServe` |
 | `gateway/` | `PlatformGatewayClient` (MCP, LLM, workflows, inter-agent, registry) |
-| `auth/` | `TokenManager`, `CredentialWatcher` |
+| `auth/` | `TokenManager` (workload token from the bootstrap identity), `WorkloadTokenProviderFromEnv`, `CredentialWatcher` |
 | `testing/mcpmock` | Mock MCP server |
 | `testing/loadermock` | Programmable mock loader sidecar |
 

@@ -22,10 +22,9 @@ type RuntimeDepsConfig struct {
 	// EventStreamCreds is the path to event stream credentials.
 	EventStreamCreds string
 
-	// TokenPath is the path to the agent service token file.
-	TokenPath string
-
-	// AgentID is this agent's unique identifier.
+	// AgentID is this agent's unique identifier. It is the fallback
+	// registration id for the workload-token mint when the Sidecar Manager did
+	// not inject AGENT_REGISTRATION_ID.
 	AgentID string
 
 	// TenantID is the tenant this agent serves.
@@ -58,7 +57,7 @@ func ConnectRuntimeDeps(ctx context.Context, cfg *RuntimeDepsConfig) (*RuntimeDe
 		return nil, fmt.Errorf("TenantID is required")
 	}
 
-	gw := gateway.NewPlatformGatewayClient(cfg.GatewayURL, cfg.TokenPath, cfg.TenantID)
+	gw := gateway.NewPlatformGatewayClient(cfg.GatewayURL, cfg.TenantID)
 
 	deps := &RuntimeDeps{
 		Gateway:  gw,
@@ -66,9 +65,9 @@ func ConnectRuntimeDeps(ctx context.Context, cfg *RuntimeDepsConfig) (*RuntimeDe
 		AgentID:  cfg.AgentID,
 	}
 
-	// Acquire + rotate the workload token. The mode is selected by the
-	// manager-injected environment (OGA-404): bootstrap-mint when
-	// AGENT_BOOTSTRAP_KIND is set, else the legacy token-file + refresh path.
+	// Mint and renew the workload token from the bootstrap identity the
+	// Sidecar Manager injected (AGENT_BOOTSTRAP_KIND). With none, the agent
+	// has no token and the gateway answers its calls with 401.
 	tm, err := buildTokenManager(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -81,16 +80,15 @@ func ConnectRuntimeDeps(ctx context.Context, cfg *RuntimeDepsConfig) (*RuntimeDe
 	return deps, nil
 }
 
-// buildTokenManager selects how the agent acquires + rotates its gateway token
-// (OGA-404). It delegates to auth.NewTokenManagerFromEnv — the single source of
-// truth for the bootstrap-mint / legacy-file / none mode selection, shared with
-// the gateway env client and the MCP tools runtime (OGA-421). AGENT_REGISTRATION_ID
-// (manager-injected) wins; cfg.AgentID is the fallback registration id.
+// buildTokenManager builds the agent's workload-token manager. It delegates to
+// auth.NewTokenManagerFromEnv, the single source of truth for how a sidecar
+// acquires its gateway token, shared with the gateway env client and the MCP
+// tools runtime (OGA-421). AGENT_REGISTRATION_ID (manager-injected) wins;
+// cfg.AgentID is the fallback registration id.
 func buildTokenManager(ctx context.Context, cfg *RuntimeDepsConfig) (*auth.TokenManager, error) {
 	return auth.NewTokenManagerFromEnv(ctx, auth.EnvTokenManagerConfig{
 		GatewayURL:          cfg.GatewayURL,
 		AgentRegistrationID: cfg.AgentID,
-		TokenPath:           cfg.TokenPath,
 	})
 }
 

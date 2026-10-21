@@ -11,9 +11,9 @@ import (
 
 // EnvTokenManagerConfig configures NewTokenManagerFromEnv.
 type EnvTokenManagerConfig struct {
-	// GatewayURL is the Platform Access Gateway base URL. Required — the mint
-	// (/auth/token/issue) and legacy refresh (/auth/token/refresh) endpoints
-	// are derived from it.
+	// GatewayURL is the Platform Gateway base URL (PLATFORM_GATEWAY_URL).
+	// Required: the mint endpoint, GatewayURL + "/auth/token/issue", is derived
+	// from it.
 	GatewayURL string
 
 	// AgentRegistrationID is the "{tenant}.{name}" identity the mint endpoint
@@ -21,78 +21,48 @@ type EnvTokenManagerConfig struct {
 	// the AGENT_REGISTRATION_ID environment variable (injected by the Sidecar
 	// Manager) is unset.
 	AgentRegistrationID string
-
-	// TokenPath is the legacy token-file path (migration fallback). When set
-	// and no bootstrap env is present, the manager loads the initial token from
-	// this file and rotates it via /auth/token/refresh.
-	TokenPath string
 }
 
-// NewTokenManagerFromEnv builds a TokenManager using the OGA-404 mode selection
-// driven by the Sidecar-Manager-injected environment. It is the single source
-// of truth for "how does a sidecar acquire + rotate its gateway workload
-// token", shared by the agent runtime (agent.ConnectRuntimeDeps), the
-// gateway env client (gateway.NewClientFromEnv), and the MCP tools runtime
+// NewTokenManagerFromEnv builds a TokenManager from the environment the
+// platform's Sidecar Manager injects into every kit sidecar. It is the single
+// source of truth for how a sidecar acquires and renews its gateway workload
+// token, shared by the agent runtime (agent.ConnectRuntimeDeps), the gateway
+// env client (gateway.NewClientFromEnv) and the MCP tools runtime
 // (mcptools.NewRuntimeFromEnv).
 //
-// Mode selection:
+//   - AGENT_BOOTSTRAP_KIND set ("k8s_sa" or "secret"): the workload token is
+//     minted from the sidecar's bootstrap identity at
+//     GatewayURL + "/auth/token/issue", at once and again at 50% of each
+//     token's lifetime. AGENT_REGISTRATION_ID ("{tenant}.{name}") is the
+//     identity the mint endpoint authorizes against. A failure is returned as
+//     an error: the sidecar cannot prove its identity and must not start
+//     serving.
 //
-//   - Bootstrap-mint (preferred): when AGENT_BOOTSTRAP_KIND is set, the workload
-//     token is minted from a durable bootstrap identity (a Kubernetes projected
-//     ServiceAccount token, or a SecretStore secret) at /auth/token/issue — at
-//     boot and on every renewal. No token file. AGENT_REGISTRATION_ID
-//     ("{tenant}.{name}") is the identity the mint endpoint authorizes against.
-//     A failure here is FATAL (returned as a non-nil error): the sidecar cannot
-//     prove identity and must not start serving.
-//
-//   - Legacy file+refresh (migration fallback): when only TokenPath is set, the
-//     initial token is read from the mounted file and rotated via
-//     /auth/token/refresh. Init failure is NON-fatal — the helper logs a warning
-//     and returns (nil, nil) so the caller keeps running on the static file
-//     token until it expires.
-//
-//   - Neither: returns (nil, nil) — the caller runs without a managed token
-//     and sends no Authorization header, which the Platform Gateway refuses
-//     with 401 (it has no tokenless mode).
+//   - AGENT_BOOTSTRAP_KIND unset: returns (nil, nil). The caller runs without
+//     a token and sends no Authorization header, which the Platform Gateway
+//     refuses with 401: it has no tokenless mode. This is the case for a
+//     sidecar run outside the platform.
 func NewTokenManagerFromEnv(ctx context.Context, cfg EnvTokenManagerConfig) (*TokenManager, error) {
-	base := strings.TrimRight(cfg.GatewayURL, "/")
-
 	provider, err := BootstrapFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("resolve bootstrap identity: %w", err)
 	}
-
-	if provider != nil {
-		regID := os.Getenv("AGENT_REGISTRATION_ID")
-		if regID == "" {
-			regID = cfg.AgentRegistrationID
-		}
-		tm, mErr := NewTokenManager(ctx, &TokenManagerConfig{
-			Bootstrap:           provider,
-			IssueURL:            base + "/auth/token/issue",
-			AgentRegistrationID: regID,
-		})
-		if mErr != nil {
-			return nil, fmt.Errorf("mint workload token: %w", mErr)
-		}
-		kitlog.From(ctx).Info("workload token: bootstrap-mint mode", kitlog.KeyRegistrationID, regID)
-		return tm, nil
+	if provider == nil {
+		return nil, nil
 	}
 
-	if cfg.TokenPath != "" {
-		tm, mErr := NewTokenManager(ctx, &TokenManagerConfig{
-			TokenPath:  cfg.TokenPath,
-			RefreshURL: base + "/auth/token/refresh",
-		})
-		if mErr != nil {
-			// Non-fatal: fall back to the static file token. The sidecar still
-			// works until the token expires; we log so the gap is visible.
-			kitlog.From(ctx).Warn("token manager init failed; running without token rotation",
-				kitlog.Err(mErr), "token_path", cfg.TokenPath)
-			return nil, nil
-		}
-		return tm, nil
+	regID := os.Getenv("AGENT_REGISTRATION_ID")
+	if regID == "" {
+		regID = cfg.AgentRegistrationID
 	}
-
-	return nil, nil
+	tm, err := NewTokenManager(ctx, &TokenManagerConfig{
+		Bootstrap:           provider,
+		IssueURL:            strings.TrimRight(cfg.GatewayURL, "/") + "/auth/token/issue",
+		AgentRegistrationID: regID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mint workload token: %w", err)
+	}
+	kitlog.From(ctx).Info("workload token: minted from bootstrap identity", kitlog.KeyRegistrationID, regID)
+	return tm, nil
 }

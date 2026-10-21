@@ -16,7 +16,7 @@ import (
 // here exercise the JSON-RPC transport, not outbound gateway calls).
 func newTestRuntime(t *testing.T) *Runtime {
 	t.Helper()
-	gw := gateway.NewPlatformGatewayClient("http://localhost:8050", "", "tnt1")
+	gw := gateway.NewPlatformGatewayClient("http://localhost:8050", "tnt1")
 	return NewRuntime(gw, nil)
 }
 
@@ -144,7 +144,7 @@ func TestRuntime_HandlerHeldToItsComposition(t *testing.T) {
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer gwSrv.Close()
-	rt := NewRuntime(gateway.NewPlatformGatewayClient(gwSrv.URL, "", "tnt1"), nil)
+	rt := NewRuntime(gateway.NewPlatformGatewayClient(gwSrv.URL, "tnt1"), nil)
 
 	callTool := func(name string) ToolHandler {
 		return func(ctx context.Context, _ json.RawMessage) (any, error) {

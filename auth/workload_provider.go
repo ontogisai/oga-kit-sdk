@@ -7,28 +7,26 @@ import (
 	"strings"
 )
 
-// WorkloadTokenProviderFromEnv builds a workload-token provider for a non-agent
-// sidecar (data/ontology loaders, MCP servers) that calls the Platform Gateway
-// directly — i.e. a sidecar that does NOT go through the agent chassis
-// (agent.ConnectRuntimeDeps) but still needs to authenticate to the gateway
-// under OGA-404.
+// WorkloadTokenProviderFromEnv builds a workload-token provider for a sidecar
+// that calls the Platform Gateway without the agent runtime
+// (agent.ConnectRuntimeDeps): a loader or a source connector on
+// transfer.HTTPCommitClient, a time-series sink, or any other direct caller.
 //
 // When the Sidecar Manager has injected a bootstrap identity
-// (AGENT_BOOTSTRAP_KIND set — "secret" off-cluster, "k8s_sa" in-cluster), it
-// mints a platform RS256 workload token at {gatewayURL}/auth/token/issue and
-// rotates it in memory (sliding renewal, no token file), returning:
+// (AGENT_BOOTSTRAP_KIND set: "k8s_sa" on Kubernetes, "secret" elsewhere), it
+// mints a platform workload token at {gatewayURL}/auth/token/issue and renews
+// it in memory at 50% of its lifetime, returning:
 //   - provider: a func() string yielding the current bearer token, suitable for
 //     transfer.WithTokenProvider or any per-request token hook;
 //   - stop: a func() that stops the renewal loop (call on shutdown);
-//   - err: non-nil when a bootstrap identity IS configured but the initial mint
-//     failed — the caller MUST treat this as fatal (the sidecar cannot prove
-//     identity and must not start serving), never silently run tokenless.
+//   - err: non-nil when a bootstrap identity IS configured but the first mint
+//     failed. The caller MUST treat this as fatal (the sidecar cannot prove
+//     its identity and must not start serving), never run tokenless.
 //
-// When no bootstrap identity is configured (AGENT_BOOTSTRAP_KIND unset), it
-// returns (nil, noop, nil) so the caller can fall back to a legacy token file
-// (transfer.WithTokenPath). Without either, the caller sends no Authorization
-// header and the Platform Gateway refuses it with 401: the gateway has no
-// tokenless mode.
+// When no bootstrap identity is configured (AGENT_BOOTSTRAP_KIND unset, for
+// example a sidecar run outside the platform), it returns (nil, noop, nil).
+// The caller then sends no Authorization header, and the Platform Gateway
+// refuses its requests with 401: the gateway has no tokenless mode.
 //
 // AGENT_REGISTRATION_ID ("{tenant}.{name}", manager-injected) is the identity
 // the mint endpoint authorizes the bootstrap credential against.
@@ -40,7 +38,7 @@ func WorkloadTokenProviderFromEnv(ctx context.Context, gatewayURL string) (provi
 		return nil, noop, fmt.Errorf("resolve bootstrap identity: %w", err)
 	}
 	if bp == nil {
-		// No bootstrap identity injected: the caller falls back to a token file.
+		// No bootstrap identity injected: no token.
 		return nil, noop, nil
 	}
 

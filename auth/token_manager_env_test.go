@@ -11,57 +11,68 @@ import (
 	"time"
 )
 
-// issueRefreshGateway stands up a fake gateway capturing /auth/token/issue and
-// /auth/token/refresh hit counts so the env helper's mode selection can be
-// asserted.
-func issueRefreshGateway(t *testing.T) (url string, issueHits, refreshHits *int) {
+// issueGateway stands up a fake gateway serving POST /auth/token/issue and
+// counting its calls. Every other path is 404, as on the platform.
+func issueGateway(t *testing.T) (url string, issueHits *int) {
 	t.Helper()
-	var iss, ref int
+	var iss int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := map[string]any{"token": `{"expires_at":"2030-01-01T00:00:00Z"}`, "expires_at": time.Now().Add(time.Hour)}
-		switch r.URL.Path {
-		case "/auth/token/issue":
-			iss++
-		case "/auth/token/refresh":
-			ref++
-		default:
+		if r.URL.Path != "/auth/token/issue" {
 			http.NotFound(w, r)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(body)
+		iss++
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": "minted", "expires_at": time.Now().Add(time.Hour)})
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL, &iss, &ref
+	return srv.URL, &iss
 }
 
 func TestNewTokenManagerFromEnv_BootstrapMint(t *testing.T) {
-	url, issueHits, refreshHits := issueRefreshGateway(t)
+	url, issueHits := issueGateway(t)
 	t.Setenv("AGENT_BOOTSTRAP_KIND", "secret")
 	t.Setenv("AGENT_BOOTSTRAP_SECRET", "boot-s3cret")
 	t.Setenv("AGENT_REGISTRATION_ID", "tnt1.built-env-tools-mcp")
 
-	tm, err := NewTokenManagerFromEnv(context.Background(), EnvTokenManagerConfig{GatewayURL: url})
+	tm, err := NewTokenManagerFromEnv(context.Background(), EnvTokenManagerConfig{GatewayURL: url + "/"})
 	if err != nil {
 		t.Fatalf("NewTokenManagerFromEnv: %v", err)
 	}
 	if tm == nil {
-		t.Fatal("expected a token manager in bootstrap mode")
+		t.Fatal("expected a token manager when a bootstrap identity is configured")
 	}
 	defer tm.Stop()
 
-	if *issueHits == 0 {
-		t.Error("expected an /auth/token/issue mint call")
+	if *issueHits != 1 {
+		t.Errorf("/auth/token/issue calls = %d, want 1", *issueHits)
 	}
-	if *refreshHits != 0 {
-		t.Errorf("bootstrap mode must not call /auth/token/refresh, got %d", *refreshHits)
+	if tm.Token() != "minted" {
+		t.Errorf("Token() = %q, want the minted token", tm.Token())
 	}
-	if tm.Token() == "" {
-		t.Error("expected a non-empty minted token")
+}
+
+// AGENT_REGISTRATION_ID wins; the config's id is the fallback when it is unset.
+func TestNewTokenManagerFromEnv_RegistrationIDFallback(t *testing.T) {
+	ms := newMintServer(t)
+	t.Setenv("AGENT_BOOTSTRAP_KIND", "secret")
+	t.Setenv("AGENT_BOOTSTRAP_SECRET", "boot-s3cret")
+	t.Setenv("AGENT_REGISTRATION_ID", "")
+
+	// newMintServer answers on every path, so the derived issue URL reaches it.
+	tm, err := NewTokenManagerFromEnv(context.Background(), EnvTokenManagerConfig{
+		GatewayURL: ms.URL, AgentRegistrationID: "tnt1.fallback-agent",
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManagerFromEnv: %v", err)
+	}
+	defer tm.Stop()
+	if ms.lastBody["agent_registration_id"] != "tnt1.fallback-agent" {
+		t.Errorf("agent_registration_id = %q, want the config fallback", ms.lastBody["agent_registration_id"])
 	}
 }
 
 func TestNewTokenManagerFromEnv_BootstrapFatalWhenSecretMissing(t *testing.T) {
-	url, _, _ := issueRefreshGateway(t)
+	url, _ := issueGateway(t)
 	t.Setenv("AGENT_BOOTSTRAP_KIND", "secret")
 	t.Setenv("AGENT_BOOTSTRAP_SECRET", "") // unset → BootstrapFromEnv errors
 	t.Setenv("AGENT_REGISTRATION_ID", "tnt1.x")
@@ -71,37 +82,27 @@ func TestNewTokenManagerFromEnv_BootstrapFatalWhenSecretMissing(t *testing.T) {
 	}
 }
 
-func TestNewTokenManagerFromEnv_LegacyFile(t *testing.T) {
-	url, issueHits, _ := issueRefreshGateway(t)
-	t.Setenv("AGENT_BOOTSTRAP_KIND", "") // no bootstrap env
-
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "token")
-	if err := os.WriteFile(tokenPath, []byte(`{"expires_at":"2030-01-01T00:00:00Z"}`), 0o600); err != nil {
-		t.Fatalf("write token: %v", err)
+// With no bootstrap identity there is no token manager, and a token file left
+// at the path the removed legacy mode read (AGENT_SERVICE_TOKEN_PATH) is not
+// read: nothing is minted and nothing is loaded (OGA-1134).
+func TestNewTokenManagerFromEnv_NoBootstrapNoToken(t *testing.T) {
+	url, issueHits := issueGateway(t)
+	leftover := filepath.Join(t.TempDir(), "service-token")
+	if err := os.WriteFile(leftover, []byte("legacy-file-token"), 0o600); err != nil {
+		t.Fatalf("write leftover token: %v", err)
 	}
-
-	tm, err := NewTokenManagerFromEnv(context.Background(), EnvTokenManagerConfig{GatewayURL: url, TokenPath: tokenPath})
-	if err != nil {
-		t.Fatalf("NewTokenManagerFromEnv (legacy): %v", err)
-	}
-	if tm == nil {
-		t.Fatal("expected a token manager in legacy file mode")
-	}
-	defer tm.Stop()
-	if *issueHits != 0 {
-		t.Errorf("legacy mode must not call /auth/token/issue, got %d", *issueHits)
-	}
-}
-
-func TestNewTokenManagerFromEnv_None(t *testing.T) {
 	t.Setenv("AGENT_BOOTSTRAP_KIND", "")
-	tm, err := NewTokenManagerFromEnv(context.Background(), EnvTokenManagerConfig{GatewayURL: "http://localhost:8050"})
+	t.Setenv("AGENT_SERVICE_TOKEN_PATH", leftover)
+
+	tm, err := NewTokenManagerFromEnv(context.Background(), EnvTokenManagerConfig{GatewayURL: url})
 	if err != nil {
-		t.Fatalf("NewTokenManagerFromEnv (none): %v", err)
+		t.Fatalf("NewTokenManagerFromEnv: %v", err)
 	}
 	if tm != nil {
-		t.Error("expected nil token manager when neither bootstrap nor token path is set")
 		tm.Stop()
+		t.Fatal("expected no token manager without a bootstrap identity")
+	}
+	if *issueHits != 0 {
+		t.Errorf("/auth/token/issue calls = %d, want 0", *issueHits)
 	}
 }

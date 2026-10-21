@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,9 +63,10 @@ func TestNewClientFromEnv_BootstrapMintsAndAuthenticates(t *testing.T) {
 }
 
 // TestNewClientFromEnv_TokenlessWhenNoBootstrap verifies the client with no
-// credential: no bootstrap env and no token file → no managed token, a no-op
-// Closer, and no Authorization header on requests (which the gateway refuses
-// with 401; the client never invents a credential).
+// bootstrap identity: no managed token, a no-op Closer, and no Authorization
+// header on requests (which the gateway refuses with 401; the client never
+// invents a credential). A token file left at the path the removed legacy mode
+// read (AGENT_SERVICE_TOKEN_PATH) is not read (OGA-1134).
 func TestNewClientFromEnv_TokenlessWhenNoBootstrap(t *testing.T) {
 	var hadAuth atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,10 +75,15 @@ func TestNewClientFromEnv_TokenlessWhenNoBootstrap(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	leftover := filepath.Join(t.TempDir(), "service-token")
+	if err := os.WriteFile(leftover, []byte("legacy-file-token"), 0o600); err != nil {
+		t.Fatalf("write leftover token: %v", err)
+	}
+
 	t.Setenv("PLATFORM_GATEWAY_URL", srv.URL)
 	t.Setenv("OGA_TENANT_ID", "tnt1")
 	t.Setenv("AGENT_BOOTSTRAP_KIND", "")
-	t.Setenv("AGENT_SERVICE_TOKEN_PATH", "")
+	t.Setenv("AGENT_SERVICE_TOKEN_PATH", leftover)
 
 	client, closer, err := NewClientFromEnv(context.Background())
 	if err != nil {

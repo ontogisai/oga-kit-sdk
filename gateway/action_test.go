@@ -6,8 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -25,7 +23,7 @@ func validInput() *SubmitActionInput {
 }
 
 func TestSubmitAction_Validation(t *testing.T) {
-	c := NewPlatformGatewayClient("http://localhost:0", "", "tnt1")
+	c := NewPlatformGatewayClient("http://localhost:0", "tnt1")
 	cases := []struct {
 		name string
 		mut  func(*SubmitActionInput)
@@ -54,23 +52,20 @@ func TestSubmitAction_Validation(t *testing.T) {
 
 func TestSubmitActionProposal_PostsAndGeneratesIDs(t *testing.T) {
 	var gotBody map[string]any
+	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/workflow" {
 			http.Error(w, "bad path", http.StatusNotFound)
 			return
 		}
+		gotAuth = r.Header.Get("Authorization")
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_ = json.NewEncoder(w).Encode(map[string]string{"workflow_id": "wf-123"})
 	}))
 	defer srv.Close()
 
-	// Token file (loadToken reads it for the Authorization header).
-	tokenPath := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenPath, []byte("test-token"), 0o600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	c := NewPlatformGatewayClient(srv.URL, tokenPath, "tnt1")
+	c := NewPlatformGatewayClient(srv.URL, "tnt1")
+	c.SetTokenProvider(func() string { return "test-token" })
 	sub, err := c.SubmitActionProposal(context.Background(), &ActionProposal{
 		ActionType:      "create_work_order",
 		HumanActionMode: HumanActionModeApproval,
@@ -88,5 +83,8 @@ func TestSubmitActionProposal_PostsAndGeneratesIDs(t *testing.T) {
 	}
 	if gotBody["type"] != WorkflowTypeAgentApproval {
 		t.Errorf("posted type = %v, want %s", gotBody["type"], WorkflowTypeAgentApproval)
+	}
+	if gotAuth != "Bearer test-token" {
+		t.Errorf("Authorization = %q, want the provider's token", gotAuth)
 	}
 }
