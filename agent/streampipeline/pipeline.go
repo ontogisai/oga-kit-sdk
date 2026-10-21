@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ontogisai/oga-kit-sdk/agent"
 	"github.com/ontogisai/oga-kit-sdk/gateway"
+	"github.com/ontogisai/oga-kit-sdk/internal/redact"
 	"github.com/ontogisai/oga-kit-sdk/kitlog"
 )
 
@@ -647,6 +648,7 @@ func (p *Pipeline) streamAssembly(
 	// (the query plus the gathered tool-result context). Gated by OGA_AGENT_TRACE.
 	if traceEnabled() {
 		const promptCap = 8192
+		// log-data:approved Philip 2026-10-20 OGA-1134: the composed prompt is what OGA_AGENT_TRACE shows; the flag is off in every committed config and turning it on is a time-boxed approval
 		slog.InfoContext(ctx, "trace: effective reasoning prompt",
 			"actor", input.Actor.ID,
 			"tool_results", len(results),
@@ -946,9 +948,15 @@ func logDrainedEvent(ctx context.Context, logger *slog.Logger, input Input, evt 
 		previewCap = DefaultConfig().MaxResultPreviewBytes
 	}
 
+	// Every line below runs only under OGA_AGENT_TRACE or OGA_PROACTIVE_REACT_LOG
+	// (the callers check reactLog). Both are off in every committed config, and
+	// turning one on in a customer environment is itself an approval with a
+	// time box (tenant-data-privacy §2, OGA-1036). The approvals below cover
+	// logging under the flags only.
 	switch evt.Type {
 	case agent.EventTypeReasoning:
 		if p, ok := evt.Payload.(*agent.ReasoningPayload); ok {
+			// log-data:approved Philip 2026-10-20 OGA-1134: the model's reasoning is what the ReAct log shows, under the trace flags only
 			logger.InfoContext(ctx, "react: thought", append(base, "text", truncateForTrace(p.Text, previewCap))...)
 		}
 	case agent.EventTypePlan:
@@ -965,6 +973,7 @@ func logDrainedEvent(ctx context.Context, logger *slog.Logger, input Input, evt 
 			if b, err := json.Marshal(p.Arguments); err == nil {
 				args = truncateForTrace(string(b), previewCap)
 			}
+			// log-data:approved Philip 2026-10-20 OGA-1134: the tool arguments the model chose are what the ReAct log shows, under the trace flags only
 			logger.InfoContext(ctx, "react: action", append(base,
 				"tool", p.ToolName, "step_index", p.StepIndex, "skipped", p.Skipped, "args", args)...)
 		}
@@ -977,6 +986,7 @@ func logDrainedEvent(ctx context.Context, logger *slog.Logger, input Input, evt 
 			case p.ResultSizeBytes == 0:
 				outcome = "empty"
 			}
+			// log-data:approved Philip 2026-10-20 OGA-1134: the tool-result preview is what the ReAct log shows, under the trace flags only
 			logger.InfoContext(ctx, "react: observation", append(base,
 				"tool", p.ToolName, "step_index", p.StepIndex, "outcome", outcome,
 				"result_bytes", p.ResultSizeBytes, "latency_ms", p.LatencyMs,
@@ -992,7 +1002,11 @@ func logDrainedEvent(ctx context.Context, logger *slog.Logger, input Input, evt 
 	case agent.EventTypeStatus:
 		if p, ok := evt.Payload.(*agent.StatusPayload); ok {
 			if p.Error != nil {
-				logger.InfoContext(ctx, "react: status", append(base, "state", p.State, "error", p.Error.Message)...)
+				// Capped, not approved: what fills the message is not checked
+				// (an upstream error can quote a body), so it is bounded like
+				// any quoted body (OGA-1134).
+				logger.InfoContext(ctx, "react: status", append(base,
+					"state", p.State, "error", redact.Truncate(p.Error.Message, redact.MaxQuotedBody))...)
 			} else {
 				logger.InfoContext(ctx, "react: status", append(base, "state", p.State)...)
 			}
