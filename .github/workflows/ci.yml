@@ -45,3 +45,19 @@ jobs:
 
       - name: Test
         run: go test -race -count=1 ./...
+  log-data:
+    # A copy of the platform's guard (scripts/check-log-data.go names the
+    # original): a log attribute whose key names credentials, personal data or
+    # customer content needs a log-data:approved annotation.
+    name: Log Data Privacy (OGA-1036)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Guard self-test
+        run: go run scripts/check-log-data.go -self-test
+      - name: Guard
+        run: go run scripts/check-log-data.go
