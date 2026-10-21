@@ -27,7 +27,7 @@ func answering(t *testing.T, status int, body []byte) *PlatformGatewayClient {
 }
 
 // toolErrorBody is the structured tool error the Platform Gateway answers
-// with, its message message bytes long.
+// with, carrying message.
 func toolErrorBody(t *testing.T, message string) []byte {
 	t.Helper()
 	b, err := json.Marshal(map[string]any{
@@ -67,6 +67,13 @@ func TestCallTool_LongStructuredErrorIsAToolError(t *testing.T) {
 	}
 	if !reflect.DeepEqual(toolErr, want) {
 		t.Errorf("ToolError = %+v, want %+v", toolErr, want)
+	}
+
+	// ParseToolError decodes it from an error this client returned however the
+	// caller wrapped it (the other client methods wrap with %w).
+	_, err = answering(t, http.StatusFailedDependency, body).post(t.Context(), "/mcp/tools/call", nil)
+	if got := ParseToolError(fmt.Errorf("list tools: %w", err)); got == nil || got.Code != want.Code || got.Message != message {
+		t.Errorf("ParseToolError(wrapped) = %+v, want the decoded tool error", got)
 	}
 }
 
@@ -122,20 +129,31 @@ func TestToolError_ErrorIsBounded(t *testing.T) {
 	if want := "tool fm_raise_incident: [" + code + "…(truncated)] " + msg + "…(truncated)"; text != want {
 		t.Errorf("Error() = %d bytes, want %d", len(text), len(want))
 	}
-	if maxQuotedCode+maxQuotedMessage != redact.MaxQuotedBody {
-		t.Errorf("code %d + message %d bytes, want %d together", maxQuotedCode, maxQuotedMessage, redact.MaxQuotedBody)
+
+	// A kit tool's text can be an S3 error body, which echoes the signed
+	// request: only its code and request id are quoted.
+	s3 := &ToolError{Code: "OGA-MCPG-DEPS-4003", ToolName: "fm_raise_incident",
+		Message: "kit tool fm_raise_incident reported an error: <Error><Code>SignatureDoesNotMatch</Code>" +
+			"<StringToSign>AWS4-HMAC-SHA256 secret</StringToSign><RequestId>R1</RequestId></Error>"}
+	if got, want := s3.Error(), "tool fm_raise_incident: [OGA-MCPG-DEPS-4003] upstream error SignatureDoesNotMatch (request id R1)"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
 
-// An error answer is read up to 64 KiB, however long it is.
-func TestPost_ErrorBodyReadIsBounded(t *testing.T) {
-	_, err := answering(t, http.StatusInternalServerError, []byte(strings.Repeat("z", 200<<10))).post(t.Context(), "/mcp/tools/call", nil)
-	gerr, ok := errors.AsType[*gatewayHTTPError](err)
-	if !ok {
-		t.Fatalf("post error = %v (%T), want a *gatewayHTTPError", err, err)
-	}
-	if len(gerr.body) != maxErrorBodyRead {
-		t.Errorf("read %d bytes of the error answer, want %d", len(gerr.body), maxErrorBodyRead)
+// An error answer is read up to 64 KiB, however long it is, by post and get.
+func TestErrorBodyReadIsBounded(t *testing.T) {
+	c := answering(t, http.StatusInternalServerError, []byte(strings.Repeat("z", 200<<10)))
+	_, postErr := c.post(t.Context(), "/mcp/tools/call", nil)
+	_, getErr := c.get(t.Context(), "/agents/x/card")
+	for name, err := range map[string]error{"post": postErr, "get": getErr} {
+		gerr, ok := errors.AsType[*gatewayHTTPError](err)
+		if !ok {
+			t.Errorf("%s error = %v (%T), want a *gatewayHTTPError", name, err, err)
+			continue
+		}
+		if len(gerr.body) != maxErrorBodyRead {
+			t.Errorf("%s read %d bytes of the error answer, want %d", name, len(gerr.body), maxErrorBodyRead)
+		}
 	}
 }
 

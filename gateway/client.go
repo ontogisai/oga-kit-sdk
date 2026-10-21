@@ -145,10 +145,11 @@ type ToolError struct {
 }
 
 // Error implements the error interface. It quotes at most redact.MaxQuotedBody
-// (512) bytes of the platform's answer: up to 448 bytes of the message (an
-// S3-style XML text in it is reduced to its code) and up to 64 of the code
-// (OGA-1036). Message can carry a kit tool's own error text, so log this, not
-// the field.
+// (512) bytes of the platform's answer: up to 64 bytes of the code and up to
+// 448 of the message, trimmed (OGA-1036). A message that holds an S3-style XML
+// error is replaced by that error's code and request id, because the rest of
+// such a body can echo the signed request. Message can carry a kit tool's own
+// error text, so log this, not the field.
 func (e *ToolError) Error() string {
 	code := redact.Truncate(e.Code, maxQuotedCode)
 	msg := redact.ErrorBodyMax([]byte(e.Message), maxQuotedMessage)
