@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +61,9 @@ func (c *PlatformGatewayClient) SetTokenProvider(provider func() string) {
 // CallTool invokes an MCP tool via the Platform Access Gateway.
 // Returns a ToolError (which implements error) when the tool returns a structured
 // error response, allowing callers to inspect the error code, category, and details.
+// The structured error is decoded from the gateway's answer as read (up to
+// 64 KiB), not from the error text, which quotes at most 512 bytes of it
+// (OGA-1136).
 //
 // Inside a kit MCP tool handler (ctx from mcptools), a tool outside the running
 // tool's Composition is refused locally with a *CompositionError and no request
@@ -140,12 +144,18 @@ type ToolError struct {
 	ToolName   string         `json:"-"`
 }
 
-// Error implements the error interface.
+// Error implements the error interface. It quotes at most redact.MaxQuotedBody
+// (512) bytes of the platform's answer: up to 448 bytes of the message (an
+// S3-style XML text in it is reduced to its code) and up to 64 of the code
+// (OGA-1036). Message can carry a kit tool's own error text, so log this, not
+// the field.
 func (e *ToolError) Error() string {
+	code := redact.Truncate(e.Code, maxQuotedCode)
+	msg := redact.ErrorBodyMax([]byte(e.Message), maxQuotedMessage)
 	if e.ToolName != "" {
-		return fmt.Sprintf("tool %s: [%s] %s", e.ToolName, e.Code, e.Message)
+		return fmt.Sprintf("tool %s: [%s] %s", e.ToolName, code, msg)
 	}
-	return fmt.Sprintf("[%s] %s", e.Code, e.Message)
+	return fmt.Sprintf("[%s] %s", code, msg)
 }
 
 // IsValidationError returns true if this is a schema/input validation error.
@@ -165,9 +175,18 @@ func (e *ToolError) IsNotFound() bool {
 
 // ParseToolError attempts to extract a structured ToolError from a gateway
 // error response. Returns nil if the error is not a structured tool error.
+//
+// For an error this client returned, wrapped or not, it decodes the gateway's
+// answer as read (up to 64 KiB), so a structured error longer than the 512
+// bytes the error text quotes still decodes (OGA-1136). For any other error it
+// parses the text form "gateway error {status}: {json_body}", which holds the
+// whole answer only while that is at most 512 bytes.
 func ParseToolError(err error) *ToolError {
 	if err == nil {
 		return nil
+	}
+	if gerr, ok := errors.AsType[*gatewayHTTPError](err); ok {
+		return decodeToolError(gerr.body)
 	}
 	msg := err.Error()
 	// Gateway errors come as: "gateway error {status}: {json_body}"
@@ -175,12 +194,46 @@ func ParseToolError(err error) *ToolError {
 	if idx < 0 {
 		return nil
 	}
-	jsonPart := msg[idx+2:]
+	return decodeToolError([]byte(msg[idx+2:]))
+}
+
+// decodeToolError decodes a structured tool error. A body that is not JSON, or
+// carries no code, is not one.
+func decodeToolError(body []byte) *ToolError {
 	var toolErr ToolError
-	if json.Unmarshal([]byte(jsonPart), &toolErr) == nil && toolErr.Code != "" {
+	if json.Unmarshal(body, &toolErr) == nil && toolErr.Code != "" {
 		return &toolErr
 	}
 	return nil
+}
+
+// Error-body bounds: how much of an error answer is read, and how much of it an
+// error text quotes. ToolError's code and message share redact.MaxQuotedBody.
+const (
+	maxErrorBodyRead = 64 << 10
+	maxQuotedCode    = 64
+	maxQuotedMessage = redact.MaxQuotedBody - maxQuotedCode
+)
+
+// gatewayHTTPError is a gateway answer with status 400 or more. Its text is
+// "gateway error {status}: {body}" with at most redact.MaxQuotedBody bytes of
+// the body (OGA-1036). body is the answer as read, up to maxErrorBodyRead, for
+// ParseToolError: decoding the capped text lost the structured error of every
+// answer over 512 bytes (OGA-1136). It is the upstream's text: log the error,
+// not body.
+type gatewayHTTPError struct {
+	status int
+	body   []byte
+}
+
+func (e *gatewayHTTPError) Error() string {
+	return fmt.Sprintf("gateway error %d: %s", e.status, redact.ErrorBody(e.body))
+}
+
+// readGatewayError reads an error answer, bounded, into a gatewayHTTPError.
+func readGatewayError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
+	return &gatewayHTTPError{status: resp.StatusCode, body: body}
 }
 
 // indexOf returns the index of substr in s, or -1.
@@ -558,13 +611,13 @@ func (c *PlatformGatewayClient) post(ctx context.Context, path string, body any)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode >= 400 {
+		return nil, readGatewayError(resp)
+	}
+
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, redact.ErrorBody(respBody))
 	}
 
 	return respBody, nil
@@ -584,13 +637,13 @@ func (c *PlatformGatewayClient) get(ctx context.Context, path string) (json.RawM
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode >= 400 {
+		return nil, readGatewayError(resp)
+	}
+
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("gateway error %d: %s", resp.StatusCode, redact.ErrorBody(respBody))
 	}
 
 	return respBody, nil
