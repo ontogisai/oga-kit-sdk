@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,40 +17,37 @@ import (
 )
 
 // PlatformGatewayClient provides access to all platform services through the
-// Platform Access Gateway. It handles authentication, token refresh, and
-// request routing.
+// Platform Gateway. It sends the sidecar's workload token on every request and
+// routes each call to its gateway endpoint.
 type PlatformGatewayClient struct {
-	baseURL   string
-	tokenPath string
-	tenantID  string
-	client    *http.Client
+	baseURL  string
+	tenantID string
+	client   *http.Client
 
-	mu    sync.RWMutex
-	token string
-
-	// tokenProvider, when set, is the authoritative source of the current
-	// bearer token. It is wired to a TokenManager that performs sliding
-	// renewal against /auth/token/refresh, so the client always sends a
-	// fresh token. When nil, the client falls back to reading tokenPath.
+	mu sync.RWMutex
+	// tokenProvider is the source of the bearer token, read on every request.
+	// It is wired to an *auth.TokenManager, which renews the workload token in
+	// memory. When nil (no bootstrap identity), the client sends no
+	// Authorization header and the gateway answers 401.
 	tokenProvider func() string
 }
 
-// NewPlatformGatewayClient creates a new gateway client.
-func NewPlatformGatewayClient(baseURL, tokenPath, tenantID string) *PlatformGatewayClient {
+// NewPlatformGatewayClient creates a gateway client with no token. Wire one
+// with SetTokenProvider, or use NewClientFromEnv, which does it from the
+// Sidecar-Manager-injected environment.
+func NewPlatformGatewayClient(baseURL, tenantID string) *PlatformGatewayClient {
 	return &PlatformGatewayClient{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		tokenPath: tokenPath,
-		tenantID:  tenantID,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		tenantID: tenantID,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
 	}
 }
 
-// SetTokenProvider wires an authoritative token source (typically a
-// *auth.TokenManager's Token method). Once set, every request reads the bearer
-// from the provider instead of the cached file value, so rotated tokens are
-// picked up immediately.
+// SetTokenProvider wires the token source (typically a *auth.TokenManager's
+// Token method). Every request reads the bearer from it, so a renewed token is
+// used at once.
 func (c *PlatformGatewayClient) SetTokenProvider(provider func() string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -660,44 +656,15 @@ func (c *PlatformGatewayClient) setHeaders(req *http.Request) {
 	}
 }
 
+// loadToken returns the current bearer token, or "" when no token provider is
+// wired.
 func (c *PlatformGatewayClient) loadToken() string {
 	c.mu.RLock()
 	provider := c.tokenProvider
-	cached := c.token
 	c.mu.RUnlock()
 
-	// Authoritative source when wired (TokenManager with sliding renewal).
-	if provider != nil {
-		if tok := provider(); tok != "" {
-			return tok
-		}
-	}
-
-	if cached != "" {
-		return cached
-	}
-
-	if c.tokenPath == "" {
+	if provider == nil {
 		return ""
 	}
-
-	data, err := os.ReadFile(c.tokenPath)
-	if err != nil {
-		return ""
-	}
-
-	token := strings.TrimSpace(string(data))
-
-	c.mu.Lock()
-	c.token = token
-	c.mu.Unlock()
-
-	return token
-}
-
-// InvalidateToken clears the cached token, forcing a reload on next request.
-func (c *PlatformGatewayClient) InvalidateToken() {
-	c.mu.Lock()
-	c.token = ""
-	c.mu.Unlock()
+	return provider()
 }

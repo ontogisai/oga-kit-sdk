@@ -74,7 +74,9 @@ type httpTimeseriesSink struct {
 
 // NewHTTPTimeseriesSink builds a TimeseriesSink that posts batches to
 // baseURL+IntakePath, authenticating with the token from tp. baseURL is the
-// platform ingress base (e.g. the gateway URL); tp supplies the sidecar
+// base URL of the platform's time-series intake, which the kit's
+// configuration supplies; it is not PLATFORM_GATEWAY_URL, because the
+// Platform Gateway does not serve IntakePath. tp supplies the sidecar
 // workload token.
 func NewHTTPTimeseriesSink(baseURL string, tp TokenProvider) TimeseriesSink {
 	return &httpTimeseriesSink{

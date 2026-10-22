@@ -20,7 +20,7 @@ func countingGateway(t *testing.T) (*PlatformGatewayClient, *atomic.Int32) {
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	t.Cleanup(srv.Close)
-	return NewPlatformGatewayClient(srv.URL, "", "t1"), &calls
+	return NewPlatformGatewayClient(srv.URL, "t1"), &calls
 }
 
 // Inside a tool handler, a platform tool outside the running tool's

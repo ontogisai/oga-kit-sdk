@@ -31,13 +31,10 @@ type HTTPCommitClient struct {
 	gatewayURL string
 	tenantID   string
 	kitID      string
-	tokenPath  string
 	// tokenProvider, when set, is called on every request to obtain the
-	// bearer token. It takes precedence over tokenPath. This is the
-	// OGA-404 workload-identity path: a loader sidecar mints its token via
-	// auth.TokenManager (bootstrap-mint) and passes tm.Token here, so the
-	// commit client presents a valid Authorization header without a token
-	// file. See auth.WorkloadTokenProviderFromEnv.
+	// bearer token: the sidecar's workload token, from
+	// auth.WorkloadTokenProviderFromEnv. When nil, no Authorization header is
+	// sent and the gateway answers 401.
 	tokenProvider func() string
 
 	httpClient *http.Client
@@ -68,28 +65,12 @@ func WithTimeout(d time.Duration) HTTPCommitClientOption {
 	}
 }
 
-// WithTokenPath points the client at a file the SDK reads on every
-// request to obtain the bearer token. With neither a path nor a
-// [WithTokenProvider], the client sends no Authorization header, and the
-// Platform Gateway refuses the request with 401: it has no tokenless
-// dev mode.
-//
-// Deprecated for production loaders: the platform no longer deploys a
-// token file (OGA-404 Phase 2/3). Use [WithTokenProvider] with a
-// bootstrap-mint token manager instead. WithTokenPath is retained for
-// backward compatibility and as a [WithTokenProvider] fallback.
-func WithTokenPath(path string) HTTPCommitClientOption {
-	return func(c *HTTPCommitClient) {
-		c.tokenPath = strings.TrimSpace(path)
-	}
-}
-
 // WithTokenProvider supplies a function called on every request to obtain the
-// bearer token. It takes precedence over [WithTokenPath]. This is the OGA-404
-// workload-identity path: a non-agent sidecar (loader, MCP server) mints its
-// platform workload token from a bootstrap identity via auth.TokenManager and
-// passes tm.Token here, so the commit client authenticates to the gateway
-// without a token file. A nil fn is ignored.
+// bearer token. Pass the provider from auth.WorkloadTokenProviderFromEnv,
+// which mints the sidecar's workload token from its bootstrap identity and
+// renews it in memory. Without a provider the client sends no Authorization
+// header, and the Platform Gateway refuses the request with 401: it has no
+// tokenless mode. A nil fn is ignored.
 func WithTokenProvider(fn func() string) HTTPCommitClientOption {
 	return func(c *HTTPCommitClient) {
 		if fn != nil {
@@ -267,22 +248,13 @@ func (c *HTTPCommitClient) postJSON(ctx context.Context, path string, body any) 
 	return respBody, nil
 }
 
-// loadToken returns the bearer token for a request. A configured
-// tokenProvider (OGA-404 workload-identity bootstrap-mint) takes
-// precedence; otherwise it falls back to reading the token file at
-// tokenPath. Returns "" (no Authorization header) when neither is set.
+// loadToken returns the bearer token for a request, or "" (no Authorization
+// header) when no token provider is configured.
 func (c *HTTPCommitClient) loadToken() string {
-	if c.tokenProvider != nil {
-		return strings.TrimSpace(c.tokenProvider())
-	}
-	if c.tokenPath == "" {
+	if c.tokenProvider == nil {
 		return ""
 	}
-	data, err := readFile(c.tokenPath)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
+	return strings.TrimSpace(c.tokenProvider())
 }
 
 // HTTPError is the typed error returned for a status of 400 or more from

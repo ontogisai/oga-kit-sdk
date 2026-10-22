@@ -7,143 +7,207 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// writeTokenFile writes a compact ServiceToken-shaped JSON to a temp file and
-// returns the path.
-func writeTokenFile(t *testing.T, expiresAt time.Time) string {
+// shortMintRetry makes the mint retry wait 1 ms instead of 1 s for the test.
+func shortMintRetry(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "service-token")
-	tok := map[string]any{
-		"token_id":   "tok-1",
-		"agent_id":   "tnt1.fm-operations-agent",
-		"tenant_id":  "tnt1",
-		"expires_at": expiresAt.Format(time.RFC3339Nano),
-		"signature":  "sig",
-	}
-	b, _ := json.Marshal(tok)
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		t.Fatalf("write token file: %v", err)
-	}
-	return path
+	prev := mintFirstDelay
+	mintFirstDelay = time.Millisecond
+	t.Cleanup(func() { mintFirstDelay = prev })
 }
 
-func TestParseTokenExpiry(t *testing.T) {
-	exp := time.Now().Add(45 * time.Minute).UTC().Truncate(time.Second)
-	tok := map[string]any{"expires_at": exp.Format(time.RFC3339Nano)}
-	b, _ := json.Marshal(tok)
-
-	got := parseTokenExpiry(string(b))
-	if !got.Equal(exp) {
-		t.Errorf("parseTokenExpiry = %v, want %v", got, exp)
+// Every field of the config is required; there is no other mode.
+func TestNewTokenManager_ConfigIsRequired(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *TokenManagerConfig
+	}{
+		{"nil config", nil},
+		{"no bootstrap identity", &TokenManagerConfig{IssueURL: "http://x", AgentRegistrationID: "t.a"}},
+		{"no issue URL", &TokenManagerConfig{Bootstrap: SecretBootstrap{Secret: "x"}, AgentRegistrationID: "t.a"}},
+		{"no registration id", &TokenManagerConfig{Bootstrap: SecretBootstrap{Secret: "x"}, IssueURL: "http://x"}},
 	}
-
-	if !parseTokenExpiry("not-json").IsZero() {
-		t.Error("non-JSON token should yield zero expiry")
-	}
-}
-
-func TestTokenManager_LoadParsesExpiry(t *testing.T) {
-	exp := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
-	path := writeTokenFile(t, exp)
-
-	tm := &TokenManager{tokenPath: path}
-	if err := tm.loadFromFile(); err != nil {
-		t.Fatalf("loadFromFile: %v", err)
-	}
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	if !tm.expiresAt.Equal(exp) {
-		t.Errorf("expiresAt = %v, want parsed %v (not the 1h default)", tm.expiresAt, exp)
-	}
-}
-
-// TestTokenManager_RefreshRoundTrip exercises the full refresh against a mock
-// gateway that mirrors the platform contract: current token in the
-// Authorization header, response {token, expires_at}.
-func TestTokenManager_RefreshRoundTrip(t *testing.T) {
-	newExpiry := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
-	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token":      `{"token_id":"tok-2","agent_id":"tnt1.fm-operations-agent","tenant_id":"tnt1","expires_at":"` + newExpiry.Format(time.RFC3339Nano) + `","signature":"sig2"}`,
-			"expires_at": newExpiry,
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewTokenManager(context.Background(), tt.cfg); err == nil {
+				t.Fatal("expected an error")
+			}
 		})
-	}))
-	defer srv.Close()
-
-	path := writeTokenFile(t, time.Now().Add(2*time.Minute))
-	tm := &TokenManager{tokenPath: path, refreshURL: srv.URL, client: srv.Client()}
-	if err := tm.loadFromFile(); err != nil {
-		t.Fatalf("loadFromFile: %v", err)
-	}
-
-	if err := tm.refresh(context.Background()); err != nil {
-		t.Fatalf("refresh: %v", err)
-	}
-
-	if gotAuth == "" || gotAuth[:7] != "Bearer " {
-		t.Errorf("refresh did not send Bearer auth header, got %q", gotAuth)
-	}
-	// New token is now current and persisted to the file.
-	if got := tm.Token(); parseTokenExpiry(got) != newExpiry {
-		t.Errorf("current token expiry = %v, want %v", parseTokenExpiry(got), newExpiry)
-	}
-	onDisk, _ := os.ReadFile(path)
-	if parseTokenExpiry(string(onDisk)) != newExpiry {
-		t.Error("rotated token was not written back to the file")
 	}
 }
 
-// TestTokenManager_RefreshAdoptsTokenWhenPersistFails is the OGA-400 regression
-// guard. Kit agent sidecars run with the credential dir bind-mounted read-only,
-// so atomicWriteToken fails. Because the gateway shortens the OLD token's
-// expiry the instant it issues the new one, the SDK MUST still adopt the new
-// token in memory even when it cannot persist it — otherwise the next renewal
-// presents the burned old token and the gateway 401s, bricking the agent.
-func TestTokenManager_RefreshAdoptsTokenWhenPersistFails(t *testing.T) {
-	newExpiry := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
+// A first mint the gateway keeps refusing is tried mintAttempts times, then
+// returned as an error that names the gateway's answer.
+func TestNewTokenManager_FirstMintFailureIsAnError(t *testing.T) {
+	shortMintRetry(t)
+	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		hits.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"OGA-AGNT-AUTH-4601"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	tm, err := NewTokenManager(context.Background(), &TokenManagerConfig{
+		Bootstrap:           SecretBootstrap{Secret: "wrong"},
+		IssueURL:            srv.URL,
+		AgentRegistrationID: "tnt1.a",
+	})
+	if err == nil {
+		tm.Stop()
+		t.Fatal("expected an error when every mint is refused")
+	}
+	if got := hits.Load(); got != mintAttempts {
+		t.Errorf("mint attempts = %d, want %d", got, mintAttempts)
+	}
+	for _, want := range []string{"after 5 attempts", "mint returned 401", "OGA-AGNT-AUTH-4601"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+// A mint that fails and then succeeds within the retry budget succeeds.
+func TestNewTokenManager_MintRetriesThenSucceeds(t *testing.T) {
+	shortMintRetry(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": "third-time", "expires_at": time.Now().Add(12 * time.Hour)})
+	}))
+	t.Cleanup(srv.Close)
+
+	tm, err := NewTokenManager(context.Background(), &TokenManagerConfig{
+		Bootstrap:           SecretBootstrap{Secret: "s"},
+		IssueURL:            srv.URL,
+		AgentRegistrationID: "tnt1.a",
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Stop()
+	if got := tm.Token(); got != "third-time" {
+		t.Errorf("Token() = %q, want the token from the third attempt", got)
+	}
+	if got := hits.Load(); got != 3 {
+		t.Errorf("mint attempts = %d, want 3", got)
+	}
+}
+
+// Renewal mints again with the bootstrap identity as it is now (a rotated
+// ServiceAccount token is picked up), never with the previous workload token,
+// and the new token replaces the old one.
+func TestTokenManager_RenewalMintsWithCurrentBootstrapIdentity(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]string
+	var auths []string
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]string{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token":      `{"token_id":"tok-2","agent_id":"tnt1.fm-operations-agent","tenant_id":"tnt1","expires_at":"` + newExpiry.Format(time.RFC3339Nano) + `","signature":"sig2"}`,
-			"expires_at": newExpiry,
+			"token":      "workload-" + strconv.Itoa(int(n.Add(1))),
+			"expires_at": time.Now().Add(12 * time.Hour),
 		})
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	// Load the initial token from a real file, then redirect tokenPath into a
-	// non-existent directory so atomicWriteToken (os.CreateTemp on the dir)
-	// fails — simulating the read-only credential mount.
-	loadPath := writeTokenFile(t, time.Now().Add(2*time.Minute))
-	tm := &TokenManager{tokenPath: loadPath, refreshURL: srv.URL, client: srv.Client()}
-	if err := tm.loadFromFile(); err != nil {
-		t.Fatalf("loadFromFile: %v", err)
+	saPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(saPath, []byte("sa-v1"), 0o600); err != nil {
+		t.Fatalf("write SA token: %v", err)
 	}
-	oldToken := tm.Token()
-	tm.tokenPath = filepath.Join(t.TempDir(), "does-not-exist", "service-token")
+	tm, err := NewTokenManager(context.Background(), &TokenManagerConfig{
+		Bootstrap:           K8sSABootstrap{Path: saPath},
+		IssueURL:            srv.URL,
+		AgentRegistrationID: "tnt1.a",
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	defer tm.Stop()
+	if got := tm.Token(); got != "workload-1" {
+		t.Fatalf("Token() = %q, want workload-1", got)
+	}
 
-	// Refresh must succeed (no error) despite the unwritable path.
-	if err := tm.refresh(context.Background()); err != nil {
-		t.Fatalf("refresh returned error on persist failure, want nil: %v", err)
+	// kubelet rotates the projected token; the next mint must present it.
+	if err := os.WriteFile(saPath, []byte("sa-v2"), 0o600); err != nil {
+		t.Fatalf("rotate SA token: %v", err)
+	}
+	if err := tm.mint(context.Background()); err != nil {
+		t.Fatalf("renewal mint: %v", err)
+	}
+	if got := tm.Token(); got != "workload-2" {
+		t.Errorf("Token() after renewal = %q, want workload-2", got)
 	}
 
-	// The in-memory token MUST be the rotated one, not the burned old token.
-	got := tm.Token()
-	if got == oldToken {
-		t.Fatal("refresh kept the old token after a persist failure — agent would be locked out")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("mint calls = %d, want 2", len(bodies))
 	}
-	if parseTokenExpiry(got) != newExpiry {
-		t.Errorf("current token expiry = %v, want rotated %v", parseTokenExpiry(got), newExpiry)
+	if bodies[1]["bootstrap_token"] != "sa-v2" {
+		t.Errorf("renewal bootstrap_token = %q, want the rotated sa-v2", bodies[1]["bootstrap_token"])
 	}
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
-	if !tm.expiresAt.Equal(newExpiry) {
-		t.Errorf("expiresAt = %v, want %v (renewal must schedule against the new TTL)", tm.expiresAt, newExpiry)
+	if auths[1] != "" {
+		t.Errorf("renewal sent Authorization %q; a k8s_sa mint sends none (the old workload token is never presented)", auths[1])
 	}
+}
+
+// Stop is safe to call more than once: mcptools.Runtime.Close (which
+// ListenAndServe also calls) and the gateway env client's Closer both end in
+// it. A second call used to panic with "close of closed channel".
+func TestTokenManager_StopTwice(t *testing.T) {
+	ms := newMintServer(t)
+	tm, err := NewTokenManager(context.Background(), &TokenManagerConfig{
+		Bootstrap:           SecretBootstrap{Secret: "s"},
+		IssueURL:            ms.URL,
+		AgentRegistrationID: "tnt1.a",
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	tm.Stop()
+	tm.Stop()
+}
+
+// Renewal ends when the context passed to NewTokenManager ends, and Stop
+// afterwards still returns.
+func TestTokenManager_RenewalEndsWithContext(t *testing.T) {
+	ms := newMintServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	tm, err := NewTokenManager(ctx, &TokenManagerConfig{
+		Bootstrap:           SecretBootstrap{Secret: "s"},
+		IssueURL:            ms.URL,
+		AgentRegistrationID: "tnt1.a",
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		tm.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal goroutine still running after its context ended")
+	}
+	tm.Stop()
 }

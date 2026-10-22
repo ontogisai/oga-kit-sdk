@@ -49,13 +49,3 @@ func TestDoMint_ErrorBodyIsCapped(t *testing.T) {
 		t.Errorf("error = %.80q…, want the status named", err.Error())
 	}
 }
-
-func TestDoRefresh_ErrorBodyIsCapped(t *testing.T) {
-	srv := bigErrorServer(t, http.StatusNotFound)
-	tm := &TokenManager{refreshURL: srv.URL, client: srv.Client()}
-	_, _, err := tm.doRefresh(t.Context(), "current-token")
-	assertQuoteCapped(t, err)
-	if !strings.Contains(err.Error(), "refresh returned 404") {
-		t.Errorf("error = %.80q…, want the status named", err.Error())
-	}
-}

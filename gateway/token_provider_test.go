@@ -22,7 +22,7 @@ func TestClient_TokenProviderDrivesAuthHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewPlatformGatewayClient(srv.URL, "", "tnt1")
+	c := NewPlatformGatewayClient(srv.URL, "tnt1")
 
 	// Rotating provider: returns token-A then token-B.
 	var calls atomic.Int32
@@ -49,9 +49,8 @@ func TestClient_TokenProviderDrivesAuthHeader(t *testing.T) {
 }
 
 // TestClient_NoProviderNoToken verifies the client sends no Authorization
-// header when neither a provider nor a token path is configured: it never
-// invents a credential. The Platform Gateway refuses such a request with 401;
-// it has no tokenless mode.
+// header when no provider is configured: it never invents a credential. The
+// Platform Gateway refuses such a request with 401; it has no tokenless mode.
 func TestClient_NoProviderNoToken(t *testing.T) {
 	var hadAuth atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -60,7 +59,7 @@ func TestClient_NoProviderNoToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewPlatformGatewayClient(srv.URL, "", "tnt1")
+	c := NewPlatformGatewayClient(srv.URL, "tnt1")
 	if _, err := c.post(context.Background(), "/workflow", nil); err != nil {
 		t.Fatalf("post: %v", err)
 	}

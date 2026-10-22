@@ -397,9 +397,8 @@ func TestHTTPCommitClient_NilCompleteRequest(t *testing.T) {
 	}
 }
 
-// TestHTTPCommitClient_WithTokenProvider verifies the OGA-404 workload-identity
-// path: a token provider supplies the bearer the gateway sees on every call,
-// without any token file.
+// TestHTTPCommitClient_WithTokenProvider verifies the workload-identity path:
+// a token provider supplies the bearer the gateway sees on every call.
 func TestHTTPCommitClient_WithTokenProvider(t *testing.T) {
 	t.Parallel()
 	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
@@ -419,31 +418,8 @@ func TestHTTPCommitClient_WithTokenProvider(t *testing.T) {
 	}
 }
 
-// TestHTTPCommitClient_TokenProviderTakesPrecedence verifies the provider wins
-// over a configured token path.
-func TestHTTPCommitClient_TokenProviderTakesPrecedence(t *testing.T) {
-	t.Parallel()
-	gate, gatewaySrv, _ := newFakeLoaderGateway(t)
-	cc, err := transfer.NewHTTPCommitClient(gatewaySrv.URL, "tenant-A", "test-kit",
-		transfer.WithTokenPath("/nonexistent/token/file"),
-		transfer.WithTokenProvider(func() string { return "provider-wins" }))
-	if err != nil {
-		t.Fatalf("NewHTTPCommitClient: %v", err)
-	}
-
-	if _, err := cc.Complete(context.Background(), &transfer.CompleteRequest{
-		InlineBody: json.RawMessage(`{"x":1}`),
-	}); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if gate.lastAuthHeader != "Bearer provider-wins" {
-		t.Errorf("Authorization = %q, want %q (provider must take precedence over token path)",
-			gate.lastAuthHeader, "Bearer provider-wins")
-	}
-}
-
-// TestHTTPCommitClient_NoTokenNoHeader verifies that with neither a provider nor
-// a token path no Authorization header is sent (the gateway then answers 401).
+// TestHTTPCommitClient_NoTokenNoHeader verifies that with no token provider no
+// Authorization header is sent (the gateway then answers 401).
 func TestHTTPCommitClient_NoTokenNoHeader(t *testing.T) {
 	t.Parallel()
 	gate, gatewaySrv, _ := newFakeLoaderGateway(t)

@@ -31,7 +31,7 @@ func TestInvokeAgentStream_ParsesSSE(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewPlatformGatewayClient(srv.URL, "", "tenant-1")
+	c := NewPlatformGatewayClient(srv.URL, "tenant-1")
 	ch, err := c.InvokeAgentStream(context.Background(), "knowledge-agent", map[string]any{"role": "user"})
 	if err != nil {
 		t.Fatalf("InvokeAgentStream: %v", err)
@@ -68,7 +68,7 @@ func TestInvokeAgentStream_MultiLineData(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewPlatformGatewayClient(srv.URL, "", "t")
+	c := NewPlatformGatewayClient(srv.URL, "t")
 	ch, err := c.InvokeAgentStream(context.Background(), "ka", nil)
 	if err != nil {
 		t.Fatalf("InvokeAgentStream: %v", err)

@@ -70,8 +70,10 @@ func (b SecretBootstrap) Token(_ context.Context) (string, string, error) {
 //   - "k8s_sa" → K8sSABootstrap reading AGENT_SA_TOKEN_PATH
 //   - "secret" → SecretBootstrap reading AGENT_BOOTSTRAP_SECRET
 //
-// Returns (nil, nil) when AGENT_BOOTSTRAP_KIND is unset — callers then fall
-// back to the legacy file+refresh TokenManager mode.
+// Returns (nil, nil) when AGENT_BOOTSTRAP_KIND is unset: the sidecar has no
+// bootstrap identity and so no token (the Platform Gateway answers its
+// requests with 401). An unknown kind, or a kind whose credential variable is
+// unset, is an error.
 func BootstrapFromEnv() (BootstrapProvider, error) {
 	switch os.Getenv("AGENT_BOOTSTRAP_KIND") {
 	case BootstrapKindK8sSA:

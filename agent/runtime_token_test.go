@@ -7,41 +7,44 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// issueGateway is an httptest gateway capturing POST /auth/token/issue and
-// /auth/token/refresh so the chassis token-mode selection can be asserted.
-func issueGateway(t *testing.T) (url string, issueHits, refreshHits *int) {
+// issueGateway is an httptest gateway serving POST /auth/token/issue and
+// /mcp/tools/call. It counts mints and records the Authorization header of the
+// last tool call.
+func issueGateway(t *testing.T) (url string, issueHits *atomic.Int32, lastToolAuth *atomic.Value) {
 	t.Helper()
-	var iss, ref int
+	var iss atomic.Int32
+	var auth atomic.Value
+	auth.Store("")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/auth/token/issue":
-			iss++
-		case "/auth/token/refresh":
-			ref++
+			iss.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token":      "minted-workload-jwt",
+				"expires_at": time.Now().Add(12 * time.Hour).UTC(),
+			})
+		case "/mcp/tools/call":
+			auth.Store(r.Header.Get("Authorization"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:
 			http.NotFound(w, r)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token":      "minted-workload-jwt",
-			"expires_at": time.Now().Add(12 * time.Hour).UTC(),
-		})
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL, &iss, &ref
+	return srv.URL, &iss, &auth
 }
 
-// TestConnectRuntimeDeps_BootstrapMintMode verifies the OGA-404 chassis wiring:
-// when the manager-injected AGENT_BOOTSTRAP_KIND env is present, the chassis
-// mints the workload token from /auth/token/issue (not the legacy refresh path)
-// and never requires a token file.
+// TestConnectRuntimeDeps_BootstrapMintMode verifies the chassis wiring: with
+// the manager-injected bootstrap identity, the chassis mints the workload token
+// from /auth/token/issue and sends it on gateway calls.
 func TestConnectRuntimeDeps_BootstrapMintMode(t *testing.T) {
-	url, issueHits, refreshHits := issueGateway(t)
+	url, issueHits, lastAuth := issueGateway(t)
 
 	t.Setenv("AGENT_BOOTSTRAP_KIND", "secret")
 	t.Setenv("AGENT_BOOTSTRAP_SECRET", "boot-s3cret")
@@ -51,18 +54,20 @@ func TestConnectRuntimeDeps_BootstrapMintMode(t *testing.T) {
 		GatewayURL: url,
 		TenantID:   "tnt1",
 		AgentID:    "fm-operations-agent",
-		// No TokenPath — bootstrap mode must not require a file.
 	})
 	if err != nil {
-		t.Fatalf("ConnectRuntimeDeps (bootstrap mode): %v", err)
+		t.Fatalf("ConnectRuntimeDeps: %v", err)
 	}
 	defer deps.Close()
 
-	if *issueHits == 0 {
-		t.Error("expected an /auth/token/issue mint call in bootstrap mode")
+	if issueHits.Load() != 1 {
+		t.Errorf("/auth/token/issue calls = %d, want 1", issueHits.Load())
 	}
-	if *refreshHits != 0 {
-		t.Errorf("bootstrap mode must not call /auth/token/refresh, got %d", *refreshHits)
+	if _, err := deps.Gateway.CallTool(context.Background(), "kg_get_entity", map[string]any{"entity_id": "e1"}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if got := lastAuth.Load().(string); got != "Bearer minted-workload-jwt" {
+		t.Errorf("tool call Authorization = %q, want the minted token", got)
 	}
 }
 
@@ -85,31 +90,37 @@ func TestConnectRuntimeDeps_BootstrapMintFatal(t *testing.T) {
 	}
 }
 
-// TestConnectRuntimeDeps_LegacyFallback verifies that with no bootstrap env and
-// a token file present, the chassis uses the legacy file+refresh path.
-func TestConnectRuntimeDeps_LegacyFallback(t *testing.T) {
-	url, issueHits, _ := issueGateway(t)
-	// Ensure no bootstrap env leaks in from the environment.
-	t.Setenv("AGENT_BOOTSTRAP_KIND", "")
-
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "service-token")
-	if err := os.WriteFile(tokenPath, []byte(`{"token_id":"t","agent_id":"a","tenant_id":"tnt1"}`), 0o600); err != nil {
-		t.Fatalf("write token file: %v", err)
+// TestConnectRuntimeDeps_NoBootstrapNoToken verifies that with no bootstrap
+// identity the agent mints nothing and sends no Authorization header, which
+// the gateway refuses with 401. A token file left at the path the removed
+// legacy mode read (AGENT_SERVICE_TOKEN_PATH) is not read (OGA-1134).
+func TestConnectRuntimeDeps_NoBootstrapNoToken(t *testing.T) {
+	url, issueHits, lastAuth := issueGateway(t)
+	leftover := filepath.Join(t.TempDir(), "service-token")
+	if err := os.WriteFile(leftover, []byte("legacy-file-token"), 0o600); err != nil {
+		t.Fatalf("write leftover token: %v", err)
 	}
+	t.Setenv("AGENT_BOOTSTRAP_KIND", "")
+	t.Setenv("AGENT_SERVICE_TOKEN_PATH", leftover)
 
 	deps, err := ConnectRuntimeDeps(context.Background(), &RuntimeDepsConfig{
 		GatewayURL: url,
 		TenantID:   "tnt1",
 		AgentID:    "a",
-		TokenPath:  tokenPath,
 	})
 	if err != nil {
-		t.Fatalf("ConnectRuntimeDeps (legacy mode): %v", err)
+		t.Fatalf("ConnectRuntimeDeps: %v", err)
 	}
 	defer deps.Close()
 
-	if *issueHits != 0 {
-		t.Errorf("legacy mode must not call /auth/token/issue, got %d", *issueHits)
+	if issueHits.Load() != 0 {
+		t.Errorf("/auth/token/issue calls = %d, want 0", issueHits.Load())
+	}
+	lastAuth.Store("unset")
+	if _, err := deps.Gateway.CallTool(context.Background(), "kg_get_entity", map[string]any{"entity_id": "e1"}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if got := lastAuth.Load().(string); got != "" {
+		t.Errorf("tool call Authorization = %q, want none", got)
 	}
 }

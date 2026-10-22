@@ -35,8 +35,8 @@ func TestWorkloadTokenProviderFromEnv_Secret(t *testing.T) {
 	}
 }
 
-// With no bootstrap identity configured, the helper returns (nil, noop, nil) so
-// the caller can fall back to a token file / dev no-auth mode.
+// With no bootstrap identity configured, the helper returns (nil, noop, nil):
+// the caller has no token, and the gateway answers its requests with 401.
 func TestWorkloadTokenProviderFromEnv_NoBootstrap(t *testing.T) {
 	t.Setenv("AGENT_BOOTSTRAP_KIND", "")
 
@@ -56,6 +56,7 @@ func TestWorkloadTokenProviderFromEnv_NoBootstrap(t *testing.T) {
 // A bootstrap identity that the gateway rejects (e.g. 401) is a fatal error —
 // the helper surfaces it rather than returning a tokenless provider.
 func TestWorkloadTokenProviderFromEnv_MintFailureIsFatal(t *testing.T) {
+	shortMintRetry(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	}))
