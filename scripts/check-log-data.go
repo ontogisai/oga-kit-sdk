@@ -19,11 +19,17 @@
 // the author, and internal/redact is the SDK's tool for it.
 //
 // Keys are found in three shapes: passed to the call directly
-// (logger.Info(msg, "text", s)), appended to a slice spread into it
-// (logger.Info(msg, append(base, "text", s)...)), and held in a slice built
-// before the call, in the same file (attrs := []any{"text", s}; then
-// logger.Info(msg, attrs...), including attrs = append(attrs, ...)). A slice
-// that arrives as a parameter is not followed.
+// (logger.Info(msg, "text", s), or slog.String("text", s)), appended to a
+// slice spread into it (logger.Info(msg, append(base, "text", s)...)), and
+// held in a slice variable assigned in the same file (attrs := []any{"text",
+// s}; then logger.Info(msg, attrs...), including attrs = append(attrs, ...)).
+// Every assignment to that variable counts wherever it is, so a key appended
+// after the call is reported too.
+//
+// Not followed, so not checked: a slice that arrives as a parameter, a struct
+// field or a function's result; attributes given to logger.With(...); the keys
+// inside slog.Group (the group's own name is checked); a key held in a variable
+// (k := "text"; logger.Info(msg, k, s)); and an slog.Attr{Key: ...} literal.
 //
 // A flagged line passes only with an approval annotation on the call or the
 // line above it, or on the attribute's own line or the line above it:

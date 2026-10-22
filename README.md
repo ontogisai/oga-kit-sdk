@@ -41,7 +41,7 @@ the entry point for its role ([below](#which-entry-point-by-role)) and treats an
    | `OGA_TENANT_ID` | The tenant the sidecar serves |
    | `AGENT_REGISTRATION_ID` | The sidecar's identity, `{tenant}.{name}` |
    | `AGENT_BOOTSTRAP_KIND` | `k8s_sa` on Kubernetes, `secret` elsewhere (the Docker runtime) |
-   | `AGENT_SA_TOKEN_PATH` | With `k8s_sa`: the projected ServiceAccount token, `/var/run/secrets/oga/sa-token/token`. The pod runs as its own ServiceAccount; the token's audience is `oga-platform-gateway`, it is valid for an hour, and kubelet rotates it. |
+   | `AGENT_SA_TOKEN_PATH` | With `k8s_sa`: the projected ServiceAccount token, `/var/run/secrets/oga/sa-token/token`. The pod runs as its own ServiceAccount; by default the token's audience is `oga-platform-gateway` and it is valid for an hour, and kubelet rotates it. |
    | `AGENT_BOOTSTRAP_SECRET` | With `secret`: the sidecar's bootstrap secret |
 
 2. **The SDK mints a workload token:** `POST {PLATFORM_GATEWAY_URL}/auth/token/issue` with
@@ -49,18 +49,21 @@ the entry point for its role ([below](#which-entry-point-by-role)) and treats an
    as `bootstrap_token`; a `secret` travels in `Authorization: Bearer`, never in the body. The gateway
    checks that the identity belongs to the requested registration id (a Kubernetes TokenReview of the
    ServiceAccount token, or a constant-time comparison with the stored secret) and answers
-   `{"token", "expires_at"}`: a signed JWT with audience `oga-platform-gateway`, valid for 12 hours,
-   whose `scope` claim carries the grant of the sidecar's kind.
+   `{"token": "...", "expires_at": "..."}`: a signed JWT whose `scope` claim carries the grant of the
+   sidecar's kind. By default its audience is `oga-platform-gateway` and it is valid for 12 hours.
 
-3. **The token lives in memory only.** At 50% of its lifetime (about 6 hours) the SDK mints again,
+3. **The token lives in memory only.** At 50% of its lifetime (about 6 hours by default) the SDK mints again,
    re-reading the bootstrap identity each time, so a rotated ServiceAccount token is picked up. Each
    mint is tried up to 5 times, waiting 1, 2, 4 and 8 seconds between attempts. Nothing is read from
    or written to disk, and the previous token is never presented, so an expired token cannot block
-   renewal.
+   renewal. Renewal runs until the entry point is closed or the context passed to it ends, so pass a
+   context that lives as long as the sidecar; when the context ends the SDK logs
+   `token renewal stopped: context done` and the token is not renewed again.
 
-4. **Every gateway call carries `Authorization: Bearer <workload token>`.** The gateway takes the
-   tenant and the principal from the token, never from the request (`X-Tenant-ID` is
-   informational). It permits a tool or a loader operation only when the sidecar is granted it: a
+4. **Every gateway call carries `Authorization: Bearer <workload token>`.** The gateway verifies the
+   token and authorizes each call against the identity it carries. The SDK clients also send
+   `X-Tenant-ID`, set to `OGA_TENANT_ID`; leave it as the sidecar's own tenant. The gateway
+   permits a tool or a loader operation only when the sidecar is granted it: a
    loader or a source connector by its kind (the three loader operations), an agent or an MCP server
    by what its kit declares ([Tool grants](#tool-grants-what-your-agent-and-mcp-server-may-call)).
 
@@ -84,7 +87,8 @@ the entry point for its role ([below](#which-entry-point-by-role)) and treats an
 
 ### Which entry point, by role
 
-Each one reads the environment above, mints, renews, and stops renewing on close.
+Each one reads the environment above, mints, and renews until it is closed or the context passed to it
+ends. Pass a context that lives as long as the sidecar.
 
 | Role | Entry point |
 |---|---|
@@ -92,7 +96,11 @@ Each one reads the environment above, mints, renews, and stops renewing on close
 | MCP tool server | `mcptools.NewRuntimeFromEnv`. `Runtime.Close` (called by `ListenAndServe` on shutdown) stops renewal. |
 | Any other code that calls the gateway | `gateway.NewClientFromEnv`. The returned `io.Closer` stops renewal. |
 | Loader or source connector on `transfer.HTTPCommitClient` | `auth.WorkloadTokenProviderFromEnv`, passed with `transfer.WithTokenProvider`. |
-| Time-series sink | `connector.NewHTTPTimeseriesSink(baseURL, tp)`, with `tp` returning the same provider's token. |
+
+A source connector that writes time series with `connector.NewHTTPTimeseriesSink(baseURL, tp)`
+authenticates the same way, with `tp` returning the same provider's token. Its base URL is the
+platform's time-series intake, which your kit's configuration supplies; it is not
+`PLATFORM_GATEWAY_URL`.
 
 ```go
 provider, stop, err := auth.WorkloadTokenProviderFromEnv(ctx, gatewayURL)
@@ -111,6 +119,8 @@ if err != nil {
     os.Exit(1)
 }
 
+// Only for a connector that writes time series. intakeURL is the time-series
+// intake's base URL, from your kit's configuration.
 var tp connector.TokenProvider
 if provider != nil {
     tp = func(context.Context) (string, error) { return provider(), nil }
@@ -222,6 +232,7 @@ import (
     "encoding/json"
     "log"
     "os"
+    "strings"
 
     "github.com/ontogisai/oga-kit-sdk/auth"
     "github.com/ontogisai/oga-kit-sdk/loader"
