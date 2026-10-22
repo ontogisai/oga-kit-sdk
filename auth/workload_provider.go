@@ -30,6 +30,9 @@ import (
 //
 // AGENT_REGISTRATION_ID ("{tenant}.{name}", manager-injected) is the identity
 // the mint endpoint authorizes the bootstrap credential against.
+//
+// Renewal runs until stop is called or ctx ends: pass a context that lives as
+// long as the sidecar.
 func WorkloadTokenProviderFromEnv(ctx context.Context, gatewayURL string) (provider func() string, stop func(), err error) {
 	noop := func() {}
 

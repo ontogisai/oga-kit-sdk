@@ -38,8 +38,9 @@ type TokenManager struct {
 	current   string
 	expiresAt time.Time
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 // TokenManagerConfig configures the token manager. Every field is required.
@@ -61,6 +62,11 @@ type TokenManagerConfig struct {
 // NewTokenManager mints the first workload token and starts the renewal
 // goroutine. A failed first mint is returned as an error: the sidecar cannot
 // prove its identity and must not start serving. Call Stop on shutdown.
+//
+// Renewal runs until Stop is called or ctx ends, whichever comes first. Pass a
+// context that lives as long as the sidecar: with a shorter one (a startup
+// timeout, for example) the token is never renewed and the gateway answers 401
+// once it expires.
 func NewTokenManager(ctx context.Context, cfg *TokenManagerConfig) (*TokenManager, error) {
 	if cfg == nil {
 		return nil, errors.New("token manager config is required")
@@ -99,9 +105,10 @@ func (tm *TokenManager) Token() string {
 	return tm.current
 }
 
-// Stop stops the renewal goroutine.
+// Stop stops the renewal goroutine and waits for it to return. It is safe to
+// call more than once.
 func (tm *TokenManager) Stop() {
-	close(tm.stopCh)
+	tm.stopOnce.Do(func() { close(tm.stopCh) })
 	tm.wg.Wait()
 }
 
@@ -128,6 +135,9 @@ func (tm *TokenManager) renewalLoop(ctx context.Context) {
 		case <-tm.stopCh:
 			return
 		case <-ctx.Done():
+			// Logged, because a context that ends before the sidecar does leaves
+			// the token unrenewed until it expires.
+			kitlog.From(ctx).Info("token renewal stopped: context done", "expires_at", expiresAt)
 			return
 		}
 	}

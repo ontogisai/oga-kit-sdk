@@ -42,6 +42,9 @@ type EnvTokenManagerConfig struct {
 //     a token and sends no Authorization header, which the Platform Gateway
 //     refuses with 401: it has no tokenless mode. This is the case for a
 //     sidecar run outside the platform.
+//
+// Renewal runs until Stop is called or ctx ends: pass a context that lives as
+// long as the sidecar.
 func NewTokenManagerFromEnv(ctx context.Context, cfg EnvTokenManagerConfig) (*TokenManager, error) {
 	provider, err := BootstrapFromEnv()
 	if err != nil {

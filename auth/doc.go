@@ -11,6 +11,11 @@
 // each time, and retries a failed mint with exponential backoff. The token is
 // held in memory only.
 //
+// Renewal runs until the manager is stopped or the context passed to it ends.
+// Pass a context that lives as long as the sidecar: when it ends, the manager
+// logs "token renewal stopped: context done" and the token is not renewed
+// again.
+//
 // Most kits do not use this package directly: agent.ConnectRuntimeDeps,
 // mcptools.NewRuntimeFromEnv and gateway.NewClientFromEnv wire it from the
 // environment. A loader, a source connector or a time-series sink uses

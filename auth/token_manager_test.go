@@ -166,3 +166,48 @@ func TestTokenManager_RenewalMintsWithCurrentBootstrapIdentity(t *testing.T) {
 		t.Errorf("renewal sent Authorization %q; a k8s_sa mint sends none (the old workload token is never presented)", auths[1])
 	}
 }
+
+// Stop is safe to call more than once: mcptools.Runtime.Close (which
+// ListenAndServe also calls) and the gateway env client's Closer both end in
+// it. A second call used to panic with "close of closed channel".
+func TestTokenManager_StopTwice(t *testing.T) {
+	ms := newMintServer(t)
+	tm, err := NewTokenManager(context.Background(), &TokenManagerConfig{
+		Bootstrap:           SecretBootstrap{Secret: "s"},
+		IssueURL:            ms.URL,
+		AgentRegistrationID: "tnt1.a",
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	tm.Stop()
+	tm.Stop()
+}
+
+// Renewal ends when the context passed to NewTokenManager ends, and Stop
+// afterwards still returns.
+func TestTokenManager_RenewalEndsWithContext(t *testing.T) {
+	ms := newMintServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	tm, err := NewTokenManager(ctx, &TokenManagerConfig{
+		Bootstrap:           SecretBootstrap{Secret: "s"},
+		IssueURL:            ms.URL,
+		AgentRegistrationID: "tnt1.a",
+	})
+	if err != nil {
+		t.Fatalf("NewTokenManager: %v", err)
+	}
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		tm.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal goroutine still running after its context ended")
+	}
+	tm.Stop()
+}
