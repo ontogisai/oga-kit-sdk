@@ -1192,6 +1192,34 @@ func TestValidateEgressSyncs_RelationshipSyncSamePredicateDifferentTargetIsNotAD
 	}
 }
 
+// An endpoint type must be one of the component's own entities_sync names,
+// compared exactly, matching the platform's install check (OGA-EGRS-VAL-1011,
+// OGA-1145) and its run plan, which narrows a run by these names.
+func TestValidateEgressSyncs_RelationshipSyncEndpointMustBeADeclaredEntityType(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rule  EgressRelationshipSyncSpec
+		field string
+	}{
+		{"target not declared", EgressRelationshipSyncSpec{Predicate: "feeds", SourceType: "Equipment", TargetType: "Point"}, `target_type "Point"`},
+		{"source not declared", EgressRelationshipSyncSpec{Predicate: "feeds", SourceType: "Point", TargetType: "Equipment"}, `source_type "Point"`},
+		{"class under a declared anchor", EgressRelationshipSyncSpec{Predicate: "feeds", SourceType: "Equipment", TargetType: "rec:Room"}, `target_type "rec:Room"`},
+		{"different case", EgressRelationshipSyncSpec{Predicate: "feeds", SourceType: "equipment", TargetType: "Equipment"}, `source_type "equipment"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEgressSpecForRelationshipLane()
+			e.RelationshipsSync = []EgressRelationshipSyncSpec{tc.rule}
+			err := validateEgressSyncs([]EgressSyncSpec{e})
+			if err == nil {
+				t.Fatal("a relationship entry naming an undeclared endpoint type was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("error %q does not name %s", err, tc.field)
+			}
+		})
+	}
+}
+
 // An absent relationships_sync block is legal — the lane is entirely optional, and
 // a component declaring none must not be rejected for it.
 func TestValidateEgressSyncs_RelationshipSyncAbsentIsAccepted(t *testing.T) {

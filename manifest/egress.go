@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -613,17 +614,19 @@ type EgressRelationshipSyncSpec struct {
 	// EgressEntityTypeSpec.
 	Predicate string `yaml:"predicate"`
 
-	// SourceType is the declared entity type (or anchor) this predicate's
-	// SOURCE endpoint (out() side) is scoped to. REQUIRED: there is no
+	// SourceType is the entities_sync name this predicate's SOURCE endpoint
+	// (out() side) is scoped to, compared exactly: an anchor that is not itself
+	// declared, or a class under a declared anchor, is refused (declare the rule
+	// at the anchor with IncludeDescendants instead). REQUIRED: there is no
 	// traversal-direction ambiguity to declare here, unlike ParentEdges — the
 	// source is always the edge's out() endpoint — but the ANCHOR PAIR still
 	// has to be stated, because that is what disambiguates one declared entry
 	// from another sharing the same predicate.
 	SourceType string `yaml:"source_type"`
 
-	// TargetType is the declared entity type (or anchor) this predicate's
-	// TARGET endpoint (in() side) is scoped to. REQUIRED, same reasoning as
-	// SourceType.
+	// TargetType is the entities_sync name this predicate's TARGET endpoint
+	// (in() side) is scoped to, compared exactly as SourceType is. REQUIRED, same
+	// reasoning as SourceType.
 	TargetType string `yaml:"target_type"`
 
 	// IncludeDescendants selects every entity type stored under the same
@@ -900,19 +903,26 @@ func validateEgressWithdrawal(i int, e *EgressSyncSpec) error {
 }
 
 // validateEgressRelationshipSync checks the relationship lane
-// (spec.egress_syncs[].relationships_sync[]): every entry names a predicate
-// and both endpoint types, and no (predicate, source_type, target_type) tuple
-// is declared twice.
+// (spec.egress_syncs[].relationships_sync[]): every entry names a predicate and
+// both endpoint types, each endpoint type is one of the same component's
+// entities_sync names, and no (predicate, source_type, target_type) tuple is
+// declared twice.
+//
+// The endpoint names are compared exactly, as the platform's run plan compares
+// them when a run is narrowed to entity types, and as the platform's install
+// check does (OGA-EGRS-VAL-1011, OGA-1145). Neither an anchor of a declared type
+// nor a class pushed under a declared anchor counts: a rule over an anchor reads
+// every class under it, including classes the entities lane does not push, and a
+// rule over a subclass is declared at its anchor with IncludeDescendants.
 //
 // Mirrors validateEgressOntologySync's shape. What is deliberately NOT checked
-// here — that the predicate is a PHYSICAL relationship type, and that
-// source_type/target_type each resolve against a declared entities_sync type —
-// needs the tenant's active ontology, so it stays install-time only
-// (domainkit.validateRelationshipSync raises OGA-EGRS-VAL-1011/1012 for those).
+// here, that the predicate is a PHYSICAL relationship type, needs the tenant's
+// active ontology, so it stays install-time only (OGA-EGRS-VAL-1012).
 func validateEgressRelationshipSync(i int, e *EgressSyncSpec) error {
 	if len(e.RelationshipsSync) == 0 {
 		return nil
 	}
+	declared := e.EntityTypeNames()
 	type tuple struct{ predicate, source, target string }
 	seen := make(map[tuple]int, len(e.RelationshipsSync))
 	for j := range e.RelationshipsSync {
@@ -935,6 +945,17 @@ func validateEgressRelationshipSync(i int, e *EgressSyncSpec) error {
 				"spec.egress_syncs[%d].relationships_sync[%d]: target_type is required — a relationship "+
 					"entry must scope BOTH endpoints, since one predicate name can span several distinct "+
 					"anchor pairs", i, j)
+		}
+		for _, endpoint := range []struct{ field, name string }{
+			{"source_type", rs.SourceType}, {"target_type", rs.TargetType},
+		} {
+			if !slices.Contains(declared, endpoint.name) {
+				return fmt.Errorf(
+					"spec.egress_syncs[%d].relationships_sync[%d]: %s %q is not one of this component's "+
+						"entities_sync names; an endpoint must be a type the component pushes (for a class "+
+						"under a declared anchor, declare the rule at the anchor with include_descendants)",
+					i, j, endpoint.field, endpoint.name)
+			}
 		}
 		key := tuple{predicate, source, target}
 		if prev, dup := seen[key]; dup {
