@@ -616,8 +616,8 @@ type EgressRelationshipSyncSpec struct {
 
 	// SourceType is the entities_sync name this predicate's SOURCE endpoint
 	// (out() side) is scoped to, compared exactly: an anchor that is not itself
-	// declared, or a class under a declared anchor, is refused (declare the rule
-	// at the anchor with IncludeDescendants instead). REQUIRED: there is no
+	// declared, or a class under a declared anchor, is refused (name the declared
+	// anchor instead; it matches every class stored under it). REQUIRED: there is no
 	// traversal-direction ambiguity to declare here, unlike ParentEdges — the
 	// source is always the edge's out() endpoint — but the ANCHOR PAIR still
 	// has to be stated, because that is what disambiguates one declared entry
@@ -629,13 +629,17 @@ type EgressRelationshipSyncSpec struct {
 	// reasoning as SourceType.
 	TargetType string `yaml:"target_type"`
 
-	// IncludeDescendants selects every entity type stored under the same
-	// physical anchor as SourceType/TargetType, rather than each alone —
-	// mirroring EgressEntityTypeSpec.IncludeDescendants exactly, including its
-	// forward-compatibility rationale: declaring the coarse anchor here means a
-	// class added under it later (a future source export adding a
-	// feeds-to-Room edge, say) is picked up with NO manifest change, rather
-	// than requiring the kit to have anticipated every leaf in advance.
+	// IncludeDescendants widens an endpoint that names a LEAF class to every
+	// class stored under that leaf's physical anchor.
+	//
+	// It does NOT mirror EgressEntityTypeSpec.IncludeDescendants for an endpoint
+	// that names the anchor itself. The platform scopes such an endpoint by its
+	// physical type alone, so it matches every class stored under the anchor
+	// with or without this flag: target_type Equipment covers brick:AHU,
+	// brick:Damper and brick:Chiller, and Location covers rec:Level and rec:Room,
+	// including a class a later source export adds. In entities_sync the same
+	// anchor without the flag selects only rows of the anchor's own class, so
+	// there the flag is what pulls the leaves in.
 	//
 	// Applies to BOTH endpoints as one flag, not independently per endpoint:
 	// splitting it into SourceIncludeDescendants/TargetIncludeDescendants was
@@ -913,7 +917,8 @@ func validateEgressWithdrawal(i int, e *EgressSyncSpec) error {
 // check does (OGA-EGRS-VAL-1011, OGA-1145). Neither an anchor of a declared type
 // nor a class pushed under a declared anchor counts: a rule over an anchor reads
 // every class under it, including classes the entities lane does not push, and a
-// rule over a subclass is declared at its anchor with IncludeDescendants.
+// rule over a subclass names its declared anchor instead, which matches every
+// class stored under it with or without IncludeDescendants.
 //
 // Mirrors validateEgressOntologySync's shape. What is deliberately NOT checked
 // here, that the predicate is a PHYSICAL relationship type, needs the tenant's
@@ -953,7 +958,7 @@ func validateEgressRelationshipSync(i int, e *EgressSyncSpec) error {
 				return fmt.Errorf(
 					"spec.egress_syncs[%d].relationships_sync[%d]: %s %q is not one of this component's "+
 						"entities_sync names; an endpoint must be a type the component pushes (for a class "+
-						"under a declared anchor, declare the rule at the anchor with include_descendants)",
+						"under a declared anchor, name the anchor: it matches every class stored under it)",
 					i, j, endpoint.field, endpoint.name)
 			}
 		}
