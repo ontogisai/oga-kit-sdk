@@ -251,11 +251,6 @@ type EgressSyncSpec struct {
 	// it.
 	EntitiesSync []EgressEntityTypeSpec `yaml:"entities_sync"`
 
-	// CredentialRefs lists SecretStore secret names the platform delivers to
-	// the component so it can authenticate to the external system. Resolved per
-	// tenant by the same path source connectors use.
-	CredentialRefs []string `yaml:"credential_refs,omitempty"`
-
 	// BatchSize is the number of entities per POST /egress/sync call.
 	//
 	// Deliberately separate from the platform's internal read page size: the
@@ -282,9 +277,9 @@ type EgressSyncSpec struct {
 
 	// Container holds the component's deployment details. container.image is
 	// the CANONICAL place to declare the image; the block also carries port,
-	// resources, and env. An env value of the form "secret://<name>" is
-	// resolved per tenant from the SecretStore at container start, which is how
-	// a kit delivers non-baked config such as the external system's base URL.
+	// resources, and env. The component's credentials and per-tenant settings,
+	// such as the external system's base URL, are secret:// env values (see
+	// SidecarContainerSpec.Env).
 	Container SidecarContainerSpec `yaml:"container,omitempty"`
 
 	// ReceivesOutcomeReport opts this component in to receiving a sync-outcome

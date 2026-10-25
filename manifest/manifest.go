@@ -316,24 +316,18 @@ type SourceConnectorSpec struct {
 	// serves. At least one is required.
 	Bindings []SourceBindingSpec `yaml:"bindings"`
 
-	// CredentialRefs lists SecretStore secret names the platform injects for
-	// the connector to authenticate to its external systems (one or more).
-	CredentialRefs []string `yaml:"credential_refs,omitempty"`
-
 	// Container holds the connector's deployment details. container.image is
 	// the CANONICAL place to declare the connector image (consistent with
 	// agents / MCP servers / loaders — OGA-637); it also carries port,
-	// resources, and env. A common env use is per-tenant, non-baked config such
-	// as an external system's base URL delivered via a SecretStore reference,
-	// e.g.
+	// resources, and env. The connector's credentials and per-tenant settings
+	// are secret:// env values (see SidecarContainerSpec.Env), e.g.
 	//   container:
 	//     image: ghcr.io/acme/wo-connector@sha256:...
 	//     env:
 	//       WO_MGMT_URL: "secret://wo-mgmt-url"
-	// The platform resolves a "secret://<name>" env value to the tenant-scoped
-	// SecretStore secret at connector deploy time. Mirrors the platform's
-	// domainkit.SidecarContainerSpec field-for-field (continuous-ingress-
-	// connectors, OGA-437).
+	//       WO_MGMT_API_KEY: "secret://wo-mgmt-api-key"
+	// Mirrors the platform's domainkit.SidecarContainerSpec field-for-field
+	// (continuous-ingress-connectors, OGA-437).
 	Container SidecarContainerSpec `yaml:"container,omitempty"`
 
 	// EdgeCompleteness declares that this connector's artifacts are the COMPLETE
@@ -439,8 +433,12 @@ type SidecarContainerSpec struct {
 
 	// Env injects additional environment variables into the container. A value
 	// of the form "secret://<name>" is resolved by the platform to the
-	// tenant-scoped SecretStore secret <name> at deploy time; any other value
-	// is injected verbatim.
+	// tenant-scoped SecretStore secret <name> each time it renders the sidecar,
+	// so a rotated secret reaches the running sidecar; on Kubernetes the value
+	// is delivered from the sidecar's own Secret, not the Deployment. An
+	// unprovisioned secret renders as an empty value. This is the one way a kit
+	// receives a credential or a per-tenant setting. Any other value is
+	// injected verbatim.
 	Env map[string]string `yaml:"env,omitempty"`
 }
 
