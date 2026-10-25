@@ -44,8 +44,6 @@ spec:
           include_descendants: true
         - name: brick_Equipment
           parent_edges: [hasPart]
-      credential_refs:
-        - ext-system-api-key
       batch_size: 100
       max_in_flight: 4
       container:
@@ -53,6 +51,7 @@ spec:
         port: 8600
         env:
           EXT_SYSTEM_BASE_URL: "secret://ext-system-base-url"
+          EXT_SYSTEM_API_KEY: "secret://ext-system-api-key"
 `
 
 func TestParse_EgressSyncsBlock(t *testing.T) {
@@ -109,8 +108,8 @@ func TestParse_EgressSyncsBlock(t *testing.T) {
 	if e.EntitiesSync[2].Hierarchical {
 		t.Error("entities_sync[2].hierarchical = true; a cross-type edge is not a hierarchy")
 	}
-	if len(e.CredentialRefs) != 1 || e.CredentialRefs[0] != "ext-system-api-key" {
-		t.Errorf("credential_refs = %v", e.CredentialRefs)
+	if got := e.Container.Env["EXT_SYSTEM_API_KEY"]; got != "secret://ext-system-api-key" {
+		t.Errorf("container.env EXT_SYSTEM_API_KEY = %q, want the secret:// reference", got)
 	}
 	if e.EffectiveBatchSize() != 100 {
 		t.Errorf("batch size = %d, want the declared 100", e.EffectiveBatchSize())

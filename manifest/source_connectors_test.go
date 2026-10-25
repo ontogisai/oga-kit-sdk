@@ -16,9 +16,8 @@ func baseManifestWithConnectors(conns []SourceConnectorSpec) *KitManifest {
 
 func TestValidate_SourceConnectors_Valid(t *testing.T) {
 	m := baseManifestWithConnectors([]SourceConnectorSpec{{
-		Name:           "fm-wo-connector",
-		Image:          "ghcr.io/ontogisai/oga-kit-built-environment/fm-wo-connector@sha256:abc",
-		CredentialRefs: []string{"connector-wo-api-key"},
+		Name:  "fm-wo-connector",
+		Image: "ghcr.io/ontogisai/oga-kit-built-environment/fm-wo-connector@sha256:abc",
 		Bindings: []SourceBindingSpec{
 			{ID: "wo-status", ExternalSystem: "contract_wo_mgmt", SourceType: "wo_status_feed", Modes: []string{"webhook"}},
 			{ID: "bms", ExternalSystem: "acme_bms", SourceType: "bms_point_stream", Modes: []string{"poll"},
@@ -90,8 +89,6 @@ spec:
           external_system: contract_wo_mgmt
           source_type: wo_status_feed
           modes: [poll, webhook]
-      credential_refs:
-        - wo-mgmt-api-key
 `
 	m, err := Parse(strings.NewReader(y))
 	if err != nil {
@@ -106,6 +103,51 @@ spec:
 	}
 	if got := c.Container.Env["WO_POLL_INTERVAL"]; got != "30s" {
 		t.Errorf("container.env WO_POLL_INTERVAL = %q, want 30s", got)
+	}
+}
+
+// TestParse_RefusesCredentialRefs pins that the removed credential_refs field
+// is refused on both roles that had it (OGA-1154): a kit declares a credential
+// as a secret:// env value, and the strict parse names the field instead of
+// dropping it, so a kit that still declares one finds out before upload.
+func TestParse_RefusesCredentialRefs(t *testing.T) {
+	head := `
+api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata:
+  name: kit
+  version: 1.0.0
+spec:
+  platform_version: ">=1.0.0"
+`
+	cases := map[string]string{
+		"source connector": `  source_connectors:
+    - name: wo-connector
+      container:
+        image: ghcr.io/acme/wo-connector@sha256:abc
+      bindings:
+        - id: wo-status
+          external_system: contract_wo_mgmt
+          source_type: wo_status_feed
+      credential_refs: [wo-mgmt-api-key]
+`,
+		"egress sync": `  egress_syncs:
+    - name: example-egress
+      external_system: ext-system
+      entities_sync:
+        - name: rec_Site
+      credential_refs: [ext-system-api-key]
+      container:
+        image: ghcr.io/acme/example-egress@sha256:abc
+`,
+	}
+	for name, spec := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(head + spec))
+			if err == nil || !strings.Contains(err.Error(), "credential_refs") {
+				t.Fatalf("Parse = %v, want an error naming credential_refs", err)
+			}
+		})
 	}
 }
 
