@@ -177,6 +177,33 @@ type Entity struct {
 	// conclude a type reference cannot be in this map.
 	ParentRefs map[string]ParentRef `json:"parent_refs,omitempty"`
 
+	// References carries the records this entity reaches across each edge the kit
+	// declared under entities_sync[].reference_edges, keyed by the entry's name.
+	//
+	// It is NOT a second ParentRefs, and its guarantees are the opposite ones:
+	//
+	//   - MULTI-VALUED. A name holds every live record reached across a live edge,
+	//     distinct and ordered by EntityID.
+	//   - NO CORRELATION. A referenced record need not be in the external system
+	//     at all, which is the case this exists for: a record the external system
+	//     has no table for, shown on the records it does hold.
+	//   - TYPED. Only records stored under the entry's target_type are listed.
+	//   - NEVER BLOCKING. A reference never fails, withholds or skips the entity.
+	//
+	// An ABSENT name means the entity reaches nothing across that edge today. The
+	// whole field is absent when no name has entries. A component that writes the
+	// references into an external record that is replaced whole on update should
+	// write nothing for an absent name, so a reference removed in the graph is
+	// removed there on the next push.
+	//
+	// Entity lane only ([PathSync]). An entity withdrawal, the ontology lane and the
+	// relationship lane never carry it. A component fed by change events never
+	// receives it either: the platform refuses reference_edges unless the
+	// component's change_delivery is off.
+	//
+	// Mirrors the platform's internal/egress.Entity.References.
+	References map[string][]Reference `json:"references,omitempty"`
+
 	// TypeAncestry is this entity's type chain as the tenant's LIVE ontology
 	// defines it, most-specific FIRST: the entity's own class ID, then its parent,
 	// then its grandparent, up to the root.
@@ -287,6 +314,21 @@ type ParentRef struct {
 	// foreign key needs. It is non-empty whenever the entry is present, because
 	// the platform pushes and correlates a parent before any of its children.
 	ExternalRecordID string `json:"external_record_id"`
+}
+
+// Reference is one record an entity reaches across a declared reference edge
+// (see [Entity.References]).
+//
+// It carries no external id: a referenced record need not have one. Label is the
+// record's current label, empty when the record has none; a component must not
+// substitute another value for it.
+type Reference struct {
+	// EntityID is the referenced record's platform entity id.
+	EntityID string `json:"entity_id"`
+	// EntityType is the referenced record's class ID, verbatim (brick:System).
+	EntityType string `json:"entity_type"`
+	// Label is the referenced record's current label.
+	Label string `json:"label"`
 }
 
 // SyncRequest is the body of a push — POST /egress/sync for entities, and
