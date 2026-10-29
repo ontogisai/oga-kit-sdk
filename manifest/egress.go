@@ -180,6 +180,91 @@ func (p *ParentEdgeSpec) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
+// ReferenceEdgeSpec is one reference-edge declaration: the platform sends, with
+// every pushed entity of the declaring type, the live records it reaches across
+// Edge in Direction that are stored under TargetType, as
+// egress.Entity.References[Name].
+//
+//	reference_edges:
+//	  - edge: hasPart
+//	    direction: in          # System ─hasPart→ Equipment, read from the Equipment
+//	    target_type: System    # every class stored under the System physical type
+//	    name: isPartOf
+//
+// It is NOT a ParentEdgeSpec with a flag. An owner reference fills a foreign key,
+// so it must be single-valued and correlated; a reference exists for records the
+// external system does not hold, so it is multi-valued, needs no correlation and
+// carries the record's label.
+//
+// ALL FOUR KEYS ARE REQUIRED and there is no scalar shorthand. Direction has no
+// default because a wrong direction is silent: it reaches nothing, and "nothing"
+// is a legal answer, so every record would ship without its references and the
+// run would report success.
+type ReferenceEdgeSpec struct {
+	// Edge is the relationship type name, a legal ArcadeDB local identifier (the
+	// same rule as a parent edge; see EgressEntityTypeSpec.ParentEdges).
+	Edge string `yaml:"edge"`
+
+	// Direction is "out" (the declaring entity holds the edge) or "in" (the
+	// referenced record holds it). Required.
+	Direction ParentEdgeDirection `yaml:"direction"`
+
+	// TargetType is ONE physical type. Every class stored under it matches, and a
+	// record stored under any other type is never listed. The platform checks at
+	// install that it is a physical type in the tenant's ontology.
+	TargetType string `yaml:"target_type"`
+
+	// Name is the key the component receives the list under. The platform gives it
+	// no other meaning; what the component does with the list is the kit's choice.
+	// A legal identifier, unique within the declaring entities_sync entry.
+	Name string `yaml:"name"`
+}
+
+// UnmarshalYAML accepts a mapping only, with exactly the keys edge, direction,
+// target_type and name.
+//
+// The keys are walked by hand for the reason ParentEdgeSpec.UnmarshalYAML gives:
+// Node.Decode does not inherit the strict decoder's KnownFields, so a mistyped key
+// would otherwise be dropped silently, and a dropped "direction" is the silent
+// failure the required key exists to prevent. Presence is checked here too, so
+// "missing" and "empty" read as the same refusal in validation.
+func (r *ReferenceEdgeSpec) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf(
+			"reference_edges entry must be a mapping with edge, direction, target_type and name, got YAML kind %d",
+			value.Kind,
+		)
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key, val := value.Content[i], value.Content[i+1]
+		var dst *string
+		switch key.Value {
+		case "edge":
+			dst = &r.Edge
+		case "target_type":
+			dst = &r.TargetType
+		case "name":
+			dst = &r.Name
+		case "direction":
+			var dir string
+			if err := val.Decode(&dir); err != nil {
+				return fmt.Errorf("reference_edges entry: direction: %w", err)
+			}
+			r.Direction = ParentEdgeDirection(dir)
+			continue
+		default:
+			return fmt.Errorf(
+				"reference_edges entry: unknown field %q (expected edge, direction, target_type, name)",
+				key.Value,
+			)
+		}
+		if err := val.Decode(dst); err != nil {
+			return fmt.Errorf("reference_edges entry: %s: %w", key.Value, err)
+		}
+	}
+	return nil
+}
+
 // EgressSyncSpec declares one egress-sync component the platform deploys as a
 // long-running sidecar at install time and then DRIVES: a resumable Day-1 bulk
 // push of the declared entity types plus continuous Day-2 change sync.
@@ -532,6 +617,22 @@ type EgressEntityTypeSpec struct {
 	// ontology to know where the type lives, and guessing would reject valid
 	// manifests.
 	TypeRef bool `yaml:"type_ref,omitempty"`
+
+	// ReferenceEdges declares edges whose far-end records the platform sends with
+	// every pushed entity of this type, under egress.Entity.References (see
+	// ReferenceEdgeSpec). Use it to show, on a record the external system holds,
+	// records it has no table for.
+	//
+	// The same edge may appear twice under different names (both directions, say).
+	//
+	// Requires change_delivery: off. The change-event path does not resolve
+	// references, and a component that replaces an external record whole would
+	// drop them on every event-fed push.
+	//
+	// Adding or removing an entry does not make a delta run send the existing
+	// records again: they have not changed since the watermark. Raise
+	// sync_generation in the same release so the next run is full.
+	ReferenceEdges []ReferenceEdgeSpec `yaml:"reference_edges,omitempty"`
 }
 
 // EgressOntologySyncSpec is one ontology-type catalog lane entry: the physical
@@ -883,6 +984,20 @@ func validateEgressDelivery(i int, e *EgressSyncSpec) error {
 			"spec.egress_syncs[%d].sync_generation: must be a positive integer, got %d",
 			i, *e.SyncGeneration)
 	}
+	// References are resolved on the run path only. An event-fed push would reach the
+	// component without them, and a component that replaces its external record whole
+	// would then drop them, so the combination is refused rather than allowed to lose
+	// data intermittently.
+	if e.EffectiveChangeDelivery() != ChangeDeliveryOff {
+		for j := range e.EntitiesSync {
+			if len(e.EntitiesSync[j].ReferenceEdges) > 0 {
+				return fmt.Errorf(
+					"spec.egress_syncs[%d].entities_sync[%d]: reference_edges requires change_delivery: %q "+
+						"(the change-event path does not resolve references)",
+					i, j, ChangeDeliveryOff)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1126,6 +1241,44 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec, hasOntologyLan
 				"(it sanitizes to the empty string), so it can never name an edge type",
 			i, j, edge,
 		)
+	}
+	return validateReferenceEdges(i, j, et)
+}
+
+// validateReferenceEdges checks one entity type's reference_edges: every key
+// present, a valid direction, addressable edge and name identifiers, and names
+// unique within the type. Whether the edge and target_type exist in the tenant's
+// ontology needs tenant state, so the platform checks that at install.
+//
+// Names are keyed alone, not with the edge: the name is the References key the
+// component reads, so two entries under one name would collide whatever their
+// edges, while one edge under two names is a legitimate pair (both directions).
+func validateReferenceEdges(i, j int, et *EgressEntityTypeSpec) error {
+	names := make(map[string]struct{}, len(et.ReferenceEdges))
+	for k, re := range et.ReferenceEdges {
+		at := fmt.Sprintf("spec.egress_syncs[%d].entities_sync[%d].reference_edges[%d]", i, j, k)
+		if strings.TrimSpace(re.Edge) == "" || strings.TrimSpace(re.TargetType) == "" ||
+			strings.TrimSpace(re.Name) == "" || re.Direction == "" {
+			return fmt.Errorf("%s: edge, direction, target_type and name are all required", at)
+		}
+		if !re.Direction.Valid() {
+			return fmt.Errorf("%s: direction %q is not %q or %q", at, re.Direction, ParentEdgeOut, ParentEdgeIn)
+		}
+		if !isAddressableEdgeName(re.Edge) {
+			return fmt.Errorf(
+				"%s: edge %q is not a legal identifier ([a-zA-Z0-9_], no trailing underscore); "+
+					"the platform materializes a predicate under its sanitized name, so declare %q",
+				at, re.Edge, sanitizeEdgeName(re.Edge))
+		}
+		if !isAddressableEdgeName(re.Name) {
+			return fmt.Errorf(
+				"%s: name %q is not a legal identifier ([a-zA-Z0-9_], no trailing underscore)", at, re.Name)
+		}
+		if _, dup := names[re.Name]; dup {
+			return fmt.Errorf("%s: name %q is declared twice on %q; each name is one references key",
+				at, re.Name, et.Name)
+		}
+		names[re.Name] = struct{}{}
 	}
 	return nil
 }

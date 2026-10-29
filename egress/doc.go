@@ -134,6 +134,14 @@
 // arrives under "hasPoint", even though the relation reads naturally as
 // "isPointOf". See manifest.ParentEdgeSpec.
 //
+// reference_edges asks for something different: the records an entity reaches
+// across an edge, whether or not the external system holds them, delivered as
+// [Entity.References] under the entry's name with each record's id, class and
+// label. Use it to show on a pushed record a record the external system has no
+// table for. It needs change_delivery: off, and adding or removing an entry needs
+// a sync_generation bump to reach records that have not changed. See
+// manifest.ReferenceEdgeSpec.
+//
 // # Withdrawal
 //
 // When the knowledge graph stops holding something this component pushed — an
