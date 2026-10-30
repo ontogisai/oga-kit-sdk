@@ -187,7 +187,9 @@ type Entity struct {
 	//   - NO CORRELATION. A referenced record need not be in the external system
 	//     at all, which is the case this exists for: a record the external system
 	//     has no table for, shown on the records it does hold.
-	//   - TYPED. Only records stored under the entry's target_type are listed.
+	//   - TYPED. Only records of the entry's target_type are listed: every record
+	//     of its table when it names a physical type, else records of that class
+	//     and its subclasses.
 	//   - NEVER BLOCKING. A reference never fails, withholds or skips the entity.
 	//
 	// An ABSENT name means the entity reaches nothing across that edge today. The

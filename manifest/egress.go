@@ -181,15 +181,18 @@ func (p *ParentEdgeSpec) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // ReferenceEdgeSpec is one reference-edge declaration: the platform sends, with
-// every pushed entity of the declaring type, the live records it reaches across
-// Edge in Direction that are stored under TargetType, as
-// egress.Entity.References[Name].
+// every pushed entity of the declaring type, the live records of TargetType it
+// reaches across Edge in Direction, as egress.Entity.References[Name].
 //
 //	reference_edges:
 //	  - edge: hasPart
 //	    direction: in          # System ─hasPart→ Equipment, read from the Equipment
-//	    target_type: System    # every class stored under the System physical type
+//	    target_type: System    # a physical type: every record in the System table
 //	    name: isPartOf
+//	  - edge: hasPart
+//	    direction: in
+//	    target_type: brick:AHU # a class: brick:AHU and its subclasses, no other equipment
+//	    name: partOfAHU
 //
 // It is NOT a ParentEdgeSpec with a flag. An owner reference fills a foreign key,
 // so it must be single-valued and correlated; a reference exists for records the
@@ -209,9 +212,18 @@ type ReferenceEdgeSpec struct {
 	// referenced record holds it). Required.
 	Direction ParentEdgeDirection `yaml:"direction"`
 
-	// TargetType is ONE physical type. Every class stored under it matches, and a
-	// record stored under any other type is never listed. The platform checks at
-	// install that it is a physical type in the tenant's ontology.
+	// TargetType is one entity type of the tenant's ontology:
+	//
+	//   - a PHYSICAL type matches every record stored in its table, whatever its
+	//     class;
+	//   - a CLASS matches records of that class and of every class that descends
+	//     from it in the ontology. A sibling class stored in the same table does
+	//     not match.
+	//
+	// Under hybrid modelling most classes share a few tables (almost all equipment
+	// is in Equipment), so a class is how a kit says "the brick:AHU this fan is
+	// part of" rather than "any equipment". The platform checks at install that
+	// the name is an entity type in the kit or the tenant's ontology.
 	TargetType string `yaml:"target_type"`
 
 	// Name is the key the component receives the list under. The platform gives it
