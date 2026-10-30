@@ -138,9 +138,10 @@
 // across an edge, whether or not the external system holds them, delivered as
 // [Entity.References] under the entry's name with each record's id, class and
 // label. Use it to show on a pushed record a record the external system has no
-// table for. It needs change_delivery: off, and adding or removing an entry needs
-// a sync_generation bump to reach records that have not changed. See
-// manifest.ReferenceEdgeSpec.
+// table for. Its target_type is a physical type (every record of its table) or a
+// class (that class and its subclasses). It needs change_delivery: off, and adding
+// or removing an entry needs a sync_generation bump to reach records that have not
+// changed. See manifest.ReferenceEdgeSpec.
 //
 // # Withdrawal
 //
