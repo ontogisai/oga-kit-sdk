@@ -164,10 +164,11 @@ type Entity struct {
 	//     the type record being pushed. Not an edge either.
 	//
 	// The platform guarantees two things, so a component does not have to defend
-	// against them: each entry is SINGLE-VALUED (a declared edge resolving to
-	// several targets fails the batch rather than picking one), and a present
-	// entry's ExternalRecordID is non-empty (an owner not yet pushed and
-	// correlated fails the batch, so a null foreign key is never sent). An ABSENT
+	// against them: each entry is SINGLE-VALUED (an entity whose declared edge
+	// resolves to several owners is not sent, and a declared owner_precedence
+	// narrows which owners count), and a present entry's ExternalRecordID is
+	// non-empty (an entity whose owner is not yet pushed and correlated is not
+	// sent, so a null foreign key is never sent). An ABSENT
 	// entry means the entity is a root of that relation — omit the foreign key, do
 	// not treat it as an error.
 	//

@@ -118,6 +118,28 @@ type ParentEdgeSpec struct {
 	// Direction is "out" (default) or "in". Empty means out; use
 	// EffectiveDirection to read it resolved.
 	Direction ParentEdgeDirection `yaml:"direction,omitempty"`
+
+	// OwnerPrecedence names which owners count across this edge, and in which
+	// order. Each entry is one of the component's own entities_sync names; an
+	// owner counts for an entry when it is a record the component pushes as that
+	// type. The first entry with at least one live owner decides: one owner of
+	// that type is the owner, more than one is ambiguous. Owners of types not
+	// listed never count. Absent, every live owner counts.
+	//
+	//	parent_edges:
+	//	  - edge: hasPoint
+	//	    direction: in
+	//	    owner_precedence: [Equipment, Location]
+	//
+	// That example sends a point's Equipment owner when it has one, and its
+	// Location owner only when it has no Equipment owner. A one-entry list is a
+	// filter: [Equipment] never sends a Location.
+	//
+	// An ambiguous record is never sent with one owner picked arbitrarily: on an
+	// egress run it fails on its own (OGA-EGRS-DATA-2006) and the rest of its
+	// batch is pushed. Not allowed on a hierarchical type, whose level walk
+	// orders by every live owner.
+	OwnerPrecedence []string `yaml:"owner_precedence,omitempty"`
 }
 
 // EffectiveDirection returns the declared direction with the outbound default
@@ -162,9 +184,13 @@ func (p *ParentEdgeSpec) UnmarshalYAML(value *yaml.Node) error {
 					return fmt.Errorf("parent_edges entry: direction: %w", err)
 				}
 				p.Direction = ParentEdgeDirection(dir)
+			case "owner_precedence":
+				if err := val.Decode(&p.OwnerPrecedence); err != nil {
+					return fmt.Errorf("parent_edges entry: owner_precedence: %w", err)
+				}
 			default:
 				return fmt.Errorf(
-					"parent_edges entry: unknown field %q (expected edge, direction); "+
+					"parent_edges entry: unknown field %q (expected edge, direction, owner_precedence); "+
 						"a mistyped direction key would silently default to %q",
 					key.Value, ParentEdgeOut,
 				)
@@ -542,7 +568,9 @@ type EgressEntityTypeSpec struct {
 	// record is pushed with no foreign key and the run reports complete success.
 	// Declaring the INVERSE predicate instead is the louder mistake: it presents
 	// as fan-out, one level resolving to hundreds of targets, and the platform
-	// fails the batch rather than choosing one.
+	// never chooses one (an egress run fails each such record with
+	// OGA-EGRS-DATA-2003). A record that legitimately has owners of several
+	// types across one edge needs ParentEdgeSpec.OwnerPrecedence instead.
 	//
 	// Which direction a kit needs is a fact about how its loader STORES the edge,
 	// not about how the source system words it. A loader that normalizes inverse
@@ -965,7 +993,8 @@ func validateEgressSyncs(syncs []EgressSyncSpec) error {
 			return err
 		}
 		for j := range e.EntitiesSync {
-			if err := validateEgressEntityType(i, j, &e.EntitiesSync[j], len(e.OntologySync) > 0); err != nil {
+			if err := validateEgressEntityType(i, j, &e.EntitiesSync[j], len(e.OntologySync) > 0,
+				e.EntityTypeNames()); err != nil {
 				return err
 			}
 		}
@@ -1152,11 +1181,14 @@ func validateEgressOntologySync(i int, e *EgressSyncSpec) error {
 // unaddressable edge otherwise installs cleanly and fails mid-run having pushed
 // only the roots.
 //
-// hasOntologyLane says whether the component declares any ontology_sync entry. It
-// is passed in rather than read from a parent pointer because that is the only
-// cross-lane fact this check needs, and taking the whole spec would invite reading
-// more of it than a local lint can soundly judge.
-func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec, hasOntologyLane bool) error {
+// hasOntologyLane says whether the component declares any ontology_sync entry, and
+// declared lists its entities_sync names (for owner_precedence). They are passed in
+// rather than read from a parent pointer because they are the only cross-lane facts
+// this check needs, and taking the whole spec would invite reading more of it than
+// a local lint can soundly judge.
+func validateEgressEntityType(
+	i, j int, et *EgressEntityTypeSpec, hasOntologyLane bool, declared []string,
+) error {
 	// TypeRef resolves the entity's type record out of the catalog the ontology
 	// lane pushes, so with NO such lane there is nothing to resolve and every batch
 	// would fail at run time on an uncorrelated reference.
@@ -1236,6 +1268,9 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec, hasOntologyLan
 		}
 		seen[edge] = dir
 
+		if err := validateOwnerPrecedence(i, j, et, pe, declared); err != nil {
+			return err
+		}
 		if isAddressableEdgeName(edge) {
 			continue
 		}
@@ -1255,6 +1290,34 @@ func validateEgressEntityType(i, j int, et *EgressEntityTypeSpec, hasOntologyLan
 		)
 	}
 	return validateReferenceEdges(i, j, et)
+}
+
+// validateOwnerPrecedence checks one parent edge's owner_precedence: not on a
+// hierarchical type, every entry one of the component's entities_sync names, no
+// entry twice. The same checks the platform makes at install (OGA-EGRS-VAL-1002).
+func validateOwnerPrecedence(i, j int, et *EgressEntityTypeSpec, pe ParentEdgeSpec, declared []string) error {
+	if len(pe.OwnerPrecedence) == 0 {
+		return nil
+	}
+	at := fmt.Sprintf("spec.egress_syncs[%d].entities_sync[%d]: parent_edges entry %q", i, j, pe.Edge)
+	if et.Hierarchical {
+		return fmt.Errorf(
+			"%s: owner_precedence is not allowed on a hierarchical type; the level walk orders by "+
+				"every live owner, so a filtered owner would place records at the wrong level", at)
+	}
+	seen := make(map[string]struct{}, len(pe.OwnerPrecedence))
+	for _, name := range pe.OwnerPrecedence {
+		if !slices.Contains(declared, name) {
+			return fmt.Errorf(
+				"%s: owner_precedence entry %q is not one of this component's entities_sync names; "+
+					"an owner must be a record the component pushes", at, name)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("%s: owner_precedence lists %q twice", at, name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
 }
 
 // validateReferenceEdges checks one entity type's reference_edges: every key
