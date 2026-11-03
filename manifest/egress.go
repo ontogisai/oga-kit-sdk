@@ -1294,7 +1294,7 @@ func validateEgressEntityType(
 
 // validateOwnerPrecedence checks one parent edge's owner_precedence: not on a
 // hierarchical type, every entry one of the component's entities_sync names, no
-// entry twice. The same checks the platform makes at install (OGA-EGRS-VAL-1014).
+// entry twice. The same checks the platform makes at install (OGA-EGRS-VAL-1002).
 func validateOwnerPrecedence(i, j int, et *EgressEntityTypeSpec, pe ParentEdgeSpec, declared []string) error {
 	if len(pe.OwnerPrecedence) == 0 {
 		return nil
