@@ -110,6 +110,13 @@ type GatewayClient interface {
 // Returns the assembled natural-language response plus the per-step
 // results (so callers can attach them as citations to the response
 // metadata).
+//
+// Deprecated: the one-shot planner plans from tool names without their input
+// schemas and cannot retry a refused call, so a guessed argument fails the step
+// now that the platform refuses arguments a tool does not declare (OGA-1189).
+// Since v1.0.1 no SDK handler uses it: streampipeline.NewDefaultStreamHandler
+// and NewProactiveMessageHandler answer every request with the ReAct pipeline.
+// It stays for DefaultRuntime.HandleReactive on a runtime with no handler wired.
 func PlanAndExecute(
 	ctx context.Context,
 	gw GatewayClient,
@@ -201,7 +208,9 @@ func PlanAndExecute(
 		if step.DependsOn >= 0 && step.DependsOn < len(results) {
 			prior := results[step.DependsOn]
 			if prior.Success && prior.Content != "" {
-				args = ResolveDependentArgsForTool(args, prior.Content, prior.ToolName)
+				// The one-shot planner holds no tool schemas, so a platform
+				// tool gets no added ID field (ResolveDependentArgsForTarget).
+				args = ResolveDependentArgsForTarget(args, prior.Content, prior.ToolName, ToolSchema{Name: step.ToolName})
 			}
 		}
 		step.Arguments = args

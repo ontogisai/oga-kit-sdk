@@ -171,13 +171,13 @@ REQUIRED ARGUMENTS — both tools reject the call (OGA-CORE-VAL-1001) if these a
 - A SOURCE MUST be bound — supply EITHER "source_id" (a concrete sensor/source id) OR a "source_filter" whose "related_to" is the target entity_id (usually "<from step N>" pointing at a prior entity-resolution step). A source_filter with only "max_sources" and no "related_to"/"entity_type" identifies NO series and is invalid — never emit it.
 
 source_filter shape (use it instead of source_id when you want ALL sources of a given class or relationship rather than one specific source):
-  {entity_type: "TemperatureSensor", related_to: "<entity_id>", relationship: "monitors", spatial_scope: {h3_cells: [...]}, max_sources: 10}
-The fields entity_type, related_to, relationship, spatial_scope, and max_sources are the only valid keys. Do NOT invent fields like "location", "zone", or "name" — use related_to with an entity_id instead. "related_to" should be set to the target entity (set depends_on to the entity step and use "<from step N>").
+  {entity_type: "TemperatureSensor", related_to: "<entity_id>", relationship: "monitors", max_sources: 10}
+The fields entity_type, related_to, relationship, and max_sources are the only valid keys. Do NOT invent fields like "location", "zone", or "name" — use related_to with an entity_id instead. "related_to" should be set to the target entity (set depends_on to the entity step and use "<from step N>").
 
 ALWAYS use these tools for sensor data, measurements, anomalies, thresholds, forecasts, and time-series questions.
 NEVER say "I don't have access to sensor data" or "I cannot retrieve real-time data" — use the tools.
 For anomaly detection, use kg_ts_analyze with mode="anomaly".
-For threshold monitoring, use kg_ts_analyze with mode="threshold" and provide upper/lower bounds.
+For threshold monitoring, use kg_ts_analyze with mode="threshold" and provide the bounds as threshold_config.upper and/or threshold_config.lower.
 For forecasting, use kg_ts_analyze with mode="forecast".
 
 ## Document Queries
@@ -259,7 +259,7 @@ Query: "Find all documents related to asset X-1"
 {"steps":[{"tool_name":"kg_doc_search","arguments":{"query":"X-1"},"depends_on":-1,"rationale":"Find documents mentioning X-1"},{"tool_name":"kg_doc_content","arguments":{"query":"asset X-1"},"depends_on":-1,"rationale":"Get document passages mentioning X-1"}]}
 
 Query: "How many entities of type T are there?"
-{"steps":[{"tool_name":"kg_query_entities","arguments":{"entity_type":"T","limit":1000},"depends_on":-1,"rationale":"Query all entities of type T to count them"}]}
+{"steps":[{"tool_name":"kg_query_entities","arguments":{"entity_type":"T","page_size":1},"depends_on":-1,"rationale":"Read total_count, the number of entities of type T, from one page"}]}
 
 Query: "Give me a summary of all entity types"
 {"steps":[{"tool_name":"kg_search_entity_types","arguments":{},"depends_on":-1,"rationale":"List all available entity types in the ontology"}]}

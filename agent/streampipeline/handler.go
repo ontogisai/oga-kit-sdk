@@ -118,108 +118,8 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 	schemaCache := newToolSchemaCache()
 
 	return func(ctx context.Context, rt *agent.DefaultRuntime, msg *agent.A2AMessage, stream agent.StreamWriter) error {
-		userText := agent.ExtractText(msg.Params.Message.Parts)
-
-		profile := rt.Profile()
 		deps := rt.Deps()
-
-		// Effective reactive delegations = explicit handler-option delegations
-		// (custom downstream agents) + the profile-driven Knowledge Agent
-		// delegation when spec.reactive_delegation.knowledge_agent is true
-		// (default opt-out). Reactive-only — proactive palette purity is
-		// preserved because the proactive handler never builds this set.
-		delegations := effectiveDelegations(profile, hc.delegations)
-
-		// Select the reactive planner per request. When the investigation forward
-		// carries an enriched investigation context (OGA-381 — built server-side
-		// by Frontier's Enricher), ground deterministically on its seed ids AND
-		// anchor the assembly prompt to the original proposal; otherwise plan
-		// tools dynamically via the LLM. The proactive grounding strategy is never
-		// used here (see the doc comment + OGA-348).
-		invCtx, hasInvCtx := investigationContextFromMessage(msg.Params.Message)
-		var investigationIDs []string
-		// plannerQuery carries a PLANNING framing for the StreamPlanner (OGA-398):
-		// the factual proposal context + the operator's question, WITHOUT the
-		// assembly-only "ground ONLY in results / do not re-propose" directive
-		// that (when fed to a planner) suppresses evidence gathering and yields
-		// an empty plan. The assembly still gets the full anchoring via userText.
-		var plannerQuery string
-		if hasInvCtx {
-			investigationIDs = investigationSeedIDs(invCtx)
-			plannerQuery = buildInvestigationPlannerQuery(userText, invCtx)
-			userText = enrichQueryWithInvestigationContext(userText, invCtx)
-		}
-		var planner Planner
-		if len(investigationIDs) > 0 {
-			// Guarantee grounding on the proposal's concrete seed entities, then
-			// let the agent's full-toolbox LLM planner add question-relevant
-			// evidence (SOP, history, trends). The seed fetch is batched into one
-			// kg_get_entity call (OGA-419). When the thread already grounded these
-			// seeds recently (Frontier sets investigation_seeds_grounded from
-			// per-agent history recency + freshness TTL), skip the seed fetch and
-			// reason over the injected history instead.
-			var invOpts []InvestigationOption
-			if seedsAlreadyGrounded(msg.Params.Message) {
-				invOpts = append(invOpts, WithSeedsAlreadyGrounded())
-			}
-			planner = NewInvestigationLLMPlanner(investigationIDs, reactiveStreamPlanner(rt), invOpts...)
-		} else {
-			planner = reactiveStreamPlanner(rt)
-		}
-
-		// Determine actor identity.
-		actor := agent.EventActor{
-			Type:        "domain_agent",
-			ID:          profile.AgentID,
-			DisplayName: profile.Name,
-		}
-
-		// Determine assembly prompt from the profile's proactive system prompt.
-		assemblyPrompt := ""
-		if profile.ProactiveReasoning != nil {
-			assemblyPrompt = profile.ProactiveReasoning.SystemPrompt
-		}
-		// On the investigation path, append the always-on concise-briefing format
-		// contract to the ASSEMBLY system prompt (not the planner input). This
-		// guarantees a succinct operator-facing verdict on every investigation,
-		// independent of how sparse the proposal context was. The planner builds
-		// its own system prompt (RequestPlan → PlanningSystemPrompt), so this
-		// never affects tool planning.
-		if hasInvCtx {
-			assemblyPrompt = appendInvestigationBriefingDirective(assemblyPrompt)
-		}
-
-		// OGA-446 resume token (nil on a fresh turn). Parsed once: seeds the
-		// planner (SeedFacts) AND gates confirm-before-write (PendingConfirmation).
-		pendingActionCtx := pendingActionContextFromMessage(msg.Params.Message)
-
-		input := Input{
-			Query:                  userText,
-			PlannerQuery:           plannerQuery,
-			TenantID:               deps.TenantID,
-			PrincipalID:            "", // populated by gateway on outbound calls
-			Actor:                  actor,
-			AssemblyPrompt:         assemblyPrompt,
-			ToolNames:              agent.UniqueTools(profile),
-			InvestigationEntityIDs: investigationIDs,
-			// Persona + palette for the ReAct planner. Reactive palette is the
-			// profile tool union; the domain-agent reactive path ALSO carries the
-			// profile grounding strategy as advisory hints (OGA-419) so an
-			// Investigate session reasons with the same advised tools as the
-			// proposal. ask_knowledge_agent delegation is added by profile config
-			// (spec.reactive_delegation.knowledge_agent) — default opt-out — and is
-			// a reactive-only capability (the proactive handler never reads it).
-			Persona:           reactivePersona(ctx, schemaCache, deps.Gateway, profile, delegations),
-			GroundingStrategy: reactiveGroundingHints(profile),
-			Delegations:       delegations,
-			// Resume (OGA-446): Frontier re-injects pending_action_context after an
-			// input-required turn. SeedFacts gives the planner the paused
-			// question + partial arguments structurally (not just via history), and
-			// PendingConfirmation lets confirm-before-write recognise a now-confirmed
-			// mutating call. Both nil/empty on a fresh turn.
-			SeedFacts:           resumeSeedFacts(pendingActionCtx),
-			PendingConfirmation: pendingActionCtx,
-		}
+		input, planner := buildReactiveRequest(ctx, deps.Gateway, rt, msg, hc.delegations, schemaCache)
 
 		// Bridge: streampipeline emits to a channel; we forward to the
 		// StreamWriter. Channel buffered enough to absorb a typical run.
@@ -255,6 +155,125 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 	}
 }
 
+// buildReactiveRequest builds the pipeline input and the planner for one
+// reactive request: interactive chat or an [Investigate] follow-up. The
+// streaming handler and the synchronous message/send handler both call it, so
+// a question gets the same planner, palette and investigation grounding
+// whichever way it arrives. gw is the gateway the persona discovers tool
+// schemas from and the planner calls.
+func buildReactiveRequest(
+	ctx context.Context,
+	gw PlatformAccess,
+	rt *agent.DefaultRuntime,
+	msg *agent.A2AMessage,
+	explicitDelegations []AgentDelegation,
+	schemaCache *toolSchemaCache,
+) (Input, Planner) {
+	userText := agent.ExtractText(msg.Params.Message.Parts)
+
+	profile := rt.Profile()
+	deps := rt.Deps()
+
+	// Effective reactive delegations = explicit handler-option delegations
+	// (custom downstream agents) + the profile-driven Knowledge Agent
+	// delegation when spec.reactive_delegation.knowledge_agent is true
+	// (default opt-out). Reactive-only — proactive palette purity is
+	// preserved because the proactive handler never builds this set.
+	delegations := effectiveDelegations(profile, explicitDelegations)
+
+	// Select the reactive planner per request. When the investigation forward
+	// carries an enriched investigation context (OGA-381 — built server-side
+	// by Frontier's Enricher), ground deterministically on its seed ids AND
+	// anchor the assembly prompt to the original proposal; otherwise plan
+	// tools dynamically via the LLM. The proactive grounding strategy is never
+	// used here (see the doc comment + OGA-348).
+	invCtx, hasInvCtx := investigationContextFromMessage(msg.Params.Message)
+	var investigationIDs []string
+	// plannerQuery carries a PLANNING framing for the StreamPlanner (OGA-398):
+	// the factual proposal context + the operator's question, WITHOUT the
+	// assembly-only "ground ONLY in results / do not re-propose" directive
+	// that (when fed to a planner) suppresses evidence gathering and yields
+	// an empty plan. The assembly still gets the full anchoring via userText.
+	var plannerQuery string
+	if hasInvCtx {
+		investigationIDs = investigationSeedIDs(invCtx)
+		plannerQuery = buildInvestigationPlannerQuery(userText, invCtx)
+		userText = enrichQueryWithInvestigationContext(userText, invCtx)
+	}
+	var planner Planner
+	if len(investigationIDs) > 0 {
+		// Guarantee grounding on the proposal's concrete seed entities, then
+		// let the agent's full-toolbox LLM planner add question-relevant
+		// evidence (SOP, history, trends). The seed fetch is batched into one
+		// kg_get_entity call (OGA-419). When the thread already grounded these
+		// seeds recently (Frontier sets investigation_seeds_grounded from
+		// per-agent history recency + freshness TTL), skip the seed fetch and
+		// reason over the injected history instead.
+		var invOpts []InvestigationOption
+		if seedsAlreadyGrounded(msg.Params.Message) {
+			invOpts = append(invOpts, WithSeedsAlreadyGrounded())
+		}
+		planner = NewInvestigationLLMPlanner(investigationIDs, reactivePlanner(gw, rt), invOpts...)
+	} else {
+		planner = reactivePlanner(gw, rt)
+	}
+
+	// Determine actor identity.
+	actor := agent.EventActor{
+		Type:        "domain_agent",
+		ID:          profile.AgentID,
+		DisplayName: profile.Name,
+	}
+
+	// Determine assembly prompt from the profile's proactive system prompt.
+	assemblyPrompt := ""
+	if profile.ProactiveReasoning != nil {
+		assemblyPrompt = profile.ProactiveReasoning.SystemPrompt
+	}
+	// On the investigation path, append the always-on concise-briefing format
+	// contract to the ASSEMBLY system prompt (not the planner input). This
+	// guarantees a succinct operator-facing verdict on every investigation,
+	// independent of how sparse the proposal context was. The planner builds
+	// its own system prompt (RequestPlan → PlanningSystemPrompt), so this
+	// never affects tool planning.
+	if hasInvCtx {
+		assemblyPrompt = appendInvestigationBriefingDirective(assemblyPrompt)
+	}
+
+	// OGA-446 resume token (nil on a fresh turn). Parsed once: seeds the
+	// planner (SeedFacts) AND gates confirm-before-write (PendingConfirmation).
+	pendingActionCtx := pendingActionContextFromMessage(msg.Params.Message)
+
+	input := Input{
+		Query:                  userText,
+		PlannerQuery:           plannerQuery,
+		TenantID:               deps.TenantID,
+		PrincipalID:            "", // populated by gateway on outbound calls
+		Actor:                  actor,
+		AssemblyPrompt:         assemblyPrompt,
+		ToolNames:              agent.UniqueTools(profile),
+		InvestigationEntityIDs: investigationIDs,
+		// Persona + palette for the ReAct planner. Reactive palette is the
+		// profile tool union; the domain-agent reactive path ALSO carries the
+		// profile grounding strategy as advisory hints (OGA-419) so an
+		// Investigate session reasons with the same advised tools as the
+		// proposal. ask_knowledge_agent delegation is added by profile config
+		// (spec.reactive_delegation.knowledge_agent) — default opt-out — and is
+		// a reactive-only capability (the proactive handler never reads it).
+		Persona:           reactivePersona(ctx, schemaCache, gw, profile, delegations),
+		GroundingStrategy: reactiveGroundingHints(profile),
+		Delegations:       delegations,
+		// Resume (OGA-446): Frontier re-injects pending_action_context after an
+		// input-required turn. SeedFacts gives the planner the paused
+		// question + partial arguments structurally (not just via history), and
+		// PendingConfirmation lets confirm-before-write recognise a now-confirmed
+		// mutating call. Both nil/empty on a fresh turn.
+		SeedFacts:           resumeSeedFacts(pendingActionCtx),
+		PendingConfirmation: pendingActionCtx,
+	}
+	return input, planner
+}
+
 // reactiveStreamPlanner returns the StreamPlanner used by the reactive
 // streaming path. It ALWAYS returns an LLMToolPlanner — the reactive surface
 // (interactive chat + the [Investigate] follow-up) plans tools dynamically per
@@ -266,7 +285,12 @@ func NewDefaultStreamHandler(cfg Config, opts ...HandlerOption) agent.StreamHand
 // on a reactive query. The grounding strategy is consumed only by the proactive
 // handler (NewProactiveMessageHandler → runProactiveReasoning). See OGA-348.
 func reactiveStreamPlanner(rt *agent.DefaultRuntime) Planner {
-	return NewLLMToolPlanner(rt.Deps().Gateway, rt.PlannerConfig())
+	return reactivePlanner(rt.Deps().Gateway, rt)
+}
+
+// reactivePlanner is reactiveStreamPlanner over an explicit gateway.
+func reactivePlanner(gw PlatformAccess, rt *agent.DefaultRuntime) Planner {
+	return NewLLMToolPlanner(gw, rt.PlannerConfig())
 }
 
 // reactivePersona builds the planner persona for the reactive path: the domain

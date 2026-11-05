@@ -142,6 +142,8 @@ Rules:
 - Treat any "Recommended investigation steps" as guidance, not a fixed script:
   skip, reorder, or substitute based on what you observe.
 - Only call tools from the provided tool list.
+- Use only the argument names a tool's schema lists, spelled exactly. A platform
+  tool refuses any other argument (OGA-MCPG-VAL-1009): drop or rename it and retry.
 - When you have gathered enough evidence to answer, stop.
 
 Tool selection — match the tool to the SHAPE of the question, not to keywords
@@ -344,7 +346,7 @@ func renderToolPalette(tools []string, schemas []ToolSchema) string {
 // maxSchemaSummaryLen bounds the per-tool argument summary so a verbose schema
 // can't blow the decision-prompt token budget. Raised (OGA-470) to accommodate
 // per-property descriptions, which carry the platform's per-mode required-field
-// guidance (e.g. kg_geotemporal "snapshot needs `at`; geofence needs `from`…").
+// guidance (e.g. kg_geotemporal "snapshot needs `valid_at`; geofence needs `from`…").
 const maxSchemaSummaryLen = 1400
 
 // maxPropDescLen bounds a single property's rendered description so one verbose
