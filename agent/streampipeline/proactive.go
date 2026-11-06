@@ -33,8 +33,8 @@ import (
 //
 // Any other message (a synchronous reactive question: chat or an
 // [Investigate] follow-up sent with message/send, as the platform does for
-// non-streaming channels) is answered by the same ReAct pipeline the streaming
-// handler runs (answerReactive), not by the one-shot PlanAndExecute.
+// non-streaming channels) is answered by the ReAct pipeline (answerReactive),
+// not by the one-shot PlanAndExecute.
 func NewProactiveMessageHandler() agent.MessageHandlerFunc {
 	// schemaCache memoizes discovered MCP tool input schemas for the lifetime
 	// of this handler so the proactive planner renders correct tool-argument
@@ -52,11 +52,15 @@ func NewProactiveMessageHandler() agent.MessageHandlerFunc {
 }
 
 // answerReactive answers a synchronous reactive message with the ReAct
-// pipeline, collected to one text (RunText), exactly as the streaming handler
-// would plan and execute it (buildReactiveRequest). Until v1.0.2 this path ran
-// the one-shot PlanAndExecute, which planned from tool names alone, added
-// _prior_result and undeclared ID fields to dependent steps, and could not
-// retry a refused call (OGA-1189).
+// pipeline, collected to one text (RunText). It builds the request with the
+// streaming handler's buildReactiveRequest (planner, palette, investigation
+// grounding, the profile's Knowledge Agent delegation). This handler takes no
+// Config or HandlerOption, so it runs with DefaultConfig() and without
+// WithAgentDelegation delegations, whatever the kit gave
+// NewDefaultStreamHandler. Until v1.0.2 this path ran the one-shot
+// PlanAndExecute, which planned from tool names alone, added _prior_result and
+// undeclared ID fields to dependent steps, and could not retry a refused call
+// (OGA-1189).
 //
 // Confirm-before-write is off here: a confirmation turn needs the
 // pending_action_context resume token, which only the streaming route carries
