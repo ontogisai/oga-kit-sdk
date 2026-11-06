@@ -511,7 +511,7 @@ func sequenceMatches(got, want []agent.EventType) bool {
 // their placeholders resolved, plus an ID field only when the tool's discovered
 // schema declares it. Nothing else: no _prior_result (no handler reads it), no
 // entity_id or source_id the tool does not take. The platform refuses an
-// argument a tool does not declare, so before v1.0.2 every such step failed.
+// argument a tool does not declare, so before v1.1.0 every such step failed.
 // The operator's chip shows the planned arguments, unresolved.
 func TestPipeline_DependentStep_SendsOnlyPlannedAndDeclaredKeys(t *testing.T) {
 	gw := &fakeGateway{

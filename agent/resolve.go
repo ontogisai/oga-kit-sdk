@@ -86,7 +86,7 @@ func ResolveDependentArgsForTool(args map[string]any, priorContent, producingToo
 //     kit tool it fills as before.
 //  3. Never overwrites a concrete (non-placeholder) value.
 //
-// It adds nothing else. Before v1.0.2 it also injected the raw prior content
+// It adds nothing else. Before v1.1.0 it also injected the raw prior content
 // under "_prior_result", which no handler has read since OGA-331.
 func ResolveDependentArgsForTarget(args map[string]any, priorContent, producingTool string, target ToolSchema) map[string]any {
 	if args == nil {

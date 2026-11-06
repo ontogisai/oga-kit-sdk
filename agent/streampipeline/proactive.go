@@ -57,7 +57,7 @@ func NewProactiveMessageHandler() agent.MessageHandlerFunc {
 // grounding, the profile's Knowledge Agent delegation). This handler takes no
 // Config or HandlerOption, so it runs with DefaultConfig() and without
 // WithAgentDelegation delegations, whatever the kit gave
-// NewDefaultStreamHandler. Until v1.0.2 this path ran the one-shot
+// NewDefaultStreamHandler. Until v1.1.0 this path ran the one-shot
 // PlanAndExecute, which planned from tool names alone, added _prior_result and
 // undeclared ID fields to dependent steps, and could not retry a refused call
 // (OGA-1189).
