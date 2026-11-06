@@ -53,7 +53,7 @@ func NewProactiveMessageHandler() agent.MessageHandlerFunc {
 
 // answerReactive answers a synchronous reactive message with the ReAct
 // pipeline, collected to one text (RunText), exactly as the streaming handler
-// would plan and execute it (buildReactiveRequest). Until v1.0.1 this path ran
+// would plan and execute it (buildReactiveRequest). Until v1.0.2 this path ran
 // the one-shot PlanAndExecute, which planned from tool names alone, added
 // _prior_result and undeclared ID fields to dependent steps, and could not
 // retry a refused call (OGA-1189).

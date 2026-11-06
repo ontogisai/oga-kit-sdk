@@ -114,7 +114,7 @@ type GatewayClient interface {
 // Deprecated: the one-shot planner plans from tool names without their input
 // schemas and cannot retry a refused call, so a guessed argument fails the step
 // now that the platform refuses arguments a tool does not declare (OGA-1189).
-// Since v1.0.1 no SDK handler uses it: streampipeline.NewDefaultStreamHandler
+// Since v1.0.2 no SDK handler uses it: streampipeline.NewDefaultStreamHandler
 // and NewProactiveMessageHandler answer every request with the ReAct pipeline.
 // It stays for DefaultRuntime.HandleReactive on a runtime with no handler wired.
 func PlanAndExecute(

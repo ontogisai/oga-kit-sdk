@@ -331,7 +331,7 @@ func TestResolveForTarget_KitToolFilledAsBefore(t *testing.T) {
 
 	for _, field := range []string{"entity_id", "start_entity_id", "source_id"} {
 		if got[field] != "e-1" {
-			t.Errorf("kit tool %s = %v, want e-1 as before v1.0.1", field, got[field])
+			t.Errorf("kit tool %s = %v, want e-1 as before v1.0.2", field, got[field])
 		}
 	}
 }
