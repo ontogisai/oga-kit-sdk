@@ -506,20 +506,14 @@ func sequenceMatches(got, want []agent.EventType) bool {
 	return true
 }
 
-// TestPipeline_DependentStep_ChipExcludesPriorResult is the OGA-314 regression
-// guard. When a step has DependsOn >= 0, the executor injects _prior_result
-// into the args map for handlers that re-parse it. The chip emission MUST NOT
-// expose this internal injection — it bloats the operator UI and Go's
-// alphabetical map-key sort makes it the first visible argument, hiding the
-// LLM-planned arguments behind the chip's truncation.
-//
-// Two invariants checked:
-//  1. The emitted task/tool_call payload's Arguments map does NOT contain
-//     "_prior_result" for either step.
-//  2. The dependent step's gateway call (params received by CallTool) DOES
-//     contain "_prior_result" so handlers that fall back to parsing it
-//     (e.g. relationship handler's extractEntityIDFromPriorResult) keep working.
-func TestPipeline_DependentStep_ChipExcludesPriorResult(t *testing.T) {
+// TestPipeline_DependentStep_SendsOnlyPlannedAndDeclaredKeys pins what a
+// dependent step sends a platform tool (OGA-1189): the planned arguments with
+// their placeholders resolved, plus an ID field only when the tool's discovered
+// schema declares it. Nothing else: no _prior_result (no handler reads it), no
+// entity_id or source_id the tool does not take. The platform refuses an
+// argument a tool does not declare, so before v1.1.0 every such step failed.
+// The operator's chip shows the planned arguments, unresolved.
+func TestPipeline_DependentStep_SendsOnlyPlannedAndDeclaredKeys(t *testing.T) {
 	gw := &fakeGateway{
 		tools: map[string]json.RawMessage{
 			"kg_search": json.RawMessage(`{"results":[{"entity_id":"019e38e3-69b7-7d81-8e09-f28b947b98a6","entity_type":"brick_Chiller"}]}`),
@@ -538,24 +532,26 @@ func TestPipeline_DependentStep_ChipExcludesPriorResult(t *testing.T) {
 		},
 		narrative: "Planning...",
 	}
+	reasonSchema := agent.ToolSchema{
+		Name:        "kg_reason",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"mode":{"type":"string"},"start_entity_id":{"type":"string"},"stop_conditions":{"type":"object"}}}`),
+	}
 
-	events := runPipelineForTest(t, gw, planner, Input{Query: "what caused the chiller fault?"})
+	events := runPipelineForTest(t, gw, planner, Input{
+		Query:   "what caused the chiller fault?",
+		Persona: PlannerPersona{ToolSchemas: []agent.ToolSchema{reasonSchema}},
+	})
 
-	// Invariant 1: no emitted tool_call carries _prior_result.
 	for _, evt := range events {
 		if evt.Type != agent.EventTypeToolCall {
 			continue
 		}
 		p, ok := evt.Payload.(*agent.ToolCallPayload)
-		if !ok {
-			continue
-		}
-		if _, has := p.Arguments["_prior_result"]; has {
-			t.Errorf("tool_call event for %q exposes _prior_result in Arguments — operator chip should not see internal injection", p.ToolName)
+		if ok && p.ToolName == "kg_reason" && p.Arguments["start_entity_id"] != "<from step 0>" {
+			t.Errorf("chip shows start_entity_id = %v, want the planned placeholder", p.Arguments["start_entity_id"])
 		}
 	}
 
-	// Invariant 2: the dependent step's gateway call received _prior_result.
 	if len(gw.callToolCalls) < 2 {
 		t.Fatalf("expected 2 gateway calls (kg_search + kg_reason), got %d", len(gw.callToolCalls))
 	}
@@ -567,22 +563,24 @@ func TestPipeline_DependentStep_ChipExcludesPriorResult(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected kg_reason params to be map[string]any, got %T", reasonCall.Params)
 	}
-	if _, has := params["_prior_result"]; !has {
-		t.Error("gateway-bound kg_reason args missing _prior_result — handlers that re-parse it for fallback ID resolution will break")
+	want := map[string]any{"mode": "root_cause", "start_entity_id": "019e38e3-69b7-7d81-8e09-f28b947b98a6"}
+	for k, v := range want {
+		if params[k] != v {
+			t.Errorf("kg_reason params.%s = %v, want %v", k, params[k], v)
+		}
 	}
-	if params["mode"] != "root_cause" {
-		t.Errorf("kg_reason params.mode = %v, want root_cause", params["mode"])
+	if _, ok := params["stop_conditions"]; !ok {
+		t.Error("kg_reason params lost the planned stop_conditions")
 	}
-	// start_entity_id should be resolved from the upstream entity_id.
-	if got := params["start_entity_id"]; got != "019e38e3-69b7-7d81-8e09-f28b947b98a6" {
-		t.Errorf("kg_reason params.start_entity_id = %v, want resolved UUID", got)
+	if len(params) != 3 {
+		t.Errorf("kg_reason params = %v, want exactly mode, start_entity_id and stop_conditions", params)
 	}
 }
 
 // TestPipeline_ExecutorDoesNotMutatePlanArguments verifies that running the
-// pipeline does not retain the _prior_result mutation on the original plan's
-// step.Arguments map. Without the cloneArgs() guard in executeStep, re-runs
-// of the same plan would carry forward the previous run's _prior_result.
+// pipeline leaves the plan's own step.Arguments map as planned. Without the
+// cloneArgs() guard in executeStep, resolution would rewrite the original, and
+// a re-run of the same plan would start from the previous run's values.
 func TestPipeline_ExecutorDoesNotMutatePlanArguments(t *testing.T) {
 	gw := &fakeGateway{
 		tools: map[string]json.RawMessage{
@@ -605,8 +603,8 @@ func TestPipeline_ExecutorDoesNotMutatePlanArguments(t *testing.T) {
 
 	_ = runPipelineForTest(t, gw, planner, Input{Query: "q"})
 
-	if _, has := originalArgs["_prior_result"]; has {
-		t.Error("executor mutated the plan's step.Arguments map — _prior_result leaked into the original. Re-runs of the same plan will carry stale upstream data.")
+	if len(originalArgs) != 2 {
+		t.Errorf("executor added keys to the plan's step.Arguments map: %v", originalArgs)
 	}
 	if got := originalArgs["start_entity_id"]; got != "<from step 0>" {
 		t.Errorf("executor mutated start_entity_id placeholder in original args (now %v) — clone was not effective", got)

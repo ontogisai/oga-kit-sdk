@@ -180,7 +180,8 @@ type PBACBoundary struct {
 // (OGA-DKIT-VAL-1040). Replaces the legacy {topic, action} form (OGA-317 C4).
 type EventSubscription struct {
 	// EntityType is the ontology entity type whose mutations wake the agent
-	// (e.g., "EntityAnomalyEvent", "brick_Equipment"). Case-sensitive; must
+	// (e.g., "EntityAnomalyEvent", "brick:Equipment"): the type's catalog name,
+	// the source class ID verbatim, not its storage name. Case-sensitive; must
 	// exist in the active ontology.
 	EntityType string `yaml:"entity_type"`
 

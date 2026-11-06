@@ -4,11 +4,9 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
-)
 
-// priorResultKey is the args map key under which the raw upstream tool output
-// is injected, for handlers that re-parse it directly.
-const priorResultKey = "_prior_result"
+	"github.com/ontogisai/oga-kit-sdk/manifest"
+)
 
 // IDKind classifies an extracted identifier so it fills the right argument
 // fields. An entity identifier never fills a document argument and vice versa.
@@ -57,33 +55,43 @@ type ShapeDescriptor struct {
 type Registry map[string]ShapeDescriptor
 
 // ResolveDependentArgs resolves a dependent step's placeholder arguments from
-// the prior step's result, with no knowledge of the producing tool. It always
-// injects the raw prior content under "_prior_result". This is the
+// the prior step's result, with no knowledge of the producing tool. This is the
 // backward-compatible entry point; it delegates to the heuristic path.
 //
-// Prefer ResolveDependentArgsForTool when the producing tool name is known —
-// it uses the shape registry for precise extraction.
+// Prefer ResolveDependentArgsForTarget when the target tool's schema is known.
 func ResolveDependentArgs(args map[string]any, priorContent string) map[string]any {
 	return ResolveDependentArgsForTool(args, priorContent, "")
 }
 
 // ResolveDependentArgsForTool resolves placeholder arguments using the shape
-// registry entry for producingTool. When producingTool is empty or unknown, or
-// when the descriptor yields no identifier, it falls back to a bounded
-// heuristic scan.
+// registry entry for producingTool, with no knowledge of the target tool, so
+// ID fields are filled as for a kit tool. Prefer ResolveDependentArgsForTarget.
+func ResolveDependentArgsForTool(args map[string]any, priorContent, producingTool string) map[string]any {
+	return ResolveDependentArgsForTarget(args, priorContent, producingTool, ToolSchema{})
+}
+
+// ResolveDependentArgsForTarget resolves a dependent step's arguments from the
+// prior step's result, for the target tool described by target. When
+// producingTool is empty or unknown, or when its descriptor yields no
+// identifier, it falls back to a bounded heuristic scan.
 //
 // The function:
-//  1. Always injects "_prior_result" with the raw prior content.
-//  2. Resolves named placeholder arguments (e.g. "start_entity_id":
+//  1. Resolves named placeholder arguments (e.g. "start_entity_id":
 //     "<from step 1>") from a same-kind identifier.
-//  3. Auto-fills empty/missing/placeholder ID fields by kind (entity →
-//     entity_id/start_entity_id/source_id; document → document_id).
-//  4. Never overwrites a concrete (non-placeholder) value.
-func ResolveDependentArgsForTool(args map[string]any, priorContent, producingTool string) map[string]any {
+//  2. Fills empty, missing or placeholder ID fields by kind (entity →
+//     entity_id / start_entity_id / source_id; document → document_id). For a
+//     platform tool (a kg_ name) it adds a missing field only when the tool's
+//     input schema declares it, and none when the schema is unknown: the
+//     platform refuses an argument a tool does not declare (OGA-1189). For a
+//     kit tool it fills as before.
+//  3. Never overwrites a concrete (non-placeholder) value.
+//
+// It adds nothing else. Before v1.1.0 it also injected the raw prior content
+// under "_prior_result", which no handler has read since OGA-331.
+func ResolveDependentArgsForTarget(args map[string]any, priorContent, producingTool string, target ToolSchema) map[string]any {
 	if args == nil {
 		args = make(map[string]any)
 	}
-	args[priorResultKey] = priorContent
 	if priorContent == "" {
 		return args
 	}
@@ -98,9 +106,44 @@ func ResolveDependentArgsForTool(args map[string]any, priorContent, producingToo
 	firstRelationship := firstOfKind(ids, IDKindRelationship)
 
 	resolveNamedPlaceholders(args, firstEntity, firstDocument, firstRelationship)
-	autoFillIDFields(args, firstEntity, firstDocument)
+	autoFillIDFields(args, firstEntity, firstDocument, fillableFor(target))
 
 	return args
+}
+
+// fillableFor returns the predicate that says whether autoFillIDFields may add
+// a field the arguments do not have yet. A kit tool may get any of them, as
+// before; a platform tool only the ones its input schema declares. The name
+// prefix tells them apart: the platform refuses a kit tool that uses the
+// platform's prefix.
+func fillableFor(target ToolSchema) func(field string) bool {
+	if !strings.HasPrefix(target.Name, manifest.PlatformToolPrefix) {
+		return func(string) bool { return true }
+	}
+	declared := declaredArguments(target.InputSchema)
+	return func(field string) bool {
+		_, ok := declared[field]
+		return ok
+	}
+}
+
+// declaredArguments returns the top-level argument names an input schema
+// declares, or nil when the schema is empty or not a JSON object.
+func declaredArguments(inputSchema json.RawMessage) map[string]struct{} {
+	if len(inputSchema) == 0 {
+		return nil
+	}
+	var doc struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(inputSchema, &doc); err != nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(doc.Properties))
+	for name := range doc.Properties {
+		out[name] = struct{}{}
+	}
+	return out
 }
 
 // resolveNamedPlaceholders replaces placeholder-valued arguments with a value
@@ -108,9 +151,6 @@ func ResolveDependentArgsForTool(args map[string]any, priorContent, producingToo
 // untouched.
 func resolveNamedPlaceholders(args map[string]any, entity, document, relationship *Identifier) {
 	for key, val := range args {
-		if key == priorResultKey {
-			continue
-		}
 		s, ok := val.(string)
 		if !ok || !isPlaceholder(s) {
 			continue
@@ -151,17 +191,25 @@ func resolveNamedField(field string, entity, document, relationship *Identifier)
 
 // autoFillIDFields fills well-known ID fields that are missing, empty, or hold
 // a placeholder. Entity IDs fill entity fields only; document IDs fill
-// document_id only (Requirement 4 — kind safety).
-func autoFillIDFields(args map[string]any, entity, document *Identifier) {
+// document_id only (Requirement 4 — kind safety). A field the arguments do not
+// have yet is added only when mayAdd allows it (fillableFor).
+func autoFillIDFields(args map[string]any, entity, document *Identifier, mayAdd func(string) bool) {
+	fill := func(field, value string) {
+		if !needsResolution(args, field) {
+			return
+		}
+		if _, present := args[field]; !present && !mayAdd(field) {
+			return
+		}
+		args[field] = value
+	}
 	if entity != nil {
 		for _, field := range []string{"entity_id", "start_entity_id", "source_id"} {
-			if needsResolution(args, field) {
-				args[field] = entity.Value
-			}
+			fill(field, entity.Value)
 		}
 	}
-	if document != nil && needsResolution(args, "document_id") {
-		args["document_id"] = document.Value
+	if document != nil {
+		fill("document_id", document.Value)
 	}
 }
 

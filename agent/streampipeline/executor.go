@@ -46,9 +46,9 @@ func executeStep(
 
 	// Resolve placeholder arguments from prior step results.
 	//
-	// Clone step.Arguments before resolution so ResolveDependentArgs (which
-	// mutates the map by injecting "_prior_result" and resolving placeholder
-	// IDs in place) doesn't leak through to either:
+	// Clone step.Arguments before resolution so ResolveDependentArgsForTarget
+	// (which resolves placeholder IDs and fills ID fields in place) doesn't leak
+	// through to either:
 	//   1. The task/tool_call event payload — it holds a reference to
 	//      step.Arguments for the chip display, and JSON marshaling at the
 	//      consumer side happens after this function runs. Without a clone,
@@ -65,7 +65,7 @@ func executeStep(
 			// is already resolved at plan-build time by substitutePlan. See the
 			// two-conventions note in placeholders.go. Concrete values from
 			// event substitution are never overwritten here (needsResolution).
-			args = agent.ResolveDependentArgsForTool(args, prior.Content, prior.ToolName)
+			args = agent.ResolveDependentArgsForTarget(args, prior.Content, prior.ToolName, targetSchema(schemas, step.ToolName))
 		} else if !prior.Success || prior.Content == "" {
 			// Short-circuit: upstream returned nothing usable.
 			res.Success = false
@@ -127,45 +127,28 @@ func executeStep(
 // mutating the original step.Arguments — important because the tool_call
 // event emitted before execute holds a reference to that same map and
 // JSON-marshals it later at the consumer side. Without the clone, the chip
-// would render post-mutation state (including the bulky _prior_result
-// injection) rather than the LLM-planned arguments.
+// would render post-resolution state rather than the LLM-planned arguments.
 //
-// Shallow because nested values are not mutated by ResolveDependentArgs —
-// only top-level scalar keys (entity_id, start_entity_id, …) get rewritten,
-// and a new top-level _prior_result key is added.
+// Shallow because nested values are not mutated by the resolver — only
+// top-level scalar keys (entity_id, start_entity_id, …) get rewritten.
 func cloneArgs(args map[string]any) map[string]any {
 	if args == nil {
 		return make(map[string]any)
 	}
-	out := make(map[string]any, len(args)+1) // +1 for _prior_result if added
+	out := make(map[string]any, len(args))
 	for k, v := range args {
 		out[k] = v
 	}
 	return out
 }
 
-// stripPriorResult returns a shallow copy of args with the _prior_result key
-// removed. Used at chip emission sites so the operator UI displays only the
-// LLM-planned arguments (mode, start_entity_id, stop_conditions, …) and not
-// the bulky internal injection that ResolveDependentArgs adds for handlers.
-//
-// The injection still flows to the gateway via executeStep — handlers that
-// re-parse it for fallback ID resolution keep working.
-func stripPriorResult(args map[string]any) map[string]any {
-	if args == nil {
-		return nil
-	}
-	if _, has := args["_prior_result"]; !has {
-		return args
-	}
-	out := make(map[string]any, len(args)-1)
-	for k, v := range args {
-		if k == "_prior_result" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
+// targetSchema returns the discovered schema of the step's tool, with its name
+// set even when discovery did not return the tool, so the resolver can tell a
+// platform tool from a kit tool (ResolveDependentArgsForTarget).
+func targetSchema(schemas map[string]agent.ToolSchema, toolName string) agent.ToolSchema {
+	s := schemas[toolName]
+	s.Name = toolName
+	return s
 }
 
 // truncateJSONArray caps the tool's result array at maxResults entries. The

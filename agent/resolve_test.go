@@ -268,23 +268,78 @@ func TestHeuristic_Determinism(t *testing.T) {
 	}
 }
 
-// --- Requirement 5.3/5.4 + always injects _prior_result ---
+// --- OGA-1189: the resolver adds nothing but resolved and filled ID fields ---
 
-func TestResolve_InjectsPriorResult(t *testing.T) {
+func TestResolve_AddsNoPriorResult(t *testing.T) {
 	t.Parallel()
 
 	prior := `{"results":[{"entity_id":"x"}]}`
-	resolved := ResolveDependentArgs(nil, prior)
+	for _, resolved := range []map[string]any{
+		ResolveDependentArgs(nil, prior),
+		ResolveDependentArgsForTool(map[string]any{"q": "a"}, prior, "kg_search"),
+		ResolveDependentArgsForTarget(nil, prior, "kg_search", ToolSchema{Name: "kg_traverse"}),
+	} {
+		if _, has := resolved["_prior_result"]; has {
+			t.Errorf("resolved args carry _prior_result: %v", resolved)
+		}
+	}
+}
 
-	if resolved[priorResultKey] != prior {
-		t.Errorf("_prior_result = %v, want raw prior content", resolved[priorResultKey])
+func TestResolveForTarget_PlatformToolGetsOnlyDeclaredFields(t *testing.T) {
+	t.Parallel()
+
+	prior := `{"results":[{"entity_id":"e-1","entity_type":"brick:AHU"}]}`
+	target := ToolSchema{
+		Name:        "kg_traverse",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"start_entity_id":{"type":"string"},"relationship_type":{"type":"string"}}}`),
+	}
+	got := ResolveDependentArgsForTarget(map[string]any{"relationship_type": "hasPoint"}, prior, "kg_search", target)
+
+	want := map[string]any{"relationship_type": "hasPoint", "start_entity_id": "e-1"}
+	if len(got) != len(want) {
+		t.Fatalf("resolved args = %v, want exactly %v (no undeclared entity_id / source_id)", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %v, want %v", k, got[k], v)
+		}
+	}
+}
+
+func TestResolveForTarget_PlatformToolWithoutSchemaGetsNoAddedField(t *testing.T) {
+	t.Parallel()
+
+	prior := `{"results":[{"entity_id":"e-1"}]}`
+	got := ResolveDependentArgsForTarget(map[string]any{"start_entity_id": "<from step 0>"}, prior, "kg_search", ToolSchema{Name: "kg_traverse"})
+
+	if got["start_entity_id"] != "e-1" {
+		t.Errorf("start_entity_id = %v, want the planned placeholder resolved to e-1", got["start_entity_id"])
+	}
+	for _, field := range []string{"entity_id", "source_id", "document_id"} {
+		if _, has := got[field]; has {
+			t.Errorf("%s was added to a platform tool with no known schema: %v", field, got)
+		}
+	}
+}
+
+func TestResolveForTarget_KitToolFilledAsBefore(t *testing.T) {
+	t.Parallel()
+
+	prior := `{"results":[{"entity_id":"e-1"}]}`
+	target := ToolSchema{Name: "fm_get_equipment_status", InputSchema: json.RawMessage(`{"type":"object","properties":{"equipment_id":{"type":"string"}}}`)}
+	got := ResolveDependentArgsForTarget(nil, prior, "kg_search", target)
+
+	for _, field := range []string{"entity_id", "start_entity_id", "source_id"} {
+		if got[field] != "e-1" {
+			t.Errorf("kit tool %s = %v, want e-1 as before v1.1.0", field, got[field])
+		}
 	}
 }
 
 func TestResolve_EmptyAndMalformed(t *testing.T) {
 	t.Parallel()
 
-	// Empty content: args unchanged except _prior_result.
+	// Empty content: args unchanged.
 	got := ResolveDependentArgs(map[string]any{"entity_id": "<from step 0>"}, "")
 	if got["entity_id"] != "<from step 0>" {
 		t.Errorf("empty prior: entity_id = %q, want untouched", got["entity_id"])
@@ -328,9 +383,9 @@ func FuzzResolveDependentArgsForTool(f *testing.F) {
 		}
 		resolved := ResolveDependentArgsForTool(args, content, tool)
 
-		// Always injects _prior_result.
-		if resolved[priorResultKey] != content {
-			t.Fatalf("_prior_result not injected for content %q", content)
+		// Never adds _prior_result (OGA-1189).
+		if _, has := resolved["_prior_result"]; has {
+			t.Fatalf("_prior_result added for content %q", content)
 		}
 		// Never overwrites the concrete value.
 		if resolved["keep"] != "concrete" {

@@ -117,8 +117,8 @@ type Vertex struct {
 	// from EntityType + Properties.
 	ID string `json:"id,omitempty"`
 
-	// EntityType is the type name (must match a registered type, e.g.,
-	// "brick_Equipment", "WorkOrder").
+	// EntityType is the type name: the registered type's Name, the source
+	// class ID verbatim (e.g., "brick:Equipment", "WorkOrder").
 	EntityType string `json:"entity_type"`
 
 	// Label is a human-readable label.
@@ -247,9 +247,11 @@ const (
 // (CREATE VERTEX TYPE … EXTENDS BaseEntity), inserts an EntityTypeDef
 // row, and activates the resulting ontology version atomically.
 type EntityTypeDef struct {
-	// Name is the stable identifier (e.g., "brick_Equipment"). Must
-	// match the DDL type name without tenant prefix; the platform
-	// adds the prefix during persistence.
+	// Name is the stable identifier: the source class ID verbatim
+	// (e.g., "brick:Equipment", "WorkOrder"). It is what instances carry
+	// as EntityType and what kg_* calls and event subscriptions name. The
+	// storage (DDL) name is derived from it, never the other way round:
+	// see PhysicalType.
 	Name string `json:"name"`
 
 	// DisplayName is the human-readable name keyed by full BCP-47
@@ -285,11 +287,16 @@ type EntityTypeDef struct {
 	// PhysicalType. Empty ⇒ physical, so pre-hybrid loaders are unaffected.
 	Materialization Materialization `json:"materialization,omitempty"`
 
-	// PhysicalType is the materialised physical type a logical type's
-	// instances are stored under. Required iff Materialization == logical;
-	// ignored for physical types. It must name a physical type that is an
-	// ancestor of this type in the kit's hierarchy — the platform
-	// coherence-validates this at registration time.
+	// PhysicalType is the storage (DDL) identifier, without the tenant
+	// prefix the platform adds.
+	//   - Logical type: required; the identifier of the physical ancestor its
+	//     instances are stored under (e.g., "brick_Equipment"). The platform
+	//     coherence-validates the ancestry at registration time.
+	//   - Physical type: the type's own identifier. Required when Name is not
+	//     a legal identifier, as any namespaced class ID is ("brick:AHU" →
+	//     "brick_AHU"); the platform refuses such a type without it
+	//     (OGA-ONTO-VAL-1004). When Name is a legal identifier ("WorkOrder")
+	//     it may be omitted.
 	PhysicalType string `json:"physical_type,omitempty"`
 }
 
@@ -316,9 +323,9 @@ type EntityTypeDef struct {
 // generic RELATES edge type at edge-write time — the safety net for
 // genuinely-unknown predicates.
 type RelationshipTypeDef struct {
-	// Name is the stable identifier (e.g. "equipmentHasSchedule"). Must
-	// match the DDL type name without tenant prefix; the platform adds the
-	// prefix during persistence.
+	// Name is the stable identifier: the source predicate verbatim (e.g.
+	// "equipmentHasSchedule", "brick:hasPoint"). The storage (DDL) name is
+	// derived from it: see PhysicalType.
 	Name string `json:"name"`
 
 	// DisplayName is the human-readable name keyed by full BCP-47 locale
@@ -359,9 +366,11 @@ type RelationshipTypeDef struct {
 	// physical.
 	Materialization Materialization `json:"materialization,omitempty"`
 
-	// PhysicalType is the materialised physical edge type a logical
-	// relationship's instances are stored under (e.g. "RELATES"). Required
-	// iff Materialization == logical.
+	// PhysicalType is the storage (DDL) identifier, without the tenant
+	// prefix. For a logical relationship, required: the physical edge type
+	// its instances are stored under (e.g. "RELATES"). For a physical one, its
+	// own identifier, required when Name is not a legal identifier
+	// ("brick:hasPoint" → "brick_hasPoint"; else OGA-ONTO-VAL-1004).
 	PhysicalType string `json:"physical_type,omitempty"`
 }
 

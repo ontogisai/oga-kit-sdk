@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ontogisai/oga-kit-sdk/gateway"
+	"github.com/ontogisai/oga-kit-sdk/manifest"
 )
 
 // ToolStep is one step in an LLM-produced execution plan.
@@ -110,6 +111,16 @@ type GatewayClient interface {
 // Returns the assembled natural-language response plus the per-step
 // results (so callers can attach them as citations to the response
 // metadata).
+//
+// Deprecated: the one-shot planner plans from tool names without their input
+// schemas and cannot retry a refused call, so a guessed argument fails the step
+// now that the platform refuses arguments a tool does not declare (OGA-1189).
+// A dependent step of a platform tool gets the ID fields its schema declares,
+// discovered through gw when gw lists tools (as *gateway.PlatformGatewayClient
+// does); without a schema it gets none.
+// Since v1.1.0 no SDK handler uses it: streampipeline.NewDefaultStreamHandler
+// and NewProactiveMessageHandler answer every request with the ReAct pipeline.
+// It stays for DefaultRuntime.HandleReactive on a runtime with no handler wired.
 func PlanAndExecute(
 	ctx context.Context,
 	gw GatewayClient,
@@ -171,6 +182,7 @@ func PlanAndExecute(
 	// Step 2: execute each step in order via the gateway, resolving
 	// inter-step dependencies from prior results.
 	results := make([]ToolStepResult, 0, len(plan.Steps))
+	schemas := lazyToolSchemas{gw: gw}
 	for i, step := range plan.Steps {
 		// Short-circuit: if this step depends on a prior step that produced
 		// empty or error results, skip execution to avoid cascade failures.
@@ -201,7 +213,9 @@ func PlanAndExecute(
 		if step.DependsOn >= 0 && step.DependsOn < len(results) {
 			prior := results[step.DependsOn]
 			if prior.Success && prior.Content != "" {
-				args = ResolveDependentArgsForTool(args, prior.Content, prior.ToolName)
+				// A platform tool gets an added ID field only when its
+				// discovered schema declares it (ResolveDependentArgsForTarget).
+				args = ResolveDependentArgsForTarget(args, prior.Content, prior.ToolName, schemas.target(ctx, step.ToolName))
 			}
 		}
 		step.Arguments = args
@@ -534,4 +548,43 @@ func AssemblySystemPrompt(profile *DomainAgentProfile) string {
 		domainPrompt = profile.ProactiveReasoning.SystemPrompt + "\n\n"
 	}
 	return fmt.Sprintf(AssemblyPromptTemplate, domainPrompt)
+}
+
+// toolSchemaLister is the part of *gateway.PlatformGatewayClient that lists the
+// tools a caller may use, with their input schemas.
+type toolSchemaLister interface {
+	ListTools(ctx context.Context) ([]gateway.ToolSchema, error)
+}
+
+// lazyToolSchemas lists the gateway's tools at most once per PlanAndExecute
+// call, and only when a dependent step of a platform tool needs a schema, so a
+// plan without one makes no extra call.
+type lazyToolSchemas struct {
+	gw     GatewayClient
+	loaded bool
+	byName map[string]ToolSchema
+}
+
+// target returns the schema of the step's tool, with its name set even when
+// the tool is not listed. A kit tool needs no schema (its fills are unchanged),
+// so only a platform tool triggers the listing. A failed listing leaves the
+// schema empty, so the platform tool gets no added field.
+func (l *lazyToolSchemas) target(ctx context.Context, toolName string) ToolSchema {
+	if strings.HasPrefix(toolName, manifest.PlatformToolPrefix) && !l.loaded {
+		l.loaded = true
+		if lister, ok := l.gw.(toolSchemaLister); ok {
+			tools, err := lister.ListTools(ctx)
+			if err != nil {
+				slog.WarnContext(ctx, "agent: tool schema discovery failed; platform tools get no added ID field",
+					"error", err)
+			}
+			l.byName = make(map[string]ToolSchema, len(tools))
+			for _, t := range tools {
+				l.byName[t.Name] = ToolSchema{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema, Mutates: t.Mutates}
+			}
+		}
+	}
+	s := l.byName[toolName]
+	s.Name = toolName
+	return s
 }

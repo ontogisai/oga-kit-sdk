@@ -256,10 +256,11 @@ func (rt *DefaultRuntime) HandleMessage(ctx context.Context, msg *A2AMessage) (*
 	return rt.HandleReactive(ctx, msg)
 }
 
-// HandleReactive is the default synchronous path: LLM reasoning over the user's
-// message text via the Platform Gateway. Exported so the streampipeline
-// proactive handler (wired via WithMessageHandler) can delegate non-proactive
-// messages back to the reactive path without duplicating it.
+// HandleReactive is the fallback synchronous path, taken only when no message
+// handler is wired via WithMessageHandler: one-shot planning (PlanAndExecute)
+// over the user's message text via the Platform Gateway. A kit that wires
+// streampipeline.NewProactiveMessageHandler answers message/send with the ReAct
+// pipeline instead and never reaches this (OGA-1189).
 func (rt *DefaultRuntime) HandleReactive(ctx context.Context, msg *A2AMessage) (*A2AResponse, error) {
 	userText := ExtractText(msg.Params.Message.Parts)
 	if userText == "" {

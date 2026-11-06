@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -428,5 +429,66 @@ func TestRequestPlan_BothAttemptsProse_ReturnsParseError(t *testing.T) {
 	}
 	if len(gw.chatCalls) != 2 {
 		t.Errorf("expected 2 chat calls, got %d", len(gw.chatCalls))
+	}
+}
+
+// listingGateway is fakeGateway plus ListTools, as *gateway.PlatformGatewayClient has.
+type listingGateway struct {
+	fakeGateway
+	tools     []gateway.ToolSchema
+	listCalls int
+}
+
+func (g *listingGateway) ListTools(context.Context) ([]gateway.ToolSchema, error) {
+	g.listCalls++
+	return g.tools, nil
+}
+
+// A dependent step of a platform tool keeps the ID field its schema declares,
+// as under v1.0.0, and gets nothing else: no _prior_result, no undeclared field
+// (OGA-1189). The tools are listed once, only because a platform step depends
+// on a prior one.
+func TestPlanAndExecute_DependentPlatformStep_GetsDeclaredIDOnly(t *testing.T) {
+	plan := `{"steps":[` +
+		`{"tool_name":"kg_search","arguments":{"query":"chiller"},"depends_on":-1,"rationale":"find it"},` +
+		`{"tool_name":"kg_traverse","arguments":{"relationship_type":"hasPoint"},"depends_on":0,"rationale":"its points"}]}`
+	gw := &listingGateway{
+		fakeGateway: fakeGateway{
+			chatResponses: []chatResponse{{content: plan}, {content: "CH-01 has 2 points."}},
+			toolResponses: map[string]toolResponse{
+				"kg_search":   {raw: json.RawMessage(`{"results":[{"id":"ch-01","entity_type":"brick:Chiller"}]}`)},
+				"kg_traverse": {raw: json.RawMessage(`{"nodes":[]}`)},
+			},
+		},
+		tools: []gateway.ToolSchema{{Name: "kg_traverse", InputSchema: json.RawMessage(
+			`{"type":"object","properties":{"start_entity_id":{"type":"string"},"relationship_type":{"type":"string"}}}`)}},
+	}
+	profile := &DomainAgentProfile{AgentID: "fm", Capabilities: []CapabilityDef{{Name: "c", Tools: []string{"kg_search", "kg_traverse"}}}}
+
+	if _, _, err := PlanAndExecute(context.Background(), gw, profile, "points of the chiller", DefaultPlannerConfig()); err != nil {
+		t.Fatalf("PlanAndExecute: %v", err)
+	}
+	if len(gw.toolCalls) != 2 {
+		t.Fatalf("tool calls = %d, want 2", len(gw.toolCalls))
+	}
+	got, _ := gw.toolCalls[1].params.(map[string]any)
+	want := map[string]any{"relationship_type": "hasPoint", "start_entity_id": "ch-01"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("kg_traverse arguments = %v, want exactly %v", got, want)
+	}
+	if gw.listCalls != 1 {
+		t.Errorf("ListTools called %d times, want 1", gw.listCalls)
+	}
+
+	// Without a listing the platform tool gets no added field at all.
+	plain := &fakeGateway{
+		chatResponses: []chatResponse{{content: plan}, {content: "answer"}},
+		toolResponses: gw.toolResponses,
+	}
+	if _, _, err := PlanAndExecute(context.Background(), plain, profile, "points of the chiller", DefaultPlannerConfig()); err != nil {
+		t.Fatalf("PlanAndExecute: %v", err)
+	}
+	if got, _ := plain.toolCalls[1].params.(map[string]any); !reflect.DeepEqual(got, map[string]any{"relationship_type": "hasPoint"}) {
+		t.Errorf("without a schema, kg_traverse arguments = %v, want only the planned key", got)
 	}
 }
