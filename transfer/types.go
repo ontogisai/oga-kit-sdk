@@ -113,8 +113,11 @@ const (
 // indices are added by the platform persister.
 type Vertex struct {
 	// ID is a stable, deterministic identifier the kit chose for this
-	// entity. May be empty — when blank, the platform derives one
-	// from EntityType + Properties.
+	// entity. Set it on every vertex that has no CorrelationKey. When it is
+	// blank and there is no CorrelationKey, the platform uses
+	// EntityType + "/" + Label as the ID, or EntityType + "/anonymous" when
+	// Label is also blank, so two such vertices of one type with the same
+	// label, or both without one, are stored as a single entity.
 	ID string `json:"id,omitempty"`
 
 	// EntityType is the type name: the registered type's Name, the source
