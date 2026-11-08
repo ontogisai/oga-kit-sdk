@@ -372,13 +372,14 @@ type SourceConnectorSpec struct {
 // EdgeCompletenessSpec is a continuous feed's standing declaration that it submits
 // complete edge sets, and the vocabulary that declaration covers (OGA-930).
 //
-// Mirrors the platform's domainkit.EdgeCompletenessSpec field-for-field, so a kit
-// author gets the same result from a local manifest.Parse as from an install.
+// Mirrors the platform's domainkit.EdgeCompletenessSpec field-for-field, so the
+// block a local manifest.Parse accepts is the block an install accepts.
 //
 // The mode and the vocabulary are ONE block because neither is meaningful alone: a
 // mode with no vocabulary licenses nothing, and a vocabulary with no mode is inert.
-// The platform REFUSES a half-declaration rather than deploying a feed that will
-// never converge.
+// The platform does not refuse a half-declaration (an unknown mode, no file, an
+// unreadable or empty file): the install proceeds, records no assertion for the
+// connector and logs a WARN, so the feed closes nothing.
 type EdgeCompletenessSpec struct {
 	// Mode is the completeness claim. The only accepted value is "per_source": for
 	// each asset the artifact carries, the edges it declares under the governed
