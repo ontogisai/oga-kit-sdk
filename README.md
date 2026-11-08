@@ -172,53 +172,39 @@ The platform owns the job ledger; both ontology and data loads are uniformly asy
 
 By default an artifact's edges are a **partial batch** — the platform never infers that a relationship ended because your artifact stopped carrying it. That is right for an incremental loader, and wrong for a feed whose export is the system of record for the assets it carries: a relationship you drop would survive in the graph forever.
 
-A full-snapshot connector opts in on the writer:
+A feed can instead be licensed to assert: *for every vertex this artifact carries, the edges it carries from that vertex under the governed predicates are the complete set — including the empty set.* The platform then closes a live edge whose source is one of those vertices, whose predicate is governed, and which the artifact does not carry. Closure is soft (`is_deleted` + `tx_to`), so an as-of traversal before the publish still resolves.
 
-```go
-w := transfer.NewDataWriter(client, "example-kit",
-    transfer.WithEdgeCompleteness(transfer.EdgeCompleteness{
-        Mode: transfer.EdgeCompletenessPerSource,
-        GovernedPredicates: []string{
-            "feeds", "hasLocation", "hasPoint", "hasPart",
-            "controls", "meters", "hasSubMeter",
-        },
-    }))
+**You do not set anything on the writer or in the loader.** The platform holds the assertion itself, keyed on the verified identity of the sidecar that submits, and applies it when that sidecar's artifact arrives. You declare it in the kit manifest, so it works with any image built on this SDK:
+
+```yaml
+spec:
+  source_connectors:
+    - name: example-sync
+      edge_completeness:                 # a continuous feed: every artifact asserts
+        mode: per_source                 # the only accepted value
+        governed_predicates_file: generated/example-sync-predicates.json
+  loaders:
+    - name: example-data-loader
+      kind: data
+      governed_predicates_file: generated/example-loader-predicates.json
 ```
 
-This asserts: *for every vertex this artifact carries, the edges it carries from that vertex under the governed predicates are the complete set — including the empty set.* The platform closes a live edge whose source is one of those vertices, whose predicate is governed, and which the artifact does not carry. Closure is soft (`is_deleted` + `tx_to`), so an as-of traversal before the publish still resolves.
+- **A connector** declares `edge_completeness`. At install the platform records a standing assertion for it, so every artifact the connector publishes asserts. A connector that ever publishes a partial artifact must not declare it.
+- **A loader** declares only its vocabulary. Whether a given import is complete is the operator's call, made per run (the console's full-snapshot checkbox, `--full-snapshot` on `oga-admin import`): the platform records the assertion at submit and applies it to what the loader commits during that import. The same loader serves a complete export one day and a partial top-up the next.
 
-`GovernedPredicates` bounds the assertion and is **required**. A source routinely also carries edges written by another feed, the MCP tools, or the platform itself; those are only left alone because they are not in your vocabulary. An empty list is rejected rather than read as "all predicates".
+The governed-predicates file is a JSON array (`["feeds", "hasLocation", "hasPoint"]`) or an object with a `predicates` key. It bounds the assertion and is **required**: a source routinely also carries edges written by another feed, the MCP tools, or the platform itself, and those are only left alone because they are not in your vocabulary. A loader whose list is empty or missing has `--full-snapshot` refused at submit. A connector whose declaration is unusable (an unknown mode, no file, an empty list) gets no record and a WARN at install, so it closes nothing.
 
-⚠️ **Two obligations the platform cannot verify.**
+- **Generate the file, do not hand-write it.** Build it from whatever already defines your feed's vocabulary and add a CI check that regenerates and diffs it. A predicate you emit but do not list is silently ungoverned — its stale edges are never closed, and the platform reports it as predicate drift. A predicate you list but no longer emit is worse: the platform will close its edges.
+- **An operator can narrow the list for one run, never widen it.** `--governed-predicates` refuses a predicate the loader does not declare.
+
+⚠ **Two obligations the platform cannot verify.**
 
 1. **Collapse inverse pairs before you emit.** If the upstream declares a relationship from both ends (`feeds` on the damper, `isFedBy` on the AHU), that is *one* canonical edge. Emit it under a single canonical source whichever end declared it — the platform honours the submitted set verbatim and never re-derives an owner from the declaring asset. Without the collapse, you will close edges the other endpoint still declares.
-2. **One artifact per snapshot.** A source's edges must be in the *same* artifact as its vertex. Splitting one logical export across two artifacts makes each one's vertex set partial, and the first would close the edges the second carries.
+2. **One artifact per snapshot.** A source's edges must be in the *same* artifact as its vertex. Every artifact a licensed sidecar commits asserts on its own, so splitting one export across two artifacts makes each one's vertex set partial, and the first would close the edges the second carries. A loader that writes one import as several artifacts must not have its imports marked full-snapshot.
 
-The platform applies a **volume guard**: a publish that would close an implausible number of edges is refused whole (nothing applied) and alerts an operator, who can clear a genuinely large removal. Expect a refused sync if your export truncates.
+The platform applies a **volume guard**: a publish that would close an implausible number of edges is refused whole (nothing applied) and alerts an operator. For a genuinely large removal, the operator raises the tenant's guard, lets the feed publish, then restores it. Expect a refused sync if your export truncates.
 
-#### Operator-driven imports: declare the vocabulary, let the operator assert
-
-The writer option above is right for a **connector**, whose author knows every cycle is a full export. It is wrong for a **loader driven by an operator data import**, where the same loader handles a complete export one day and a partial top-up the next — only the person who chose the file knows which, and hard-coding the assertion would close live edges on the partial run.
-
-So the two halves are split by who knows the answer. The kit declares the predicates its feed **owns**; the operator asserts, per run, whether **this** artifact is complete (a checkbox in the console, `--full-snapshot` on `oga-admin import`). Wire it with `WithCommitClient`:
-
-```go
-cfg := &loader.ServerConfig{
-    Port: "8400",
-    HandlerOptions: []loader.HandlerOption{
-        loader.WithCommitClient(commitClient, "my-kit",
-            loader.WithGovernedPredicates(myFeedPredicates()...)),
-        loader.WithLoaderKind(transfer.KindData),
-    },
-}
-```
-
-The chassis reads the operator's assertion off the reserved `config` keys (`oga.full_snapshot`, and an optional `oga.governed_predicates` to scope tighter for one run) and stamps the header for you. With no assertion the artifact is byte-identical to one written without any of this, so nothing changes for an ordinary incremental import.
-
-Two things worth knowing:
-
-- **Derive your predicate list, do not retype it.** Build it from whatever already defines your feed's vocabulary and add a test that fails when the two drift. A predicate you emit but do not declare is silently ungoverned — its stale edges are never closed. Safe, but a bug, and the platform will report it as predicate drift.
-- **Declaring a vocabulary asserts nothing on its own.** Without `oga.full_snapshot=true` on the request, no assertion is written. A loader that declares none refuses every assertion and says so with a WARN at startup.
+Earlier releases asserted through the artifact header (`transfer.WithEdgeCompleteness`) and a loader option (`loader.WithGovernedPredicates`, reading `oga.full_snapshot` config keys). Both were removed when the platform took over the assertion; an artifact header that still carries `edge_completeness` is ignored with a WARN.
 
 ## Single-pass loader (most kits)
 
@@ -293,9 +279,9 @@ func main() {
     cfg := &loader.ServerConfig{
         Port: "8400",
         HandlerOptions: []loader.HandlerOption{
-            // Builds the writer for you. Add
-            // loader.WithGovernedPredicates(...) if this loader serves
-            // full-snapshot imports (see "Operator-driven imports" above).
+            // Builds the writer for you. Full-snapshot imports need no
+            // option here: declare loaders[].governed_predicates_file in the
+            // kit manifest (see "Full-snapshot feeds" above).
             loader.WithCommitClient(cc, "my-kit"),
             loader.WithLoaderKind(transfer.KindData),
         },
