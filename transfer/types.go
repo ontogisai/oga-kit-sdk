@@ -124,7 +124,12 @@ type Vertex struct {
 	// Label is a human-readable label.
 	Label string `json:"label,omitempty"`
 
-	// Properties are the domain-specific property values.
+	// Properties are the domain-specific property values. The platform
+	// stores every value except nil, an empty string included: send "" to
+	// record that the source has the field and left it blank, and leave the
+	// key out (or send nil) when the source does not have the field. In an
+	// array, nil elements are skipped, and an array with no element left is
+	// not stored.
 	Properties map[string]any `json:"properties,omitempty"`
 
 	// Latitude / Longitude — when both are present, the platform
