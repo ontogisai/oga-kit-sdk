@@ -47,6 +47,25 @@ type RelationshipEndpoint struct {
 	// under a descendants-scoped entry. Matched exactly, never sanitized.
 	EntityType string `json:"entity_type"`
 
+	// TypeAncestry is this endpoint's type chain as the tenant's live ontology
+	// defines it, most specific first: EntityType itself, then its parent, up to
+	// the root. Same semantics as [Entity.TypeAncestry]: self-inclusive; ABSENT
+	// when the endpoint's class is not in the tenant's active ontology (never a
+	// one-element chain naming the leaf); a present chain ends at the first
+	// ancestor the ontology does not define.
+	//
+	// Route a relationship target by this chain, not by the catalog bundled in
+	// your kit: the tenant's ontology also holds the classes your source added
+	// after the kit was released, which reach it through ontology sync. When your
+	// handler needs the ancestry and it is absent, fail that relationship rather
+	// than infer one.
+	//
+	// PUSH LANE ONLY. On the withdrawal lane it is absent: retract by the
+	// relationship's own [Relationship.Correlation], which routes nothing.
+	//
+	// Mirrors the platform's internal/egress.RelationshipEndpoint.TypeAncestry.
+	TypeAncestry []string `json:"type_ancestry,omitempty"`
+
 	// Correlation is this endpoint's external-system identifier. See the type
 	// doc comment: always present and non-empty on the push lane; possibly nil
 	// on the withdrawal lane.

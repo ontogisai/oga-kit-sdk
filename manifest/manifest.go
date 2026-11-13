@@ -567,6 +567,16 @@ type KitPolicySpec struct {
 	// intersects the list. Compile-time syntax + type-check of Expression
 	// is left for the engine's CreatePolicy call at install time so the
 	// SDK manifest validator does not need to import cel-go.
+	//
+	// TargetEntityTypes also covers subclasses (platform OGA-1252): the policy
+	// applies to a resource whose class, or an ancestor of it in the tenant's
+	// ontology of record, is listed, so a policy on a camera class covers the
+	// camera subclasses a source adds later. A class the ontology does not
+	// define, and a non-KG resource such as "agent", matches by exact name. A
+	// hybrid kit's loader parents a class under the functional type, not the
+	// anchor root (brick:AHU → brick:HVAC_Equipment → Equipment, never
+	// brick:Equipment), so a policy on brick:Equipment reaches no descendant and
+	// one on Equipment covers that subtree.
 	TargetRoles       []string `yaml:"target_roles,omitempty"`
 	TargetAgentIDs    []string `yaml:"target_agent_ids,omitempty"`
 	TargetEntityTypes []string `yaml:"target_entity_types,omitempty"`

@@ -2,6 +2,7 @@ package egress
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -32,6 +33,11 @@ const sharedRelationshipSyncRequestJSON = `{
       "source": {
         "entity_id": "eq-1",
         "entity_type": "brick:AHU",
+        "type_ancestry": [
+          "brick:AHU",
+          "brick:HVAC_Equipment",
+          "Equipment"
+        ],
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-EQ-1"
@@ -40,6 +46,11 @@ const sharedRelationshipSyncRequestJSON = `{
       "target": {
         "entity_id": "loc-1",
         "entity_type": "rec:HVACZone",
+        "type_ancestry": [
+          "rec:HVACZone",
+          "rec:Zone",
+          "Location"
+        ],
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-LOC-1"
@@ -67,6 +78,11 @@ const sharedRelationshipSyncRequestJSON = `{
       "target": {
         "entity_id": "loc-1",
         "entity_type": "rec:HVACZone",
+        "type_ancestry": [
+          "rec:HVACZone",
+          "rec:Zone",
+          "Location"
+        ],
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-LOC-1"
@@ -89,11 +105,13 @@ func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 				Predicate: "feeds",
 				Source: RelationshipEndpoint{
 					EntityID: "eq-1", EntityType: "brick:AHU",
-					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-EQ-1"},
+					TypeAncestry: []string{"brick:AHU", "brick:HVAC_Equipment", "Equipment"},
+					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-EQ-1"},
 				},
 				Target: RelationshipEndpoint{
 					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
+					TypeAncestry: []string{"rec:HVACZone", "rec:Zone", "Location"},
+					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
 				},
 				Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-REL-1"},
 			},
@@ -107,7 +125,8 @@ func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 				},
 				Target: RelationshipEndpoint{
 					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
+					TypeAncestry: []string{"rec:HVACZone", "rec:Zone", "Location"},
+					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
 				},
 			},
 		},
@@ -152,5 +171,33 @@ func TestRelationshipSyncRequest_DecodesTheSharedWire(t *testing.T) {
 	}
 	if edge2 := req.Relationships[1]; edge2.Correlation != nil {
 		t.Errorf("edge-2 own correlation = %+v, want nil (the create case)", edge2.Correlation)
+	}
+	// type_ancestry: present and leaf first where the ontology defines the class,
+	// absent (nil, never a one-element guess) where it does not (OGA-1252).
+	want := []string{"brick:AHU", "brick:HVAC_Equipment", "Equipment"}
+	if got := edge1.Source.TypeAncestry; !slices.Equal(got, want) {
+		t.Errorf("edge-1 source type_ancestry = %v, want %v", got, want)
+	}
+	if got := req.Relationships[1].Source.TypeAncestry; got != nil {
+		t.Errorf("edge-2 source type_ancestry = %v, want nil (the class the ontology does not define)", got)
+	}
+}
+
+// An endpoint whose class the ontology does not define must marshal WITHOUT the
+// type_ancestry key: absence is the one wire representation of "no ancestry",
+// so neither a nil nor an empty chain may serialize as [] or null (OGA-1252).
+func TestRelationshipEndpoint_AbsentTypeAncestryIsOmitted(t *testing.T) {
+	for _, ancestry := range [][]string{nil, {}} {
+		raw, err := json.Marshal(RelationshipEndpoint{EntityID: "a", EntityType: "X", TypeAncestry: ancestry})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, present := m["type_ancestry"]; present {
+			t.Errorf("an endpoint with type_ancestry %#v serialized the key: %s", ancestry, raw)
+		}
 	}
 }
