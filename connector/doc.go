@@ -24,9 +24,10 @@
 //	connector.ListenAndServe(ctx, cfg, c)
 //
 // The server runs one poll loop per binding, serves the internal webhook and
-// health endpoints, constructs a fresh [transfer.Writer] for each batch, and
-// commits (closes) it for the kit after Sync / HandleWebhook returns — the kit
-// never calls Close itself, exactly as in the loader SDK.
+// health endpoints and a poll binding's sync now ([PathSync]: drain now, and
+// the latest drain's status), constructs a fresh [transfer.Writer] for each
+// batch, and commits (closes) it for the kit after Sync / HandleWebhook returns
+// — the kit never calls Close itself, exactly as in the loader SDK.
 //
 // # Two emit surfaces
 //
@@ -59,8 +60,8 @@
 //	return &connector.SyncResult{NextCursor: next, HasMore: true, WaitForCommit: true}, nil
 //
 // Nothing waits unless a page asks. A failed job or a wait past
-// [Config.CommitWait] fails the Sync: the cursor stays, and the next poll tick
-// runs the page again.
+// [Config.CommitWait] fails the Sync: the cursor stays, and the next drain (a
+// tick or a sync now) runs the page again.
 //
 // # Tenancy
 //

@@ -55,7 +55,7 @@ func TestServer_DiscardsEveryUncommittedWriter(t *testing.T) {
 		name string
 		run  func(t *testing.T, s *server, b Binding)
 	}{
-		{"runSync", func(t *testing.T, s *server, b Binding) { _, _ = s.runSync(t.Context(), b, "") }},
+		{"runSync", func(t *testing.T, s *server, b Binding) { _, _, _ = s.runSync(t.Context(), b, "") }},
 		{"processWebhookSync", func(t *testing.T, s *server, b Binding) {
 			r := httptest.NewRequest(http.MethodPost, "/webhook/"+b.ID, nil)
 			s.processWebhookSync(httptest.NewRecorder(), r, b, []byte(`{}`))

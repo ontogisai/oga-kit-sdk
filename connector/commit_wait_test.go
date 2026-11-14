@@ -102,7 +102,7 @@ func TestDrain_WaitForCommit_NextPageOnlyAfterTheJobIsTerminal(t *testing.T) {
 	}
 	s, logs := commitWaitServer(impl, fc, fastCommitWait)
 
-	final := s.drain(t.Context(), impl.bindings[0], "")
+	final, _ := s.drain(t.Context(), impl.bindings[0], "", nil)
 
 	if final != "p2" {
 		t.Errorf("final cursor = %q, want p2", final)
@@ -129,7 +129,7 @@ func TestDrain_WithoutWaitForCommit_DoesNotWait(t *testing.T) {
 	impl := newPagedConnector(false)
 	s, _ := commitWaitServer(impl, fc, fastCommitWait)
 
-	if final := s.drain(t.Context(), impl.bindings[0], ""); final != "p2" {
+	if final, _ := s.drain(t.Context(), impl.bindings[0], "", nil); final != "p2" {
 		t.Errorf("final cursor = %q, want p2", final)
 	}
 	if fc.CompleteCalls() != 2 || fc.StatusCalls() != 0 {
@@ -159,7 +159,7 @@ func TestDrain_FailedOrTimedOutWaitKeepsTheCursor(t *testing.T) {
 			impl := newPagedConnector(true)
 			s, logs := commitWaitServer(impl, fc, tc.wait)
 
-			if final := s.drain(t.Context(), impl.bindings[0], ""); final != "" {
+			if final, _ := s.drain(t.Context(), impl.bindings[0], "", nil); final != "" {
 				t.Errorf("cursor = %q, want it unchanged", final)
 			}
 			if got := impl.syncedCursors(); len(got) != 1 {
@@ -171,7 +171,7 @@ func TestDrain_FailedOrTimedOutWaitKeepsTheCursor(t *testing.T) {
 			if !strings.Contains(logs.String(), `"job_id":"job-1"`) {
 				t.Errorf("the failed wait must be logged with its job id; log:\n%s", logs.String())
 			}
-			if _, err := s.runSync(t.Context(), impl.bindings[0], ""); !errors.Is(err, tc.wantErr) {
+			if _, _, err := s.runSync(t.Context(), impl.bindings[0], ""); !errors.Is(err, tc.wantErr) {
 				t.Errorf("runSync err = %v, want %v", err, tc.wantErr)
 			}
 		})
@@ -184,7 +184,7 @@ func TestRunSync_WaitForCommitWithoutStatusClientCommitsNothing(t *testing.T) {
 	s, _ := commitWaitServer(impl, fc, fastCommitWait)
 	s.cfg.StatusClient = nil
 
-	_, err := s.runSync(t.Context(), impl.bindings[0], "")
+	_, _, err := s.runSync(t.Context(), impl.bindings[0], "")
 	if err == nil || !strings.Contains(err.Error(), "StatusClient") {
 		t.Errorf("err = %v, want the missing StatusClient named", err)
 	}
@@ -203,7 +203,7 @@ func TestRunSync_WaitForCommitOnAnEmptyPageWaitsForNothing(t *testing.T) {
 	}
 	s, _ := commitWaitServer(impl, fc, fastCommitWait)
 
-	res, err := s.runSync(t.Context(), impl.bindings[0], "")
+	res, _, err := s.runSync(t.Context(), impl.bindings[0], "")
 	if err != nil || res.NextCursor != "c1" {
 		t.Fatalf("runSync = %+v, %v", res, err)
 	}

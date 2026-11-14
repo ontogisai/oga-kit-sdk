@@ -84,6 +84,16 @@ func TestExtraRoutes_RejectsReservedPathCollision(t *testing.T) {
 		"POST " + PathTestConnection,
 		"/webhook/{binding}",
 		"POST /webhook/{binding}",
+		PathSync,
+		"POST " + PathSync,
+		"GET " + PathSync,
+		// A wildcard's name does not make a different pattern to ServeMux.
+		"POST /connector/sync/{id}",
+		"/webhook/{name}",
+		// A literal path the reserved route would match takes that route over
+		// for one binding: the kit would answer a binding's sync or webhook.
+		"GET /connector/sync/status",
+		"POST /webhook/push",
 		"  GET   /healthz  ", // whitespace must not defeat the guard
 	} {
 		err := validateExtraRoutes(map[string]http.Handler{pattern: okHandler("x")})
@@ -106,6 +116,11 @@ func TestExtraRoutes_AcceptsNonCollidingPatterns(t *testing.T) {
 		"GET /healthz-extended", // a PREFIX of no reserved path, and not equal to one
 		"GET /webhook",          // the unscoped path is NOT the reserved binding route
 		"GET /connector/status",
+		"GET /connector/sync",          // the unscoped path is not the binding route
+		"GET /connector/sync/{id}/log", // a deeper route under a binding does not conflict
+		"GET /connector/sync/a/b",      // nor a deeper literal one
+		"POST /sync/{id}",              // a top-level /sync is the kit's: sync now is namespaced
+		"GET /{page}",                  // a wildcard over a literal reserved path is less specific
 	} {
 		if err := validateExtraRoutes(map[string]http.Handler{pattern: okHandler("x")}); err != nil {
 			t.Errorf("pattern %q was rejected: %v", pattern, err)

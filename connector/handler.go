@@ -10,6 +10,8 @@ import "context"
 // Implementations must be safe for concurrent calls: the server runs one poll
 // goroutine per binding and serves webhook requests from the HTTP server's
 // goroutines. A connector that maintains shared state must serialize access.
+// Sync is never called concurrently for one binding: its ticker and
+// POST /connector/sync/{binding} (sync now) run one drain at a time.
 type SourceConnector interface {
 	// Bindings returns the (external_system, source_type) bindings this
 	// connector serves. Called once at startup. At least one is required.
@@ -53,7 +55,9 @@ type SourceConnector interface {
 	// SyncResult.WaitForCommit when the next page must not be committed
 	// before the platform has written this one.
 	//
-	// Only called for bindings whose Mode enables polling.
+	// Only called for bindings whose Mode enables polling: on the binding's
+	// ticker, and when the platform asks for a drain now
+	// (POST /connector/sync/{binding}).
 	Sync(ctx context.Context, b Binding, cursor string, em *Emitter) (*SyncResult, error)
 
 	// HandleWebhook normalizes one inbound webhook payload for a binding and

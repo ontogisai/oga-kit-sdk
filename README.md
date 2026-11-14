@@ -407,7 +407,7 @@ The SDK has no opinion about how the kit parses — only about how records leave
 
 ## Source connectors
 
-A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding.
+A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/connector/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding.
 
 Declare the bindings in the kit manifest and collapse them to the runtime mode with `connector.ModeFromStrings`:
 
@@ -429,6 +429,21 @@ source_connectors:
 b.Mode = connector.ModeFromStrings(spec.Modes)
 ```
 
+### Sync now
+
+A poll binding drains on its ticker, and also when the platform asks (an operator's "sync now", from release 1.4.0):
+
+| Route | Answer |
+|---|---|
+| `POST /connector/sync/{binding}` | `202` and the drain's status: one drain starts now. `409` and the running drain's status when one is already running. `503` until the first `Connect` attempt ends, and once shutdown has begun. |
+| `GET /connector/sync/{binding}` | `200` and the latest drain's status (`connector.SyncStatus`). |
+
+Both answer `404` for an unknown or webhook-only binding. The ticker and `POST` share one drain per binding: a tick that finds a sync-now drain running is skipped, so `Sync` is never called concurrently for one binding and the cursor stays with the binding.
+
+The status is the latest drain, running or finished: `outcome` (`running`, `succeeded`, `failed`), `trigger` (`poll` or `manual`), `started_at`, `finished_at`, `records` and `batches` committed, the committed `job_ids` (the latest 100) and, for a failed drain, `error` (cut at 512 bytes; a transport error's URL keeps only its location, without query or userinfo). Batches committed before a failure stay committed, and the next drain starts again from the page that failed. A drain whose `Sync` reports `HasMore` without moving the cursor is failed. The status is kept in memory, so a restarted connector reports no drain until its first one; webhook deliveries do not appear in it.
+
+Nothing to implement: the server drives your `Sync` as it does on a tick. Make sure `Sync` honours its context, which shutdown cancels.
+
 ### Ordering pages: wait for a commit
 
 The server commits each page's batch as Sync returns it, and the platform writes the batches in no order relative to each other. When a later page depends on an earlier one, such as rooms whose edges point at the sites of the page before, set `WaitForCommit` on the earlier page:
@@ -444,7 +459,7 @@ cfg := &connector.Config{
 return &connector.SyncResult{NextCursor: next, HasMore: true, WaitForCommit: true}, nil
 ```
 
-The server then waits for that batch's job to finish before it calls Sync for the next page, and logs the job id and how long it waited. A failed job, a wait past `CommitWait.Timeout`, or a missing `StatusClient` fails the Sync as a failed commit does: the cursor does not advance, and the next poll tick runs the page again. A page whose job fails on every attempt therefore holds the binding at that page, so set the flag only where the next pages must not be sent without it. Keep `CommitWait`'s default timeout: a page that timed out is committed again, and if its first job is still writing, two jobs write the same records at once. A page that emitted nothing commits nothing and waits for nothing; pages without the flag are not waited on. Webhook deliveries are unaffected.
+The server then waits for that batch's job to finish before it calls Sync for the next page, and logs the job id and how long it waited. A failed job, a wait past `CommitWait.Timeout`, or a missing `StatusClient` fails the Sync as a failed commit does: the cursor does not advance, and the next drain (a tick or a sync now) runs the page again. The batch was committed, so the binding's sync status lists its job beside the failure. A page whose job fails on every attempt therefore holds the binding at that page, so set the flag only where the next pages must not be sent without it. Keep `CommitWait`'s default timeout: a page that timed out is committed again, and if its first job is still writing, two jobs write the same records at once. A page that emitted nothing commits nothing and waits for nothing; pages without the flag are not waited on. Webhook deliveries are unaffected.
 
 ### Webhook processing: sync (default) or async
 
@@ -513,7 +528,7 @@ cfg.ExtraRoutes = map[string]http.Handler{
 }
 ```
 
-A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`) is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
+A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/connector/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`), whatever its wildcard is named, or a literal path one of them would match (`/connector/sync/status`), is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
 
 ### Fetching a published artifact
 
