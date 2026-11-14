@@ -415,7 +415,7 @@ b.Mode = connector.ModeFromStrings(spec.Modes)
 
 ### Sync now
 
-A poll binding drains on its ticker, and also when the platform asks (an operator's "sync now", from release 1.3.0):
+A poll binding drains on its ticker, and also when the platform asks (an operator's "sync now", from release 1.4.0):
 
 | Route | Answer |
 |---|---|
