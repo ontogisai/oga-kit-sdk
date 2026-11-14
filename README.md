@@ -419,12 +419,12 @@ A poll binding drains on its ticker, and also when the platform asks (an operato
 
 | Route | Answer |
 |---|---|
-| `POST /sync/{binding}` | `202` and the drain's status: one drain starts now. `409` and the running drain's status when one is already running. `503` until the first `Connect` attempt ends. |
+| `POST /sync/{binding}` | `202` and the drain's status: one drain starts now. `409` and the running drain's status when one is already running. `503` until the first `Connect` attempt ends, and once shutdown has begun. |
 | `GET /sync/{binding}` | `200` and the latest drain's status (`connector.SyncStatus`). |
 
 Both answer `404` for an unknown or webhook-only binding. The ticker and `POST` share one drain per binding: a tick that finds a sync-now drain running is skipped, so `Sync` is never called concurrently for one binding and the cursor stays with the binding.
 
-The status is the latest drain, running or finished: `outcome` (`running`, `succeeded`, `failed`), `trigger` (`poll` or `manual`), `started_at`, `finished_at`, `records` and `batches` committed, the committed `job_ids` (the latest 100) and, for a failed drain, `error`. Batches committed before a failure stay committed, and the next drain starts again from the page that failed. A drain whose `Sync` reports `HasMore` without moving the cursor is failed. The status is kept in memory, so a restarted connector reports no drain until its first one; webhook deliveries do not appear in it.
+The status is the latest drain, running or finished: `outcome` (`running`, `succeeded`, `failed`), `trigger` (`poll` or `manual`), `started_at`, `finished_at`, `records` and `batches` committed, the committed `job_ids` (the latest 100) and, for a failed drain, `error` (cut at 512 bytes; a transport error's URL keeps only its location, without query or userinfo). Batches committed before a failure stay committed, and the next drain starts again from the page that failed. A drain whose `Sync` reports `HasMore` without moving the cursor is failed. The status is kept in memory, so a restarted connector reports no drain until its first one; webhook deliveries do not appear in it.
 
 Nothing to implement: the server drives your `Sync` as it does on a tick. Make sure `Sync` honours its context, which shutdown cancels.
 
@@ -495,7 +495,7 @@ cfg.ExtraRoutes = map[string]http.Handler{
 }
 ```
 
-A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`) is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
+A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`), whatever its wildcard is named, is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
 
 ### Fetching a published artifact
 

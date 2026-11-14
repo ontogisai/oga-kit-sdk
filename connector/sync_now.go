@@ -95,9 +95,10 @@ type SyncStatus struct {
 	// the last MaxStatusJobIDs when Batches is larger. Never null.
 	JobIDs []string `json:"job_ids"`
 
-	// Error is why a failed drain stopped, at most 512 bytes. Batches committed
-	// before the failure stay committed and are listed in JobIDs; the next drain
-	// starts again from the page that failed.
+	// Error is why a failed drain stopped, cut at 512 bytes. A transport
+	// error's URL (*url.Error) is reduced to its location: no userinfo, query
+	// or fragment. Batches committed before the failure stay committed and are
+	// listed in JobIDs; the next drain starts again from the page that failed.
 	Error string `json:"error,omitempty"`
 }
 
@@ -129,7 +130,7 @@ func newPollRuns(bindings map[string]Binding) map[string]*pollRun {
 // begin claims the binding for one drain and returns the cursor it starts from
 // and its status. When a drain is already running it returns false and the
 // running drain's status.
-func (r *pollRun) begin(binding string, trigger SyncTrigger) (string, SyncStatus, bool) {
+func (r *pollRun) begin(trigger SyncTrigger) (string, SyncStatus, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.running {
@@ -138,7 +139,7 @@ func (r *pollRun) begin(binding string, trigger SyncTrigger) (string, SyncStatus
 	now := time.Now().UTC()
 	r.running = true
 	r.status = SyncStatus{
-		Binding:   binding,
+		Binding:   r.status.Binding,
 		Outcome:   SyncRunning,
 		Trigger:   trigger,
 		StartedAt: &now,
@@ -210,7 +211,7 @@ func (s *server) drainIfIdle(ctx context.Context, b Binding, trigger SyncTrigger
 	if run == nil {
 		return
 	}
-	cursor, _, ok := run.begin(b.ID, trigger)
+	cursor, _, ok := run.begin(trigger)
 	if !ok {
 		return
 	}
@@ -231,7 +232,8 @@ func (s *server) drainHeld(ctx context.Context, b Binding, run *pollRun, cursor 
 // The drain runs after the response, on the server's lifetime context: a caller
 // that disconnects does not cut it short, and shutdown cancels it and waits for
 // it. Refused with 503 until the initial Connect attempt has completed, because
-// Sync is never called before Connect returns.
+// Sync is never called before Connect returns, and once shutdown has begun,
+// when the drain would stop before its first page.
 func (s *server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 	b, run, ok := s.pollTarget(r.PathValue("binding"))
 	if !ok {
@@ -243,16 +245,16 @@ func (s *server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 			http.StatusServiceUnavailable)
 		return
 	}
-	cursor, st, started := run.begin(b.ID, SyncTriggerManual)
+	if s.runCtx.Err() != nil {
+		http.Error(w, "connector is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	cursor, st, started := run.begin(SyncTriggerManual)
 	if !started {
 		writeSyncStatus(w, http.StatusConflict, st)
 		return
 	}
-	ctx := s.runCtx
-	if ctx == nil {
-		ctx = context.Background() // a directly constructed server (tests) has no lifetime context
-	}
-	s.drains.Go(func() { s.drainHeld(ctx, b, run, cursor) })
+	s.drains.Go(func() { s.drainHeld(s.runCtx, b, run, cursor) })
 	s.cfg.Logger.Info("source connector sync now started", "binding", b.ID)
 	writeSyncStatus(w, http.StatusAccepted, st)
 }

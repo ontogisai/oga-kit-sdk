@@ -66,8 +66,9 @@ func newTestServer(impl SourceConnector, factory WriterFactory) *server {
 			PollInterval:  time.Millisecond,
 			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
-		impl: impl,
-		sink: errSink{},
+		impl:   impl,
+		sink:   errSink{},
+		runCtx: context.Background(),
 	}
 	s.bindings = map[string]Binding{}
 	for _, b := range impl.Bindings(context.Background()) {

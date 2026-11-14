@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -401,7 +402,7 @@ func tryRequest(method, url string) (int, SyncStatus) {
 
 func TestPollRun_JobIDsKeepTheLatestAndErrorsAreCapped(t *testing.T) {
 	r := newPollRuns(map[string]Binding{"b": {ID: "b"}})["b"]
-	if _, _, ok := r.begin("b", SyncTriggerPoll); !ok {
+	if _, _, ok := r.begin(SyncTriggerPoll); !ok {
 		t.Fatal("begin on an idle binding must claim it")
 	}
 	total := MaxStatusJobIDs + 5
@@ -421,7 +422,91 @@ func TestPollRun_JobIDsKeepTheLatestAndErrorsAreCapped(t *testing.T) {
 	if len(st.Error) > 600 || !strings.HasSuffix(st.Error, "(truncated)") {
 		t.Errorf("error is %d bytes, want it capped at 512 and marked truncated", len(st.Error))
 	}
-	if cursor, _, ok := r.begin("b", SyncTriggerManual); !ok || cursor != "c9" {
+	if cursor, _, ok := r.begin(SyncTriggerManual); !ok || cursor != "c9" {
 		t.Errorf("next drain starts at %q (claimed=%v), want c9", cursor, ok)
+	}
+}
+
+// The cursor belongs to the binding, not to whichever trigger drains it: the
+// ticker's next drain continues from where a sync-now drain stopped.
+func TestSyncNow_TheTickerContinuesFromTheManualDrainsCursor(t *testing.T) {
+	var lastCursor atomic.Value
+	fc := &fakeConnector{
+		bindings: []Binding{{ID: "pull", Mode: ModePoll}},
+		syncFn: func(_ context.Context, _ Binding, cursor string, em *Emitter) (*SyncResult, error) {
+			lastCursor.Store(cursor)
+			return &SyncResult{NextCursor: cursor + "+"}, writeOne(em)
+		},
+	}
+	factory, _ := commitFactory()
+	s := newTestServer(fc, factory)
+	srv := httptest.NewServer(s.mux())
+	defer srv.Close()
+
+	if code, _ := syncRequest(t, http.MethodPost, srv.URL+SyncPath("pull")); code != http.StatusAccepted {
+		t.Fatalf("POST = %d, want 202", code)
+	}
+	waitFinished(t, srv.URL+SyncPath("pull"))
+	s.drainIfIdle(t.Context(), s.bindings["pull"], SyncTriggerPoll)
+	if got, _ := lastCursor.Load().(string); got != "+" {
+		t.Errorf("the tick drained from %q, want %q: the cursor the sync-now drain reached", got, "+")
+	}
+}
+
+// A transport error quotes its URL, and a query string can be a credential: the
+// status (and the log line) keep only the URL's location.
+func TestSyncStatus_ErrorKeepsNoURLQuery(t *testing.T) {
+	const secret = "access_token=s3cr3t"
+	fc := &fakeConnector{
+		bindings: []Binding{{ID: "pull", Mode: ModePoll}},
+		syncFn: func(context.Context, Binding, string, *Emitter) (*SyncResult, error) {
+			return nil, fmt.Errorf("fetch page: %w", &url.Error{
+				Op: "Get", URL: "https://upstream.example/items?" + secret, Err: errors.New("i/o timeout"),
+			})
+		},
+	}
+	factory, _ := commitFactory()
+	var logged strings.Builder
+	s := newTestServer(fc, factory)
+	s.cfg.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+	srv := httptest.NewServer(s.mux())
+	defer srv.Close()
+
+	if code, _ := syncRequest(t, http.MethodPost, srv.URL+SyncPath("pull")); code != http.StatusAccepted {
+		t.Fatalf("POST = %d, want 202", code)
+	}
+	st := waitFinished(t, srv.URL+SyncPath("pull"))
+	if st.Outcome != SyncFailed || !strings.Contains(st.Error, "https://upstream.example/items") {
+		t.Fatalf("status = %+v, want the failed drain naming the URL's location", st)
+	}
+	if strings.Contains(st.Error, secret) || strings.Contains(logged.String(), secret) {
+		t.Errorf("the URL's query reached the status (%q) or the log", st.Error)
+	}
+}
+
+// Once shutdown has begun a drain would stop before its first page, so the
+// request is refused rather than answered 202.
+func TestSyncNow_Refused503OnceShutdownBegins(t *testing.T) {
+	var calls atomic.Int32
+	fc := &fakeConnector{
+		bindings: []Binding{{ID: "pull", Mode: ModePoll}},
+		syncFn: func(context.Context, Binding, string, *Emitter) (*SyncResult, error) {
+			calls.Add(1)
+			return &SyncResult{}, nil
+		},
+	}
+	factory, _ := commitFactory()
+	s := newTestServer(fc, factory)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.runCtx = ctx
+	srv := httptest.NewServer(s.mux())
+	defer srv.Close()
+
+	if code, _ := syncRequest(t, http.MethodPost, srv.URL+SyncPath("pull")); code != http.StatusServiceUnavailable {
+		t.Errorf("POST during shutdown = %d, want 503", code)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("Sync calls = %d, want 0", n)
 	}
 }

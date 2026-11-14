@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ontogisai/oga-kit-sdk/internal/redact"
 	"github.com/ontogisai/oga-kit-sdk/kitlog"
 	"github.com/ontogisai/oga-kit-sdk/outcomereport"
 	"github.com/ontogisai/oga-kit-sdk/transfer"
@@ -535,6 +537,31 @@ func patternPath(pattern string) string {
 	return p
 }
 
+// isReservedPath reports whether p is a reserved contract path. Wildcard names
+// are ignored, as ServeMux ignores them when it decides that two patterns
+// conflict: "/sync/{id}" is "/sync/{binding}", and registering both panics.
+func isReservedPath(p string) bool {
+	p = blankWildcards(p)
+	for r := range reservedPaths {
+		if blankWildcards(r) == p {
+			return true
+		}
+	}
+	return false
+}
+
+// blankWildcards writes every wildcard segment of a ServeMux path ({name} or
+// {name...}, not the {$} anchor) as {}.
+func blankWildcards(p string) string {
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
+		if len(seg) > 2 && seg[0] == '{' && seg[len(seg)-1] == '}' && seg != "{$}" {
+			segs[i] = "{}"
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
 // validateExtraRoutes rejects a kit route that is unusable or that would shadow
 // a reserved contract path. ListenAndServe calls this BEFORE building the mux,
 // because http.ServeMux PANICS on a duplicate registration — a collision has to
@@ -547,7 +574,7 @@ func validateExtraRoutes(routes map[string]http.Handler) error {
 		if h == nil {
 			return fmt.Errorf("connector: ExtraRoutes[%q] has a nil handler", pattern)
 		}
-		if p := patternPath(pattern); reservedPaths[p] {
+		if p := patternPath(pattern); isReservedPath(p) {
 			return fmt.Errorf(
 				"connector: ExtraRoutes[%q] collides with the reserved contract path %q — "+
 					"the platform probes and delivers to that route, so a kit must not shadow it",
@@ -623,6 +650,7 @@ func (s *server) drain(ctx context.Context, b Binding, cursor string, onCommit f
 		}
 		res, batch, err := s.runSync(ctx, b, cursor)
 		if err != nil {
+			err = withoutURLSecrets(err)
 			s.cfg.Logger.Warn("source connector sync failed",
 				"binding", b.ID, "source_type", b.SourceType, "error", err)
 			return cursor, err // retry on next drain from the same cursor
@@ -643,6 +671,17 @@ func (s *server) drain(ctx context.Context, b Binding, cursor string, onCommit f
 			return cursor, errCursorNotAdvanced
 		}
 	}
+}
+
+// withoutURLSecrets rewrites the URL of a *url.Error in err's chain to its
+// location only (no userinfo, query or fragment). A transport error's text
+// quotes the whole URL, a query string can be a credential, and a drain's error
+// reaches the log and the binding's sync status.
+func withoutURLSecrets(err error) error {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		return redact.ScrubURLError(err, ue.URL)
+	}
+	return err
 }
 
 // committedBatch is what one runSync committed: zero records when the page
