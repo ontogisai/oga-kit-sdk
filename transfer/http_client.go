@@ -206,7 +206,7 @@ func (c *HTTPCommitClient) Complete(ctx context.Context, req *CompleteRequest) (
 
 // Status calls loader.status for jobID, the [Receipt.JobID] of an earlier
 // commit. To wait for a job to finish, use [WaitForJob].
-func (c *HTTPCommitClient) Status(ctx context.Context, jobID string) (*JobStatus, error) {
+func (c *HTTPCommitClient) Status(ctx context.Context, jobID string) (*StatusResponse, error) {
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
 		return nil, errors.New("transfer.Status: jobID is required")
@@ -215,7 +215,7 @@ func (c *HTTPCommitClient) Status(ctx context.Context, jobID string) (*JobStatus
 	if err != nil {
 		return nil, err
 	}
-	var out JobStatus
+	var out StatusResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode loader.status response: %w", err)
 	}

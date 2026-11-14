@@ -27,7 +27,7 @@ type FakeCommitClient struct {
 
 	// StatusFn answers Status. When nil, a job this client minted is
 	// completed and any other job id is an error.
-	StatusFn func(ctx context.Context, jobID string) (*JobStatus, error)
+	StatusFn func(ctx context.Context, jobID string) (*StatusResponse, error)
 
 	// FailPrepare, FailPut, FailComplete inject failures from the
 	// next call. Each toggle resets after firing once.
@@ -123,7 +123,7 @@ func (f *FakeCommitClient) Complete(_ context.Context, req *CompleteRequest) (*C
 
 // Status answers through StatusFn when it is set. Otherwise a job id this
 // client minted is completed, and any other is an error.
-func (f *FakeCommitClient) Status(ctx context.Context, jobID string) (*JobStatus, error) {
+func (f *FakeCommitClient) Status(ctx context.Context, jobID string) (*StatusResponse, error) {
 	f.mu.Lock()
 	f.statusCalls++
 	fn, known := f.StatusFn, f.minted[jobID]
@@ -135,7 +135,7 @@ func (f *FakeCommitClient) Status(ctx context.Context, jobID string) (*JobStatus
 	if !known {
 		return nil, fmt.Errorf("FakeCommitClient: job %q was not minted by this client", jobID)
 	}
-	return &JobStatus{JobID: jobID, Status: JobCompleted}, nil
+	return &StatusResponse{JobID: jobID, Status: JobCompleted}, nil
 }
 
 // PrepareCalls reports how many times PrepareUpload was called.

@@ -82,15 +82,15 @@ func TestDrain_WaitForCommit_NextPageOnlyAfterTheJobIsTerminal(t *testing.T) {
 	terminal := map[string]bool{}
 	polls := 0
 	fc := &transfer.FakeCommitClient{}
-	fc.StatusFn = func(_ context.Context, jobID string) (*transfer.JobStatus, error) {
+	fc.StatusFn = func(_ context.Context, jobID string) (*transfer.StatusResponse, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		polls++
 		if polls < 3 {
-			return &transfer.JobStatus{JobID: jobID, Status: transfer.JobRunning}, nil
+			return &transfer.StatusResponse{JobID: jobID, Status: transfer.JobRunning}, nil
 		}
 		terminal[jobID] = true
-		return &transfer.JobStatus{JobID: jobID, Status: transfer.JobCompleted}, nil
+		return &transfer.StatusResponse{JobID: jobID, Status: transfer.JobCompleted}, nil
 	}
 	impl := newPagedConnector(true)
 	var page2SawTerminal, page2SawCommits bool
@@ -153,8 +153,8 @@ func TestDrain_FailedOrTimedOutWaitKeepsTheCursor(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := &transfer.FakeCommitClient{}
-			fc.StatusFn = func(_ context.Context, jobID string) (*transfer.JobStatus, error) {
-				return &transfer.JobStatus{JobID: jobID, Status: tc.state, Error: "persist failed"}, nil
+			fc.StatusFn = func(_ context.Context, jobID string) (*transfer.StatusResponse, error) {
+				return &transfer.StatusResponse{JobID: jobID, Status: tc.state, Error: "persist failed"}, nil
 			}
 			impl := newPagedConnector(true)
 			s, logs := commitWaitServer(impl, fc, tc.wait)

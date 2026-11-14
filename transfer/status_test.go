@@ -119,10 +119,10 @@ func TestJobState_IsTerminal(t *testing.T) {
 // scripted answers Status with each step in turn, repeating the last one.
 type scripted struct {
 	calls atomic.Int32
-	steps []func(jobID string) (*transfer.JobStatus, error)
+	steps []func(jobID string) (*transfer.StatusResponse, error)
 }
 
-func (s *scripted) Status(_ context.Context, jobID string) (*transfer.JobStatus, error) {
+func (s *scripted) Status(_ context.Context, jobID string) (*transfer.StatusResponse, error) {
 	i := int(s.calls.Add(1)) - 1
 	if i >= len(s.steps) {
 		i = len(s.steps) - 1
@@ -130,19 +130,19 @@ func (s *scripted) Status(_ context.Context, jobID string) (*transfer.JobStatus,
 	return s.steps[i](jobID)
 }
 
-func state(st transfer.JobState) func(string) (*transfer.JobStatus, error) {
-	return func(jobID string) (*transfer.JobStatus, error) {
-		return &transfer.JobStatus{JobID: jobID, Status: st}, nil
+func state(st transfer.JobState) func(string) (*transfer.StatusResponse, error) {
+	return func(jobID string) (*transfer.StatusResponse, error) {
+		return &transfer.StatusResponse{JobID: jobID, Status: st}, nil
 	}
 }
 
-func failure(err error) func(string) (*transfer.JobStatus, error) {
-	return func(string) (*transfer.JobStatus, error) { return nil, err }
+func failure(err error) func(string) (*transfer.StatusResponse, error) {
+	return func(string) (*transfer.StatusResponse, error) { return nil, err }
 }
 
 func TestWaitForJob_ReturnsOnceTheJobCompletes(t *testing.T) {
 	t.Parallel()
-	s := &scripted{steps: []func(string) (*transfer.JobStatus, error){
+	s := &scripted{steps: []func(string) (*transfer.StatusResponse, error){
 		state(transfer.JobQueued), state(transfer.JobWaitingForOntology), state(transfer.JobRunning), state(transfer.JobCompleted),
 	}}
 	st, err := transfer.WaitForJob(t.Context(), s, &transfer.Receipt{JobID: "job-1"}, fastWait)
@@ -159,10 +159,10 @@ func TestWaitForJob_ReturnsOnceTheJobCompletes(t *testing.T) {
 
 func TestWaitForJob_FailedJobIsAnError(t *testing.T) {
 	t.Parallel()
-	s := &scripted{steps: []func(string) (*transfer.JobStatus, error){
+	s := &scripted{steps: []func(string) (*transfer.StatusResponse, error){
 		state(transfer.JobRunning),
-		func(jobID string) (*transfer.JobStatus, error) {
-			return &transfer.JobStatus{JobID: jobID, Status: transfer.JobFailed, Error: "persist: " + strings.Repeat("x", 2000)}, nil
+		func(jobID string) (*transfer.StatusResponse, error) {
+			return &transfer.StatusResponse{JobID: jobID, Status: transfer.JobFailed, Error: "persist: " + strings.Repeat("x", 2000)}, nil
 		},
 	}}
 	st, err := transfer.WaitForJob(t.Context(), s, &transfer.Receipt{JobID: "job-1"}, fastWait)
@@ -179,7 +179,7 @@ func TestWaitForJob_FailedJobIsAnError(t *testing.T) {
 
 func TestWaitForJob_TimesOut(t *testing.T) {
 	t.Parallel()
-	s := &scripted{steps: []func(string) (*transfer.JobStatus, error){state(transfer.JobRunning)}}
+	s := &scripted{steps: []func(string) (*transfer.StatusResponse, error){state(transfer.JobRunning)}}
 	start := time.Now()
 	st, err := transfer.WaitForJob(t.Context(), s, &transfer.Receipt{JobID: "job-1"},
 		transfer.WaitOptions{Timeout: 30 * time.Millisecond, PollInterval: time.Millisecond})
@@ -202,7 +202,7 @@ func TestWaitForJob_TimesOut(t *testing.T) {
 
 func TestWaitForJob_RetriesATransientStatusFailure(t *testing.T) {
 	t.Parallel()
-	s := &scripted{steps: []func(string) (*transfer.JobStatus, error){
+	s := &scripted{steps: []func(string) (*transfer.StatusResponse, error){
 		failure(&transfer.HTTPError{StatusCode: http.StatusTooManyRequests, Path: "/loader/v1/status"}),
 		failure(&transfer.HTTPError{StatusCode: http.StatusServiceUnavailable, Path: "/loader/v1/status"}),
 		failure(&transfer.HTTPError{StatusCode: http.StatusGatewayTimeout, Path: "/loader/v1/status"}),
@@ -220,7 +220,7 @@ func TestWaitForJob_RetriesATransientStatusFailure(t *testing.T) {
 
 func TestWaitForJob_TimeoutNamesTheLastStatusFailure(t *testing.T) {
 	t.Parallel()
-	s := &scripted{steps: []func(string) (*transfer.JobStatus, error){
+	s := &scripted{steps: []func(string) (*transfer.StatusResponse, error){
 		failure(&transfer.HTTPError{StatusCode: http.StatusBadGateway, Path: "/loader/v1/status"}),
 	}}
 	_, err := transfer.WaitForJob(t.Context(), s, &transfer.Receipt{JobID: "job-1"},
@@ -235,7 +235,7 @@ func TestWaitForJob_PermanentRefusalEndsTheWait(t *testing.T) {
 	t.Parallel()
 	// 500 included: the platform answers it for a job it does not have.
 	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
-		s := &scripted{steps: []func(string) (*transfer.JobStatus, error){
+		s := &scripted{steps: []func(string) (*transfer.StatusResponse, error){
 			failure(&transfer.HTTPError{StatusCode: code, Path: "/loader/v1/status"}),
 			state(transfer.JobCompleted),
 		}}
@@ -253,10 +253,10 @@ func TestWaitForJob_PermanentRefusalEndsTheWait(t *testing.T) {
 func TestWaitForJob_CallerCancellation(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
-	s := &scripted{steps: []func(string) (*transfer.JobStatus, error){
-		func(jobID string) (*transfer.JobStatus, error) {
+	s := &scripted{steps: []func(string) (*transfer.StatusResponse, error){
+		func(jobID string) (*transfer.StatusResponse, error) {
 			cancel()
-			return &transfer.JobStatus{JobID: jobID, Status: transfer.JobRunning}, nil
+			return &transfer.StatusResponse{JobID: jobID, Status: transfer.JobRunning}, nil
 		},
 	}}
 	_, err := transfer.WaitForJob(ctx, s, &transfer.Receipt{JobID: "job-1"}, fastWait)
@@ -276,8 +276,8 @@ func TestWaitForJob_BadArguments(t *testing.T) {
 			t.Errorf("receipt %+v must be refused", r)
 		}
 	}
-	nilStatus := &scripted{steps: []func(string) (*transfer.JobStatus, error){
-		func(string) (*transfer.JobStatus, error) { return nil, nil },
+	nilStatus := &scripted{steps: []func(string) (*transfer.StatusResponse, error){
+		func(string) (*transfer.StatusResponse, error) { return nil, nil },
 	}}
 	if _, err := transfer.WaitForJob(t.Context(), nilStatus, &transfer.Receipt{JobID: "j"}, fastWait); err == nil {
 		t.Error("a client answering no status and no error must not be waited on forever")

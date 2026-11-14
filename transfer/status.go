@@ -33,9 +33,9 @@ func (s JobState) IsTerminal() bool {
 	return s == JobCompleted || s == JobFailed
 }
 
-// JobStatus is the decoded answer of loader.status: one job as the platform
+// StatusResponse is the decoded body of loader.status: one job as the platform
 // last recorded it.
-type JobStatus struct {
+type StatusResponse struct {
 	// JobID is the job's platform-issued id, the [Receipt.JobID] of its commit.
 	JobID string `json:"job_id"`
 
@@ -69,7 +69,7 @@ type StatusClient interface {
 	// Status returns the job's current status. The platform answers only the
 	// sidecar that committed the job; for any other job it answers as for a
 	// job it does not have.
-	Status(ctx context.Context, jobID string) (*JobStatus, error)
+	Status(ctx context.Context, jobID string) (*StatusResponse, error)
 }
 
 // Defaults for [WaitOptions].
@@ -144,7 +144,7 @@ var (
 // wait with that error: a 401, 403 or 404 would get the same answer again, and
 // the platform answers 500 for a job it does not have or that another sidecar
 // committed.
-func WaitForJob(ctx context.Context, client StatusClient, receipt *Receipt, opts WaitOptions) (*JobStatus, error) {
+func WaitForJob(ctx context.Context, client StatusClient, receipt *Receipt, opts WaitOptions) (*StatusResponse, error) {
 	if client == nil {
 		return nil, errors.New("transfer.WaitForJob: nil client")
 	}
@@ -159,7 +159,7 @@ func WaitForJob(ctx context.Context, client StatusClient, receipt *Receipt, opts
 	ticker := time.NewTicker(opts.PollInterval)
 	defer ticker.Stop()
 
-	var last *JobStatus
+	var last *StatusResponse
 	var lastErr error
 	for {
 		st, err := client.Status(waitCtx, jobID)
@@ -193,7 +193,7 @@ func WaitForJob(ctx context.Context, client StatusClient, receipt *Receipt, opts
 }
 
 // waitEnded is the error for a wait whose context ended before the job did.
-func waitEnded(parent context.Context, jobID string, timeout time.Duration, last *JobStatus, lastErr error) error {
+func waitEnded(parent context.Context, jobID string, timeout time.Duration, last *StatusResponse, lastErr error) error {
 	if err := parent.Err(); err != nil {
 		return fmt.Errorf("transfer.WaitForJob: job %s: %w", jobID, err)
 	}
