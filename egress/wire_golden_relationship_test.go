@@ -2,6 +2,7 @@ package egress
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -31,7 +32,12 @@ const sharedRelationshipSyncRequestJSON = `{
       "predicate": "feeds",
       "source": {
         "entity_id": "eq-1",
-        "entity_type": "brick:AHU",
+        "entity_type": "ex:Pump",
+        "type_ancestry": [
+          "ex:Pump",
+          "ex:Rotating_Equipment",
+          "Equipment"
+        ],
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-EQ-1"
@@ -39,7 +45,12 @@ const sharedRelationshipSyncRequestJSON = `{
       },
       "target": {
         "entity_id": "loc-1",
-        "entity_type": "rec:HVACZone",
+        "entity_type": "ex:Service_Zone",
+        "type_ancestry": [
+          "ex:Service_Zone",
+          "ex:Zone",
+          "Location"
+        ],
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-LOC-1"
@@ -58,7 +69,7 @@ const sharedRelationshipSyncRequestJSON = `{
       },
       "source": {
         "entity_id": "eq-2",
-        "entity_type": "brick:Fan",
+        "entity_type": "ex:Fan",
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-EQ-2"
@@ -66,7 +77,12 @@ const sharedRelationshipSyncRequestJSON = `{
       },
       "target": {
         "entity_id": "loc-1",
-        "entity_type": "rec:HVACZone",
+        "entity_type": "ex:Service_Zone",
+        "type_ancestry": [
+          "ex:Service_Zone",
+          "ex:Zone",
+          "Location"
+        ],
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-LOC-1"
@@ -88,12 +104,14 @@ func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 				ID:        "edge-1",
 				Predicate: "feeds",
 				Source: RelationshipEndpoint{
-					EntityID: "eq-1", EntityType: "brick:AHU",
-					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-EQ-1"},
+					EntityID: "eq-1", EntityType: "ex:Pump",
+					TypeAncestry: []string{"ex:Pump", "ex:Rotating_Equipment", "Equipment"},
+					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-EQ-1"},
 				},
 				Target: RelationshipEndpoint{
-					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
+					EntityID: "loc-1", EntityType: "ex:Service_Zone",
+					TypeAncestry: []string{"ex:Service_Zone", "ex:Zone", "Location"},
+					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
 				},
 				Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-REL-1"},
 			},
@@ -102,12 +120,13 @@ func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 				Predicate:  "feeds",
 				Properties: map[string]any{"flow_rate": "high"},
 				Source: RelationshipEndpoint{
-					EntityID: "eq-2", EntityType: "brick:Fan",
+					EntityID: "eq-2", EntityType: "ex:Fan",
 					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-EQ-2"},
 				},
 				Target: RelationshipEndpoint{
-					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
+					EntityID: "loc-1", EntityType: "ex:Service_Zone",
+					TypeAncestry: []string{"ex:Service_Zone", "ex:Zone", "Location"},
+					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
 				},
 			},
 		},
@@ -152,5 +171,33 @@ func TestRelationshipSyncRequest_DecodesTheSharedWire(t *testing.T) {
 	}
 	if edge2 := req.Relationships[1]; edge2.Correlation != nil {
 		t.Errorf("edge-2 own correlation = %+v, want nil (the create case)", edge2.Correlation)
+	}
+	// type_ancestry: present and leaf first where the ontology defines the class,
+	// absent (nil, never a one-element guess) where it does not (OGA-1252).
+	want := []string{"ex:Pump", "ex:Rotating_Equipment", "Equipment"}
+	if got := edge1.Source.TypeAncestry; !slices.Equal(got, want) {
+		t.Errorf("edge-1 source type_ancestry = %v, want %v", got, want)
+	}
+	if got := req.Relationships[1].Source.TypeAncestry; got != nil {
+		t.Errorf("edge-2 source type_ancestry = %v, want nil (the class the ontology does not define)", got)
+	}
+}
+
+// An endpoint whose class the ontology does not define must marshal WITHOUT the
+// type_ancestry key: absence is the one wire representation of "no ancestry",
+// so neither a nil nor an empty chain may serialize as [] or null (OGA-1252).
+func TestRelationshipEndpoint_AbsentTypeAncestryIsOmitted(t *testing.T) {
+	for _, ancestry := range [][]string{nil, {}} {
+		raw, err := json.Marshal(RelationshipEndpoint{EntityID: "a", EntityType: "X", TypeAncestry: ancestry})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, present := m["type_ancestry"]; present {
+			t.Errorf("an endpoint with type_ancestry %#v serialized the key: %s", ancestry, raw)
+		}
 	}
 }
