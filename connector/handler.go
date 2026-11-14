@@ -51,7 +51,9 @@ type SourceConnector interface {
 	// Sync runs one poll batch for a binding. The connector fetches changes
 	// since cursor and emits records through em (Entities and/or Timeseries),
 	// returning the next cursor. The server commits em.Entities for the kit
-	// after Sync returns — kit code MUST NOT call em.Entities.Close.
+	// after Sync returns — kit code MUST NOT call em.Entities.Close. Set
+	// SyncResult.WaitForCommit when the next page must not be committed
+	// before the platform has written this one.
 	//
 	// Only called for bindings whose Mode enables polling: on the binding's
 	// ticker, and when the platform asks for a drain now (POST /sync/{binding}).

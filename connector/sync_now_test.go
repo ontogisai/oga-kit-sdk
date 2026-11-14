@@ -561,3 +561,31 @@ func TestWaitDrains_RefusesNewDrainsAndWaitsForTheRunningOne(t *testing.T) {
 		t.Errorf("Sync calls = %d, want 1: no drain started after the gate closed", n)
 	}
 }
+
+// A page that set WaitForCommit is committed before its wait, so a failed wait
+// leaves a committed batch: the status lists its job and records the failure.
+func TestSyncStatus_AFailedCommitWaitStillListsTheCommittedBatch(t *testing.T) {
+	fc := &transfer.FakeCommitClient{}
+	fc.StatusFn = func(_ context.Context, jobID string) (*transfer.StatusResponse, error) {
+		return &transfer.StatusResponse{JobID: jobID, Status: transfer.JobFailed}, nil
+	}
+	impl := newPagedConnector(true)
+	s, _ := commitWaitServer(impl, fc, fastCommitWait)
+	srv := httptest.NewServer(s.mux())
+	defer srv.Close()
+	url := srv.URL + SyncPath("b")
+
+	if code, _ := syncRequest(t, http.MethodPost, url); code != http.StatusAccepted {
+		t.Fatalf("POST = %d, want 202", code)
+	}
+	st := waitFinished(t, url)
+	if st.Outcome != SyncFailed || !strings.Contains(st.Error, "wait for committed batch") {
+		t.Fatalf("status = %+v, want a drain failed by its commit wait", st)
+	}
+	if st.Batches != 1 || st.Records != 1 || len(st.JobIDs) != 1 || st.JobIDs[0] == "" {
+		t.Errorf("status = %+v, want page 1's committed batch and its job id", st)
+	}
+	if got := impl.syncedCursors(); len(got) != 1 {
+		t.Errorf("synced cursors = %q; the drain must stop at page 1", got)
+	}
+}
