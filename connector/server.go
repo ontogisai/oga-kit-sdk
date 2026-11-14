@@ -36,6 +36,19 @@ type Config struct {
 	// WriterFactory builds the per-batch entity writer. Required.
 	WriterFactory WriterFactory
 
+	// StatusClient reads the status of a committed batch's job, for a Sync
+	// that sets [SyncResult.WaitForCommit]. Pass the *transfer.HTTPCommitClient
+	// the WriterFactory's writers commit through. Required only by a
+	// connector that sets WaitForCommit; without it such a Sync fails.
+	StatusClient transfer.StatusClient
+
+	// CommitWait bounds the wait [SyncResult.WaitForCommit] asks for. Zero
+	// values take the transfer.WaitOptions defaults. Keep the default
+	// Timeout unless the platform's job bounds are known to be shorter: a
+	// timed-out page is committed again on the next tick, and if its first
+	// job is still writing, two jobs write the same records at once.
+	CommitWait transfer.WaitOptions
+
 	// Sink is the Tier-C timeseries emit surface. Optional; when nil, a
 	// connector that emits points fails loudly (no silent drop).
 	Sink TimeseriesSink
@@ -590,7 +603,8 @@ func (s *server) pollBinding(ctx context.Context, b Binding) {
 
 // drain runs Sync repeatedly to consume all immediately-available pages for a
 // binding, returning the advanced cursor. It stops at: ctx cancellation, a
-// Sync error (retry next tick from the unchanged cursor), HasMore=false, or —
+// Sync error, a failed commit or a failed commit wait (retry next tick from
+// the unchanged cursor), HasMore=false, or —
 // the runaway guard — HasMore=true without the cursor advancing (which would
 // otherwise spin a hot loop replaying the same page).
 func (s *server) drain(ctx context.Context, b Binding, cursor string) string {
@@ -641,7 +655,9 @@ func (s *server) discardUncommitted(w transfer.Writer, b Binding) {
 // On error the writer is dropped (no commit), so a partial batch is never
 // persisted and the next poll retries from the unchanged cursor. When Sync
 // emits no entity records the writer is dropped too — a no-change poll must
-// never commit an empty artifact. A dropped writer is discarded.
+// never commit an empty artifact. A dropped writer is discarded. A Sync that
+// set WaitForCommit returns only once its batch's job has finished; a failed
+// or timed-out wait is an error, like a failed commit.
 func (s *server) runSync(ctx context.Context, b Binding, cursor string) (*SyncResult, error) {
 	w, err := s.cfg.WriterFactory(ctx, b)
 	if err != nil {
@@ -656,10 +672,44 @@ func (s *server) runSync(ctx context.Context, b Binding, cursor string) (*SyncRe
 	if cw.n == 0 {
 		return res, nil // nothing emitted — no empty commit
 	}
-	if _, cerr := w.Close(ctx); cerr != nil {
+	wait := res != nil && res.WaitForCommit
+	if wait && s.cfg.StatusClient == nil {
+		// Refused before the commit, so the batch is not committed again on
+		// every tick only to fail here.
+		return nil, errors.New("SyncResult.WaitForCommit is set but Config.StatusClient is nil")
+	}
+	receipt, cerr := w.Close(ctx)
+	if cerr != nil {
 		return nil, fmt.Errorf("commit batch: %w", cerr)
 	}
+	if wait {
+		if err := s.waitForCommit(ctx, b, receipt); err != nil {
+			return nil, err
+		}
+	}
 	return res, nil
+}
+
+// waitForCommit waits for the job of a batch committed by a Sync that set
+// WaitForCommit, and logs the job id and how long the wait took. An error
+// fails the Sync, so the drain keeps the cursor and the next poll tick runs
+// the page again.
+func (s *server) waitForCommit(ctx context.Context, b Binding, receipt *transfer.Receipt) error {
+	jobID := ""
+	if receipt != nil {
+		jobID = receipt.JobID
+	}
+	start := time.Now()
+	_, err := transfer.WaitForJob(ctx, s.cfg.StatusClient, receipt, s.cfg.CommitWait)
+	waitMS := time.Since(start).Milliseconds()
+	if err != nil {
+		s.cfg.Logger.Warn("source connector: waiting for a committed batch failed",
+			"binding", b.ID, "job_id", jobID, "wait_ms", waitMS, "error", err)
+		return fmt.Errorf("wait for committed batch: %w", err)
+	}
+	s.cfg.Logger.Info("source connector waited for a committed batch",
+		"binding", b.ID, "job_id", jobID, "wait_ms", waitMS)
+	return nil
 }
 
 func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {

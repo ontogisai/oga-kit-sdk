@@ -164,9 +164,25 @@ Close()           │   loader.prepare_upload  ────►  (issues presigne
 Returns:  receipt (job_id, content_hash, mode)
 ```
 
-`transfer.HTTPCommitClient` sends each operation to the Platform Gateway as `POST /loader/v1/{prepare_upload|complete}`, with the operation's arguments as the JSON body and the sidecar's workload token as the bearer. A 2xx body is the result; any status of 400 or more is returned as a `*transfer.HTTPError` carrying the body as the platform answered: the loader endpoint's structured error payload when the operation ran, or the gateway's own refusal (unauthorized, `tool_not_allowed`, a rate limit, an open circuit) when it did not. The body is read up to 64 KiB, and the error's text quotes at most 512 bytes of it, so log the error rather than its `Body` field. Releases before v0.102.0-beta sent the operations as tool calls to `/mcp/tools/call`; the gateway still accepts that shape from older images for a transition period. A gateway that predates the loader route answers v0.102.0-beta and later with 404, so roll the platform out before images built on this release.
+`transfer.HTTPCommitClient` sends each operation to the Platform Gateway as `POST /loader/v1/{prepare_upload|complete|status}`, with the operation's arguments as the JSON body and the sidecar's workload token as the bearer. A 2xx body is the result; any status of 400 or more is returned as a `*transfer.HTTPError` carrying the body as the platform answered: the loader endpoint's structured error payload when the operation ran, or the gateway's own refusal (unauthorized, `tool_not_allowed`, a rate limit, an open circuit) when it did not. The body is read up to 64 KiB, and the error's text quotes at most 512 bytes of it, so log the error rather than its `Body` field. Releases before v0.102.0-beta sent the operations as tool calls to `/mcp/tools/call`; the gateway still accepts that shape from older images for a transition period. A gateway that predates the loader route answers v0.102.0-beta and later with 404, so roll the platform out before images built on this release.
 
 The platform owns the job ledger; both ontology and data loads are uniformly async. The kit's caller (the install workflow for ontology, the import workflow for data) polls `loader.status` until terminal.
+
+The platform writes each committed artifact on its own, in no order relative to the sidecar's other artifacts. When one artifact must be written before the next is sent, for example the parents the next artifact's edges point at, wait for its job:
+
+```go
+receipt, err := parents.Close(ctx)
+if err != nil {
+    return err
+}
+// cc is the *transfer.HTTPCommitClient the writers commit through.
+if _, err := transfer.WaitForJob(ctx, cc, receipt, transfer.WaitOptions{}); err != nil {
+    return err // the job failed (transfer.ErrJobFailed) or did not finish in time (transfer.ErrJobWaitTimeout)
+}
+// Now write and Close the children.
+```
+
+`WaitForJob` asks `loader.status` at once and then every second (`WaitOptions.PollInterval`), for up to 45 minutes (`WaitOptions.Timeout`), the longest a job can take with the platform's default bounds. A status call refused with `429`, `502`, `503` or `504`, or one that never reached the platform, is asked again; any other refusal ends the wait, a `500` included, which the platform answers for a job it does not have. The platform answers a job's status only to the sidecar that committed it. Nothing waits unless the kit calls it. A source connector asks for the same wait per page with `SyncResult.WaitForCommit` ([Ordering pages](#ordering-pages-wait-for-a-commit)).
 
 ### Full-snapshot feeds: asserting edge completeness
 
@@ -412,6 +428,23 @@ source_connectors:
 // silently 404s every delivery.
 b.Mode = connector.ModeFromStrings(spec.Modes)
 ```
+
+### Ordering pages: wait for a commit
+
+The server commits each page's batch as Sync returns it, and the platform writes the batches in no order relative to each other. When a later page depends on an earlier one, such as rooms whose edges point at the sites of the page before, set `WaitForCommit` on the earlier page:
+
+```go
+cfg := &connector.Config{
+    Port:          port,
+    WriterFactory: factory,
+    StatusClient:  cc, // the *transfer.HTTPCommitClient the factory's writers commit through
+}
+
+// In Sync, on the sites page:
+return &connector.SyncResult{NextCursor: next, HasMore: true, WaitForCommit: true}, nil
+```
+
+The server then waits for that batch's job to finish before it calls Sync for the next page, and logs the job id and how long it waited. A failed job, a wait past `CommitWait.Timeout`, or a missing `StatusClient` fails the Sync as a failed commit does: the cursor does not advance, and the next poll tick runs the page again. A page whose job fails on every attempt therefore holds the binding at that page, so set the flag only where the next pages must not be sent without it. Keep `CommitWait`'s default timeout: a page that timed out is committed again, and if its first job is still writing, two jobs write the same records at once. A page that emitted nothing commits nothing and waits for nothing; pages without the flag are not waited on. Webhook deliveries are unaffected.
 
 ### Webhook processing: sync (default) or async
 
@@ -735,7 +768,7 @@ MCP servers nothing.
 
 ## Test with mocks
 
-`transfer.FakeCommitClient` records every prepare / put / complete call so kit tests can assert on the artifact body, transport mode, and request shape without standing up a gateway:
+`transfer.FakeCommitClient` records every prepare / put / complete call so kit tests can assert on the artifact body, transport mode, and request shape without standing up a gateway. It also answers `Status`, so it can stand in for the client of `transfer.WaitForJob` and `connector.Config.StatusClient`: a job it minted is completed, unless `StatusFn` answers otherwise.
 
 ```go
 fc := &transfer.FakeCommitClient{}

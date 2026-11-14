@@ -19,11 +19,12 @@
 //     (≤ [InlineBodyLimit] bytes). Returns a platform-issued job_id
 //     immediately. Both ontology and data flavors are async.
 //
-//   - loader.status — polled by the platform's install / import
-//     workflow until the job reaches a terminal state. Loader sidecars
-//     do not poll — the writer's [Writer.Close] returns the moment the
-//     bytes are committed, the platform-side processing happens out of
-//     band.
+//   - loader.status — reports a job's state ([HTTPCommitClient.Status]).
+//     The writer's [Writer.Close] returns the moment the bytes are
+//     committed, and the platform processes the artifact out of band,
+//     each artifact on its own and in no order relative to the others.
+//     A kit that needs one artifact written before it sends the next
+//     waits for the first one's job with [WaitForJob].
 //
 // # Single-pass vs multi-pass
 //
