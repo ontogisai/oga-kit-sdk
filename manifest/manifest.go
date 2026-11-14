@@ -570,13 +570,11 @@ type KitPolicySpec struct {
 	//
 	// TargetEntityTypes also covers subclasses (platform OGA-1252): the policy
 	// applies to a resource whose class, or an ancestor of it in the tenant's
-	// ontology of record, is listed, so a policy on a camera class covers the
-	// camera subclasses a source adds later. A class the ontology does not
-	// define, and a non-KG resource such as "agent", matches by exact name. A
-	// hybrid kit's loader parents a class under the functional type, not the
-	// anchor root (brick:AHU → brick:HVAC_Equipment → Equipment, never
-	// brick:Equipment), so a policy on brick:Equipment reaches no descendant and
-	// one on Equipment covers that subtree.
+	// ontology of record, is listed. The ancestors are the parent_type chain the
+	// ontology states, so a policy covers exactly the classes the ontology places
+	// below the one it names, including classes added after the kit was
+	// released. A class the ontology does not define, and a non-KG resource such
+	// as "agent", matches by exact name.
 	TargetRoles       []string `yaml:"target_roles,omitempty"`
 	TargetAgentIDs    []string `yaml:"target_agent_ids,omitempty"`
 	TargetEntityTypes []string `yaml:"target_entity_types,omitempty"`

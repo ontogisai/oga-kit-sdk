@@ -32,10 +32,10 @@ const sharedRelationshipSyncRequestJSON = `{
       "predicate": "feeds",
       "source": {
         "entity_id": "eq-1",
-        "entity_type": "brick:AHU",
+        "entity_type": "ex:Pump",
         "type_ancestry": [
-          "brick:AHU",
-          "brick:HVAC_Equipment",
+          "ex:Pump",
+          "ex:Rotating_Equipment",
           "Equipment"
         ],
         "correlation": {
@@ -45,10 +45,10 @@ const sharedRelationshipSyncRequestJSON = `{
       },
       "target": {
         "entity_id": "loc-1",
-        "entity_type": "rec:HVACZone",
+        "entity_type": "ex:Service_Zone",
         "type_ancestry": [
-          "rec:HVACZone",
-          "rec:Zone",
+          "ex:Service_Zone",
+          "ex:Zone",
           "Location"
         ],
         "correlation": {
@@ -69,7 +69,7 @@ const sharedRelationshipSyncRequestJSON = `{
       },
       "source": {
         "entity_id": "eq-2",
-        "entity_type": "brick:Fan",
+        "entity_type": "ex:Fan",
         "correlation": {
           "external_system": "ext-system",
           "external_record_id": "EXT-EQ-2"
@@ -77,10 +77,10 @@ const sharedRelationshipSyncRequestJSON = `{
       },
       "target": {
         "entity_id": "loc-1",
-        "entity_type": "rec:HVACZone",
+        "entity_type": "ex:Service_Zone",
         "type_ancestry": [
-          "rec:HVACZone",
-          "rec:Zone",
+          "ex:Service_Zone",
+          "ex:Zone",
           "Location"
         ],
         "correlation": {
@@ -104,13 +104,13 @@ func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 				ID:        "edge-1",
 				Predicate: "feeds",
 				Source: RelationshipEndpoint{
-					EntityID: "eq-1", EntityType: "brick:AHU",
-					TypeAncestry: []string{"brick:AHU", "brick:HVAC_Equipment", "Equipment"},
+					EntityID: "eq-1", EntityType: "ex:Pump",
+					TypeAncestry: []string{"ex:Pump", "ex:Rotating_Equipment", "Equipment"},
 					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-EQ-1"},
 				},
 				Target: RelationshipEndpoint{
-					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					TypeAncestry: []string{"rec:HVACZone", "rec:Zone", "Location"},
+					EntityID: "loc-1", EntityType: "ex:Service_Zone",
+					TypeAncestry: []string{"ex:Service_Zone", "ex:Zone", "Location"},
 					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
 				},
 				Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-REL-1"},
@@ -120,12 +120,12 @@ func sharedRelationshipSyncRequestFixture() *RelationshipSyncRequest {
 				Predicate:  "feeds",
 				Properties: map[string]any{"flow_rate": "high"},
 				Source: RelationshipEndpoint{
-					EntityID: "eq-2", EntityType: "brick:Fan",
+					EntityID: "eq-2", EntityType: "ex:Fan",
 					Correlation: &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-EQ-2"},
 				},
 				Target: RelationshipEndpoint{
-					EntityID: "loc-1", EntityType: "rec:HVACZone",
-					TypeAncestry: []string{"rec:HVACZone", "rec:Zone", "Location"},
+					EntityID: "loc-1", EntityType: "ex:Service_Zone",
+					TypeAncestry: []string{"ex:Service_Zone", "ex:Zone", "Location"},
 					Correlation:  &Correlation{ExternalSystem: "ext-system", ExternalRecordID: "EXT-LOC-1"},
 				},
 			},
@@ -174,7 +174,7 @@ func TestRelationshipSyncRequest_DecodesTheSharedWire(t *testing.T) {
 	}
 	// type_ancestry: present and leaf first where the ontology defines the class,
 	// absent (nil, never a one-element guess) where it does not (OGA-1252).
-	want := []string{"brick:AHU", "brick:HVAC_Equipment", "Equipment"}
+	want := []string{"ex:Pump", "ex:Rotating_Equipment", "Equipment"}
 	if got := edge1.Source.TypeAncestry; !slices.Equal(got, want) {
 		t.Errorf("edge-1 source type_ancestry = %v, want %v", got, want)
 	}
