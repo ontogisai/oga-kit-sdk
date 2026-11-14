@@ -84,6 +84,11 @@ type KitSpec struct {
 	// emits via the transfer contract.
 	SourceConnectors []SourceConnectorSpec `yaml:"source_connectors,omitempty"`
 
+	// Loaders declares the kit's loader sidecars: kind=ontology loaders that
+	// register types at install, and kind=data loaders an operator's import
+	// runs. Each names the source system its records come from.
+	Loaders []LoaderSpec `yaml:"loaders,omitempty"`
+
 	// EgressSyncs declares egress-sync components the platform deploys as
 	// sidecars at install time and then DRIVES (kg-egress-sync): a resumable
 	// Day-1 bulk push of the declared entity types plus continuous Day-2 change
@@ -449,6 +454,45 @@ type SidecarResourceSpec struct {
 	CPUMilli int `yaml:"cpu_milli,omitempty"`
 }
 
+// LoaderKind is a loader's role: LoaderKindOntology or LoaderKindData (the
+// default when a manifest leaves kind out).
+type LoaderKind string
+
+const (
+	// LoaderKindOntology registers entity and relationship types at install.
+	LoaderKindOntology LoaderKind = "ontology"
+	// LoaderKindData ingests records when an operator's import runs it.
+	LoaderKindData LoaderKind = "data"
+)
+
+// LoaderSpec is one loader sidecar. It mirrors the platform's
+// domainkit.LoaderSpec field for field, so a kit author gets the same parse
+// result locally as at install.
+type LoaderSpec struct {
+	// Name is the loader's name within the kit.
+	Name string `yaml:"name"`
+	// Kind is the loader's role; empty means data.
+	Kind LoaderKind `yaml:"kind,omitempty"`
+	// Description is a plain string or a locale map.
+	Description any `yaml:"description,omitempty"`
+	// Container holds the image, port, resources and env.
+	Container SidecarContainerSpec `yaml:"container,omitempty"`
+	// ExternalSystem names the source system the loader's records or types come
+	// from. Required: the platform owns what the loader writes as
+	// {kit}/{external_system} (record ownership). A loader and a source
+	// connector fed by the same source declare the same value.
+	ExternalSystem string `yaml:"external_system"`
+	// Format and Formats name the data formats the loader reads.
+	Format  string   `yaml:"format,omitempty"`
+	Formats []string `yaml:"formats,omitempty"`
+	// DataPath is the kit-relative file an ontology loader reads at install.
+	DataPath string `yaml:"data_path,omitempty"`
+	// OntologyTypesFile lists the type names an ontology loader registers.
+	OntologyTypesFile string `yaml:"ontology_types_file,omitempty"`
+	// GovernedPredicatesFile lists the predicates a data loader's feed owns.
+	GovernedPredicatesFile string `yaml:"governed_predicates_file,omitempty"`
+}
+
 // SourceBindingSpec is one (external_system, source_type) feed of a connector.
 type SourceBindingSpec struct {
 	// ID is the connector-unique binding identifier (stable; used in the
@@ -669,6 +713,9 @@ func Validate(m *KitManifest) error {
 		return err
 	}
 	if err := validateSourceConnectors(m.Spec.SourceConnectors); err != nil {
+		return err
+	}
+	if err := validateLoaders(m.Spec.Loaders); err != nil {
 		return err
 	}
 	if err := validateEgressSyncs(m.Spec.EgressSyncs); err != nil {
@@ -918,6 +965,7 @@ func validateSourceConnectors(conns []SourceConnectorSpec) error {
 			return fmt.Errorf("spec.source_connectors[%d]: at least one binding is required", i)
 		}
 		seenBind := make(map[string]int, len(c.Bindings))
+		system := ""
 		for j := range c.Bindings {
 			b := &c.Bindings[j]
 			if b.ID == "" {
@@ -930,8 +978,19 @@ func validateSourceConnectors(conns []SourceConnectorSpec) error {
 				)
 			}
 			seenBind[b.ID] = j
-			if b.ExternalSystem == "" {
+			if strings.TrimSpace(b.ExternalSystem) == "" {
 				return fmt.Errorf("spec.source_connectors[%d].bindings[%d]: external_system is required", i, j)
+			}
+			// One connector is one source system: the platform owns what it
+			// writes as {kit}/{external_system}, so two would leave its records
+			// with no single owner.
+			if bs := strings.TrimSpace(b.ExternalSystem); system == "" {
+				system = bs
+			} else if bs != system {
+				return fmt.Errorf(
+					"spec.source_connectors[%d].bindings[%d]: external_system = %q, but the connector's other bindings name %q; a connector serves one source system",
+					i, j, strings.TrimSpace(b.ExternalSystem), system,
+				)
 			}
 			if b.SourceType == "" {
 				return fmt.Errorf("spec.source_connectors[%d].bindings[%d]: source_type is required", i, j)
@@ -944,6 +1003,17 @@ func validateSourceConnectors(conns []SourceConnectorSpec) error {
 					)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// validateLoaders checks that each loader names the source system it writes
+// for, as the platform's install and upgrade do (record ownership).
+func validateLoaders(loaders []LoaderSpec) error {
+	for i := range loaders {
+		if strings.TrimSpace(loaders[i].ExternalSystem) == "" {
+			return fmt.Errorf("spec.loaders[%d] (%s): external_system is required", i, loaders[i].Name)
 		}
 	}
 	return nil
