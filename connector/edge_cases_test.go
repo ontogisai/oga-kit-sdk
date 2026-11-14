@@ -64,7 +64,7 @@ func TestRunSync_EmptyEmitSkipsCommit(t *testing.T) {
 	}
 	s := newTestServer(fc, func(context.Context, Binding) (transfer.Writer, error) { return fw, nil })
 
-	res, err := s.runSync(t.Context(), fc.bindings[0], "")
+	res, _, err := s.runSync(t.Context(), fc.bindings[0], "")
 	if err != nil {
 		t.Fatalf("runSync: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestDrain_MultiPageAdvancing(t *testing.T) {
 		},
 	}
 	s := newTestServer(fc, factory)
-	final := s.drain(t.Context(), fc.bindings[0], "")
+	final, _ := s.drain(t.Context(), fc.bindings[0], "", nil)
 	if final != "c3" {
 		t.Errorf("final cursor = %q, want c3", final)
 	}
@@ -145,9 +145,12 @@ func TestDrain_NoAdvanceHasMoreStops(t *testing.T) {
 		},
 	}
 	s := newTestServer(fc, factory)
-	final := s.drain(t.Context(), fc.bindings[0], "")
+	final, err := s.drain(t.Context(), fc.bindings[0], "", nil)
 	if calls != 1 {
 		t.Errorf("calls = %d, want 1 (runaway guard must stop a no-advance HasMore loop)", calls)
+	}
+	if !errors.Is(err, errCursorNotAdvanced) {
+		t.Errorf("err = %v, want errCursorNotAdvanced: a stopped drain is a failed drain", err)
 	}
 	if final != "" {
 		t.Errorf("final cursor = %q, want empty", final)
@@ -165,7 +168,7 @@ func TestDrain_StopsOnError(t *testing.T) {
 		},
 	}
 	s := newTestServer(fc, factory)
-	final := s.drain(t.Context(), fc.bindings[0], "c-prev")
+	final, _ := s.drain(t.Context(), fc.bindings[0], "c-prev", nil)
 	if calls != 1 {
 		t.Errorf("calls = %d, want 1", calls)
 	}

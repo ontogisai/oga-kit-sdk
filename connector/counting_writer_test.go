@@ -55,7 +55,7 @@ func TestRunSync_RelationshipTypesOnlyIsCommitted(t *testing.T) {
 		},
 	}
 	s := newTestServer(fc, func(context.Context, Binding) (transfer.Writer, error) { return dw, nil })
-	if _, err := s.runSync(t.Context(), fc.bindings[0], ""); err != nil {
+	if _, _, err := s.runSync(t.Context(), fc.bindings[0], ""); err != nil {
 		t.Fatalf("runSync: %v", err)
 	}
 	if !dw.closed || dw.released {

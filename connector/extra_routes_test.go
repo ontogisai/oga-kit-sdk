@@ -84,6 +84,9 @@ func TestExtraRoutes_RejectsReservedPathCollision(t *testing.T) {
 		"POST " + PathTestConnection,
 		"/webhook/{binding}",
 		"POST /webhook/{binding}",
+		PathSync,
+		"POST " + PathSync,
+		"GET " + PathSync,
 		"  GET   /healthz  ", // whitespace must not defeat the guard
 	} {
 		err := validateExtraRoutes(map[string]http.Handler{pattern: okHandler("x")})

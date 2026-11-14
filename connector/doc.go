@@ -24,7 +24,8 @@
 //	connector.ListenAndServe(ctx, cfg, c)
 //
 // The server runs one poll loop per binding, serves the internal webhook and
-// health endpoints, constructs a fresh [transfer.Writer] for each batch, and
+// health endpoints and a poll binding's sync now ([PathSync]: drain now, and
+// the latest drain's status), constructs a fresh [transfer.Writer] for each batch, and
 // commits (closes) it for the kit after Sync / HandleWebhook returns — the kit
 // never calls Close itself, exactly as in the loader SDK.
 //

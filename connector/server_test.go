@@ -73,6 +73,7 @@ func newTestServer(impl SourceConnector, factory WriterFactory) *server {
 	for _, b := range impl.Bindings(context.Background()) {
 		s.bindings[b.ID] = b
 	}
+	s.polls = newPollRuns(s.bindings)
 	return s
 }
 
@@ -92,7 +93,7 @@ func TestRunSync_SuccessCommitsBatch(t *testing.T) {
 	}
 	s := newTestServer(fc, func(context.Context, Binding) (transfer.Writer, error) { return fw, nil })
 
-	res, err := s.runSync(t.Context(), fc.bindings[0], "c1")
+	res, _, err := s.runSync(t.Context(), fc.bindings[0], "c1")
 	if err != nil {
 		t.Fatalf("runSync: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestRunSync_ErrorDropsBatch(t *testing.T) {
 	}
 	s := newTestServer(fc, func(context.Context, Binding) (transfer.Writer, error) { return fw, nil })
 
-	if _, err := s.runSync(t.Context(), fc.bindings[0], "c1"); err == nil {
+	if _, _, err := s.runSync(t.Context(), fc.bindings[0], "c1"); err == nil {
 		t.Fatal("expected error")
 	}
 	if fw.closed {
