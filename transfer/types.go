@@ -64,8 +64,9 @@ const (
 // about JobID (so it can include it in the LoadResponse stats); the
 // other fields are useful for tests and observability.
 type Receipt struct {
-	// JobID is the platform-issued identifier the install / import
-	// workflow polls via loader.status until terminal.
+	// JobID is the platform-issued identifier loader.status reports on:
+	// the install / import workflow polls it until terminal, and
+	// [WaitForJob] waits on it.
 	JobID string
 
 	// ContentHash is the sha256 of the encoded artifact body that the

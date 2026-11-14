@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ontogisai/oga-kit-sdk/internal/redact"
 	"github.com/ontogisai/oga-kit-sdk/kitlog"
 	"github.com/ontogisai/oga-kit-sdk/outcomereport"
 	"github.com/ontogisai/oga-kit-sdk/transfer"
@@ -35,6 +37,19 @@ type Config struct {
 
 	// WriterFactory builds the per-batch entity writer. Required.
 	WriterFactory WriterFactory
+
+	// StatusClient reads the status of a committed batch's job, for a Sync
+	// that sets [SyncResult.WaitForCommit]. Pass the *transfer.HTTPCommitClient
+	// the WriterFactory's writers commit through. Required only by a
+	// connector that sets WaitForCommit; without it such a Sync fails.
+	StatusClient transfer.StatusClient
+
+	// CommitWait bounds the wait [SyncResult.WaitForCommit] asks for. Zero
+	// values take the transfer.WaitOptions defaults. Keep the default
+	// Timeout unless the platform's job bounds are known to be shorter: a
+	// timed-out page is committed again on the next tick, and if its first
+	// job is still writing, two jobs write the same records at once.
+	CommitWait transfer.WaitOptions
 
 	// Sink is the Tier-C timeseries emit surface. Optional; when nil, a
 	// connector that emits points fails loudly (no silent drop).
@@ -102,13 +117,14 @@ type Config struct {
 	// drifted from what the platform ingress actually posts to.
 	//
 	// A pattern that collides with a reserved contract path (the webhook,
-	// health, livez and test-connection routes) is refused at startup, naming
+	// sync, health, livez and test-connection routes) is refused at startup, naming
 	// the path: ServeMux panics on a duplicate registration, and a kit must not
 	// be able to shadow a route the platform probes.
 	ExtraRoutes map[string]http.Handler
 
 	// PollInterval is the cadence between poll batches per binding.
-	// Default 30s. Bindings with no poll mode are not polled.
+	// Default 30s. Bindings with no poll mode are not polled. POST
+	// /connector/sync/{binding} drains a poll binding between ticks (sync_now.go).
 	PollInterval time.Duration
 
 	// Logger for lifecycle messages. Defaults to kitlog.Default() (the
@@ -204,9 +220,9 @@ func (c *Config) defaults() {
 
 // ListenAndServe runs a Source Connector: it binds the HTTP listener, calls
 // Connect, starts one poll loop per poll-enabled binding, serves the internal
-// webhook + health + livez endpoints, and blocks until ctx is cancelled or
-// SIGTERM/SIGINT arrives, then drains poll loops and shuts the HTTP server
-// down gracefully.
+// webhook + sync-now + health + livez endpoints, and blocks until ctx is
+// cancelled or SIGTERM/SIGINT arrives, then drains poll loops and shuts the
+// HTTP server down gracefully.
 //
 // Connect is called AFTER the listener is up (OGA-874). A Connect failure is
 // logged and left for the connector's own Health(ctx) to reflect — it no
@@ -256,6 +272,8 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 		return berr
 	}
 	s.bindings = byID
+	s.polls = newPollRuns(byID)
+	s.runCtx = runCtx
 
 	// Set BEFORE the listener starts accepting, so there is no instant at which
 	// a webhook delivery could be processed ahead of the initial Connect attempt.
@@ -342,12 +360,15 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 	case err := <-serveErr:
 		cancel()
 		wg.Wait()
+		s.waitDrains()
 		return err
 	}
 
-	// Drain: stop poll loops, then shut the HTTP server down.
+	// Drain: stop poll loops and sync-now drains (both run on runCtx, cancelled
+	// here, so each stops at its next page), then shut the HTTP server down.
 	cancel()
 	wg.Wait()
+	s.waitDrains()
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer scancel()
@@ -381,6 +402,17 @@ type server struct {
 	impl     SourceConnector
 	sink     TimeseriesSink
 	bindings map[string]Binding
+
+	// polls holds each poll-enabled binding's drain state: its cursor, whether a
+	// drain is running, and the latest drain's status (sync_now.go).
+	polls map[string]*pollRun
+	// runCtx is the server's lifetime context, which a sync-now drain runs on.
+	// drains tracks those drains so shutdown can wait for them; drainsMu and
+	// drainsClosed gate their start, so none starts once the wait has begun.
+	runCtx       context.Context
+	drains       sync.WaitGroup
+	drainsMu     sync.Mutex
+	drainsClosed bool
 
 	// connectPending is true from the moment ListenAndServe binds the listener
 	// until the initial Connect attempt has COMPLETED (whether it succeeded or
@@ -501,6 +533,7 @@ const (
 // platform's side while looking fine in the kit.
 var reservedPaths = map[string]bool{
 	"/webhook/{binding}": true,
+	PathSync:             true,
 	"/healthz":           true,
 	PathLivez:            true,
 	PathTestConnection:   true,
@@ -519,6 +552,42 @@ func patternPath(pattern string) string {
 	return p
 }
 
+// isReservedPath reports whether a kit pattern's path p touches a reserved
+// contract path: a reserved path would match it, segment by segment, with a
+// wildcard matching any one non-empty segment. That covers the same route under
+// another wildcard name ("/connector/sync/{id}", which ServeMux refuses to
+// register beside "/connector/sync/{binding}") and a literal one
+// ("/connector/sync/status", which ServeMux would route to the kit instead of
+// to that binding's status).
+func isReservedPath(p string) bool {
+	for r := range reservedPaths {
+		if pathMatches(r, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathMatches reports whether the ServeMux path pattern matches p segment by
+// segment. A {name} wildcard matches any one non-empty segment; the {$} anchor
+// and literal segments must be equal.
+func pathMatches(pattern, p string) bool {
+	ps, qs := strings.Split(pattern, "/"), strings.Split(p, "/")
+	if len(ps) != len(qs) {
+		return false
+	}
+	for i, seg := range ps {
+		wildcard := len(seg) > 2 && seg[0] == '{' && seg[len(seg)-1] == '}' && seg != "{$}"
+		if wildcard && qs[i] != "" {
+			continue
+		}
+		if seg != qs[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // validateExtraRoutes rejects a kit route that is unusable or that would shadow
 // a reserved contract path. ListenAndServe calls this BEFORE building the mux,
 // because http.ServeMux PANICS on a duplicate registration — a collision has to
@@ -531,7 +600,7 @@ func validateExtraRoutes(routes map[string]http.Handler) error {
 		if h == nil {
 			return fmt.Errorf("connector: ExtraRoutes[%q] has a nil handler", pattern)
 		}
-		if p := patternPath(pattern); reservedPaths[p] {
+		if p := patternPath(pattern); isReservedPath(p) {
 			return fmt.Errorf(
 				"connector: ExtraRoutes[%q] collides with the reserved contract path %q — "+
 					"the platform probes and delivers to that route, so a kit must not shadow it",
@@ -545,6 +614,8 @@ func (s *server) mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/{binding}", s.handleWebhook)
 	mux.HandleFunc("GET /webhook/{binding}", s.handleWebhookValidate)
+	mux.HandleFunc("POST "+PathSync, s.handleSyncNow)
+	mux.HandleFunc("GET "+PathSync, s.handleSyncStatus)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET "+PathLivez, s.handleLivez)
 	mux.HandleFunc("POST "+PathTestConnection, s.handleTestConnection)
@@ -573,13 +644,14 @@ func (s *server) mux() http.Handler {
 	return mux
 }
 
-// pollBinding runs the poll loop for one binding until ctx is cancelled.
+// pollBinding runs the poll loop for one binding until ctx is cancelled. The
+// binding's cursor and drain status live in its pollRun, which it shares with
+// POST /connector/sync/{binding} (sync_now.go).
 func (s *server) pollBinding(ctx context.Context, b Binding) {
-	cursor := ""
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
-		cursor = s.drain(ctx, b, cursor)
+		s.drainIfIdle(ctx, b, SyncTriggerPoll)
 		select {
 		case <-ctx.Done():
 			return
@@ -590,33 +662,59 @@ func (s *server) pollBinding(ctx context.Context, b Binding) {
 
 // drain runs Sync repeatedly to consume all immediately-available pages for a
 // binding, returning the advanced cursor. It stops at: ctx cancellation, a
-// Sync error (retry next tick from the unchanged cursor), HasMore=false, or —
-// the runaway guard — HasMore=true without the cursor advancing (which would
-// otherwise spin a hot loop replaying the same page).
-func (s *server) drain(ctx context.Context, b Binding, cursor string) string {
+// Sync error, a failed commit or a failed commit wait (the next drain retries
+// from the unchanged cursor), HasMore=false, or — the runaway guard —
+// HasMore=true without the cursor advancing (which would otherwise spin a hot
+// loop replaying the same page). Every stop but HasMore=false returns an error.
+//
+// onCommit, when set, is called with each committed batch's job id and record
+// count, including a batch whose commit wait then failed.
+func (s *server) drain(ctx context.Context, b Binding, cursor string, onCommit func(jobID string, records int)) (string, error) {
 	for {
-		if ctx.Err() != nil {
-			return cursor
+		if err := ctx.Err(); err != nil {
+			return cursor, err
 		}
-		res, err := s.runSync(ctx, b, cursor)
+		res, batch, err := s.runSync(ctx, b, cursor)
+		if batch.records > 0 && onCommit != nil {
+			onCommit(batch.jobID, batch.records)
+		}
 		if err != nil {
+			err = withoutURLSecrets(err)
 			s.cfg.Logger.Warn("source connector sync failed",
 				"binding", b.ID, "source_type", b.SourceType, "error", err)
-			return cursor // retry on next tick from the same cursor
+			return cursor, err // retry on next drain from the same cursor
 		}
 		advanced := res != nil && res.NextCursor != "" && res.NextCursor != cursor
 		if res != nil && res.NextCursor != "" {
 			cursor = res.NextCursor
 		}
 		if res == nil || !res.HasMore {
-			return cursor
+			return cursor, nil
 		}
 		if !advanced {
 			s.cfg.Logger.Warn("source connector reported HasMore without advancing cursor; stopping drain",
 				"binding", b.ID, "source_type", b.SourceType)
-			return cursor
+			return cursor, errCursorNotAdvanced
 		}
 	}
+}
+
+// withoutURLSecrets rewrites the URL of a *url.Error in err's chain to its
+// location only (no userinfo, query or fragment). A transport error's text
+// quotes the whole URL, a query string can be a credential, and a drain's error
+// reaches the log and the binding's sync status.
+func withoutURLSecrets(err error) error {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		return redact.ScrubURLError(err, ue.URL)
+	}
+	return err
+}
+
+// committedBatch is what one runSync committed: zero records when the page
+// wrote nothing and no commit was made.
+type committedBatch struct {
+	jobID   string
+	records int
 }
 
 // discardUncommitted releases a writer the server will not commit. Every
@@ -641,25 +739,66 @@ func (s *server) discardUncommitted(w transfer.Writer, b Binding) {
 // On error the writer is dropped (no commit), so a partial batch is never
 // persisted and the next poll retries from the unchanged cursor. When Sync
 // emits no entity records the writer is dropped too — a no-change poll must
-// never commit an empty artifact. A dropped writer is discarded.
-func (s *server) runSync(ctx context.Context, b Binding, cursor string) (*SyncResult, error) {
+// never commit an empty artifact. A dropped writer is discarded. A Sync that
+// set WaitForCommit returns only once its batch's job has finished; a failed
+// or timed-out wait is an error, like a failed commit, but the batch was
+// committed, so it is returned with the error.
+func (s *server) runSync(ctx context.Context, b Binding, cursor string) (*SyncResult, committedBatch, error) {
 	w, err := s.cfg.WriterFactory(ctx, b)
 	if err != nil {
-		return nil, fmt.Errorf("writer factory: %w", err)
+		return nil, committedBatch{}, fmt.Errorf("writer factory: %w", err)
 	}
 	defer s.discardUncommitted(w, b)
 	cw := &countingWriter{Writer: w}
 	res, syncErr := s.impl.Sync(ctx, b, cursor, &Emitter{Entities: cw, Timeseries: s.sink})
 	if syncErr != nil {
-		return nil, syncErr // drop the uncommitted writer
+		return nil, committedBatch{}, syncErr // drop the uncommitted writer
 	}
 	if cw.n == 0 {
-		return res, nil // nothing emitted — no empty commit
+		return res, committedBatch{}, nil // nothing emitted — no empty commit
 	}
-	if _, cerr := w.Close(ctx); cerr != nil {
-		return nil, fmt.Errorf("commit batch: %w", cerr)
+	wait := res != nil && res.WaitForCommit
+	if wait && s.cfg.StatusClient == nil {
+		// Refused before the commit, so the batch is not committed again on
+		// every tick only to fail here.
+		return nil, committedBatch{}, errors.New("SyncResult.WaitForCommit is set but Config.StatusClient is nil")
 	}
-	return res, nil
+	receipt, cerr := w.Close(ctx)
+	if cerr != nil {
+		return nil, committedBatch{}, fmt.Errorf("commit batch: %w", cerr)
+	}
+	batch := committedBatch{records: cw.n}
+	if receipt != nil {
+		batch.jobID = receipt.JobID
+	}
+	if wait {
+		if err := s.waitForCommit(ctx, b, receipt); err != nil {
+			return nil, batch, err
+		}
+	}
+	return res, batch, nil
+}
+
+// waitForCommit waits for the job of a batch committed by a Sync that set
+// WaitForCommit, and logs the job id and how long the wait took. An error
+// fails the Sync, so the drain keeps the cursor and the next drain runs the
+// page again.
+func (s *server) waitForCommit(ctx context.Context, b Binding, receipt *transfer.Receipt) error {
+	jobID := ""
+	if receipt != nil {
+		jobID = receipt.JobID
+	}
+	start := time.Now()
+	_, err := transfer.WaitForJob(ctx, s.cfg.StatusClient, receipt, s.cfg.CommitWait)
+	waitMS := time.Since(start).Milliseconds()
+	if err != nil {
+		s.cfg.Logger.Warn("source connector: waiting for a committed batch failed",
+			"binding", b.ID, "job_id", jobID, "wait_ms", waitMS, "error", err)
+		return fmt.Errorf("wait for committed batch: %w", err)
+	}
+	s.cfg.Logger.Info("source connector waited for a committed batch",
+		"binding", b.ID, "job_id", jobID, "wait_ms", waitMS)
+	return nil
 }
 
 func (s *server) handleWebhook(w http.ResponseWriter, r *http.Request) {
