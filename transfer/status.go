@@ -74,9 +74,10 @@ type StatusClient interface {
 
 // Defaults for [WaitOptions].
 const (
-	// DefaultWaitTimeout covers the longest a job can take on the platform:
-	// a data job may be held for up to 10 minutes while its kit's ontology
-	// change is applied, and its write may then run for up to 30 minutes.
+	// DefaultWaitTimeout covers the longest a job can take with the
+	// platform's default bounds: a data job may be held for up to 10 minutes
+	// while its kit's ontology change is applied, and its write may then run
+	// for up to 30 minutes.
 	DefaultWaitTimeout = 45 * time.Minute
 
 	// DefaultWaitPollInterval is the time between two loader.status calls.
@@ -86,7 +87,9 @@ const (
 // WaitOptions bounds [WaitForJob]. Zero values take the defaults.
 type WaitOptions struct {
 	// Timeout is how long WaitForJob waits for the job to finish.
-	// Default [DefaultWaitTimeout].
+	// Default [DefaultWaitTimeout]. A shorter timeout can give up on a job
+	// that is still writing; a kit that then sends the same records again has
+	// two jobs writing them at once.
 	Timeout time.Duration
 
 	// PollInterval is the time between two status calls.

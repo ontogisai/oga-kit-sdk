@@ -182,7 +182,7 @@ if _, err := transfer.WaitForJob(ctx, cc, receipt, transfer.WaitOptions{}); err 
 // Now write and Close the children.
 ```
 
-`WaitForJob` asks `loader.status` at once and then every second (`WaitOptions.PollInterval`), for up to 45 minutes (`WaitOptions.Timeout`), the longest a job can take on the platform. A status call refused with `429`, `502`, `503` or `504`, or one that never reached the platform, is asked again; any other refusal ends the wait, a `500` included, which the platform answers for a job it does not have. The platform answers a job's status only to the sidecar that committed it. Nothing waits unless the kit calls it. A source connector asks for the same wait per page with `SyncResult.WaitForCommit` ([Ordering pages](#ordering-pages-wait-for-a-commit)).
+`WaitForJob` asks `loader.status` at once and then every second (`WaitOptions.PollInterval`), for up to 45 minutes (`WaitOptions.Timeout`), the longest a job can take with the platform's default bounds. A status call refused with `429`, `502`, `503` or `504`, or one that never reached the platform, is asked again; any other refusal ends the wait, a `500` included, which the platform answers for a job it does not have. The platform answers a job's status only to the sidecar that committed it. Nothing waits unless the kit calls it. A source connector asks for the same wait per page with `SyncResult.WaitForCommit` ([Ordering pages](#ordering-pages-wait-for-a-commit)).
 
 ### Full-snapshot feeds: asserting edge completeness
 
@@ -438,14 +438,13 @@ cfg := &connector.Config{
     Port:          port,
     WriterFactory: factory,
     StatusClient:  cc, // the *transfer.HTTPCommitClient the factory's writers commit through
-    // CommitWait: transfer.WaitOptions{Timeout: 10 * time.Minute}, // optional; defaults as transfer.WaitForJob
 }
 
 // In Sync, on the sites page:
 return &connector.SyncResult{NextCursor: next, HasMore: true, WaitForCommit: true}, nil
 ```
 
-The server then waits for that batch's job to finish before it calls Sync for the next page, and logs the job id and how long it waited. A failed job, a wait past `CommitWait.Timeout`, or a missing `StatusClient` fails the Sync as a failed commit does: the cursor does not advance, and the next poll tick runs the page again. A page that emitted nothing commits nothing and waits for nothing; pages without the flag are not waited on. Webhook deliveries are unaffected.
+The server then waits for that batch's job to finish before it calls Sync for the next page, and logs the job id and how long it waited. A failed job, a wait past `CommitWait.Timeout`, or a missing `StatusClient` fails the Sync as a failed commit does: the cursor does not advance, and the next poll tick runs the page again. A page whose job fails on every attempt therefore holds the binding at that page, so set the flag only where the next pages must not be sent without it. Keep `CommitWait`'s default timeout: a page that timed out is committed again, and if its first job is still writing, two jobs write the same records at once. A page that emitted nothing commits nothing and waits for nothing; pages without the flag are not waited on. Webhook deliveries are unaffected.
 
 ### Webhook processing: sync (default) or async
 

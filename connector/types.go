@@ -148,8 +148,11 @@ type SyncResult struct {
 	// The wait goes through Config.StatusClient and is bounded by
 	// Config.CommitWait. A failed job, a wait that times out, or no
 	// StatusClient fails the Sync: the cursor does not advance, and the next
-	// poll tick runs the page again. A batch with no records commits nothing
-	// and waits for nothing. Pages without it are committed without waiting.
+	// poll tick runs the page again. A page whose job fails on every attempt
+	// therefore holds the binding at that page, committing it again each
+	// tick, so set it only where the next pages must not be sent without this
+	// one. A batch with no records commits nothing and waits for nothing.
+	// Pages without it are committed without waiting.
 	WaitForCommit bool
 }
 

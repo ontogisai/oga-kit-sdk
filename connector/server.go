@@ -43,7 +43,10 @@ type Config struct {
 	StatusClient transfer.StatusClient
 
 	// CommitWait bounds the wait [SyncResult.WaitForCommit] asks for. Zero
-	// values take the transfer.WaitOptions defaults.
+	// values take the transfer.WaitOptions defaults. Keep the default
+	// Timeout unless the platform's job bounds are known to be shorter: a
+	// timed-out page is committed again on the next tick, and if its first
+	// job is still writing, two jobs write the same records at once.
 	CommitWait transfer.WaitOptions
 
 	// Sink is the Tier-C timeseries emit surface. Optional; when nil, a
