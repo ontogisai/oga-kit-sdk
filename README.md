@@ -528,7 +528,7 @@ cfg.ExtraRoutes = map[string]http.Handler{
 }
 ```
 
-A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`), whatever its wildcard is named, is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
+A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`), whatever its wildcard is named, or a literal path one of them would match (`/sync/status`), is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
 
 ### Fetching a published artifact
 

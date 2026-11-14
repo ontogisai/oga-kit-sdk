@@ -90,6 +90,10 @@ func TestExtraRoutes_RejectsReservedPathCollision(t *testing.T) {
 		// A wildcard's name does not make a different pattern to ServeMux.
 		"POST /sync/{id}",
 		"/webhook/{name}",
+		// A literal path the reserved route would match takes that route over
+		// for one binding: the kit would answer a binding's sync or webhook.
+		"GET /sync/status",
+		"POST /webhook/push",
 		"  GET   /healthz  ", // whitespace must not defeat the guard
 	} {
 		err := validateExtraRoutes(map[string]http.Handler{pattern: okHandler("x")})
@@ -114,6 +118,8 @@ func TestExtraRoutes_AcceptsNonCollidingPatterns(t *testing.T) {
 		"GET /connector/status",
 		"GET /sync",          // the unscoped path is not the binding route
 		"GET /sync/{id}/log", // a deeper route under a binding does not conflict
+		"GET /sync/a/b",      // nor a deeper literal one
+		"GET /{page}",        // a wildcard over a literal reserved path is less specific
 	} {
 		if err := validateExtraRoutes(map[string]http.Handler{pattern: okHandler("x")}); err != nil {
 			t.Errorf("pattern %q was rejected: %v", pattern, err)

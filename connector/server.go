@@ -552,29 +552,39 @@ func patternPath(pattern string) string {
 	return p
 }
 
-// isReservedPath reports whether p is a reserved contract path. Wildcard names
-// are ignored, as ServeMux ignores them when it decides that two patterns
-// conflict: "/sync/{id}" is "/sync/{binding}", and registering both panics.
+// isReservedPath reports whether a kit pattern's path p touches a reserved
+// contract path: a reserved path would match it, segment by segment, with a
+// wildcard matching any one non-empty segment. That covers the same route under
+// another wildcard name ("/sync/{id}", which ServeMux refuses to register beside
+// "/sync/{binding}") and a literal one ("/sync/status", which ServeMux would
+// route to the kit instead of to that binding's status).
 func isReservedPath(p string) bool {
-	p = blankWildcards(p)
 	for r := range reservedPaths {
-		if blankWildcards(r) == p {
+		if pathMatches(r, p) {
 			return true
 		}
 	}
 	return false
 }
 
-// blankWildcards writes every wildcard segment of a ServeMux path ({name} or
-// {name...}, not the {$} anchor) as {}.
-func blankWildcards(p string) string {
-	segs := strings.Split(p, "/")
-	for i, seg := range segs {
-		if len(seg) > 2 && seg[0] == '{' && seg[len(seg)-1] == '}' && seg != "{$}" {
-			segs[i] = "{}"
+// pathMatches reports whether the ServeMux path pattern matches p segment by
+// segment. A {name} wildcard matches any one non-empty segment; the {$} anchor
+// and literal segments must be equal.
+func pathMatches(pattern, p string) bool {
+	ps, qs := strings.Split(pattern, "/"), strings.Split(p, "/")
+	if len(ps) != len(qs) {
+		return false
+	}
+	for i, seg := range ps {
+		wildcard := len(seg) > 2 && seg[0] == '{' && seg[len(seg)-1] == '}' && seg != "{$}"
+		if wildcard && qs[i] != "" {
+			continue
+		}
+		if seg != qs[i] {
+			return false
 		}
 	}
-	return strings.Join(segs, "/")
+	return true
 }
 
 // validateExtraRoutes rejects a kit route that is unusable or that would shadow
