@@ -66,8 +66,9 @@ type JobStatus struct {
 // It is separate from [CommitClient], which the writer needs, so a
 // CommitClient implemented outside the SDK keeps compiling.
 type StatusClient interface {
-	// Status returns the job's current status. The platform answers only for
-	// jobs of the caller's tenant.
+	// Status returns the job's current status. The platform answers only the
+	// sidecar that committed the job; for any other job it answers as for a
+	// job it does not have.
 	Status(ctx context.Context, jobID string) (*JobStatus, error)
 }
 
@@ -138,7 +139,8 @@ var (
 // A status call refused with 429, 502, 503 or 504, or one that never reached
 // the platform, is tried again at the next poll. Any other refusal ends the
 // wait with that error: a 401, 403 or 404 would get the same answer again, and
-// the platform answers 500 for a job it does not have.
+// the platform answers 500 for a job it does not have or that another sidecar
+// committed.
 func WaitForJob(ctx context.Context, client StatusClient, receipt *Receipt, opts WaitOptions) (*JobStatus, error) {
 	if client == nil {
 		return nil, errors.New("transfer.WaitForJob: nil client")

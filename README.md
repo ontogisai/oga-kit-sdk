@@ -182,7 +182,7 @@ if _, err := transfer.WaitForJob(ctx, cc, receipt, transfer.WaitOptions{}); err 
 // Now write and Close the children.
 ```
 
-`WaitForJob` asks `loader.status` at once and then every second (`WaitOptions.PollInterval`), for up to 45 minutes (`WaitOptions.Timeout`), the longest a job can take on the platform. A status call refused with `429`, `502`, `503` or `504`, or one that never reached the platform, is asked again; any other refusal ends the wait, a `500` included, which the platform answers for a job it does not have. Nothing waits unless the kit calls it. A source connector asks for the same wait per page with `SyncResult.WaitForCommit` ([Ordering pages](#ordering-pages-wait-for-a-commit)).
+`WaitForJob` asks `loader.status` at once and then every second (`WaitOptions.PollInterval`), for up to 45 minutes (`WaitOptions.Timeout`), the longest a job can take on the platform. A status call refused with `429`, `502`, `503` or `504`, or one that never reached the platform, is asked again; any other refusal ends the wait, a `500` included, which the platform answers for a job it does not have. The platform answers a job's status only to the sidecar that committed it. Nothing waits unless the kit calls it. A source connector asks for the same wait per page with `SyncResult.WaitForCommit` ([Ordering pages](#ordering-pages-wait-for-a-commit)).
 
 ### Full-snapshot feeds: asserting edge completeness
 
