@@ -21,8 +21,9 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/transfer"
 )
 
-// Sync now (OGA-1270): POST /sync/{binding} runs one drain of a poll binding,
-// single-flight with the ticker, and GET /sync/{binding} reports the latest one.
+// Sync now (OGA-1270): POST /connector/sync/{binding} runs one drain of a poll
+// binding, single-flight with the ticker, and GET /connector/sync/{binding}
+// reports the latest one.
 
 // commitFactory builds real data writers over one fake commit client, whose job
 // ids count up from job-1, so a test can check which batches a status lists.

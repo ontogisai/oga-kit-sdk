@@ -407,7 +407,7 @@ The SDK has no opinion about how the kit parses — only about how records leave
 
 ## Source connectors
 
-A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding.
+A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/connector/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding.
 
 Declare the bindings in the kit manifest and collapse them to the runtime mode with `connector.ModeFromStrings`:
 
@@ -435,8 +435,8 @@ A poll binding drains on its ticker, and also when the platform asks (an operato
 
 | Route | Answer |
 |---|---|
-| `POST /sync/{binding}` | `202` and the drain's status: one drain starts now. `409` and the running drain's status when one is already running. `503` until the first `Connect` attempt ends, and once shutdown has begun. |
-| `GET /sync/{binding}` | `200` and the latest drain's status (`connector.SyncStatus`). |
+| `POST /connector/sync/{binding}` | `202` and the drain's status: one drain starts now. `409` and the running drain's status when one is already running. `503` until the first `Connect` attempt ends, and once shutdown has begun. |
+| `GET /connector/sync/{binding}` | `200` and the latest drain's status (`connector.SyncStatus`). |
 
 Both answer `404` for an unknown or webhook-only binding. The ticker and `POST` share one drain per binding: a tick that finds a sync-now drain running is skipped, so `Sync` is never called concurrently for one binding and the cursor stays with the binding.
 
@@ -528,7 +528,7 @@ cfg.ExtraRoutes = map[string]http.Handler{
 }
 ```
 
-A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`), whatever its wildcard is named, or a literal path one of them would match (`/sync/status`), is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
+A pattern colliding with a reserved contract path (`/webhook/{binding}`, `/connector/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection`), whatever its wildcard is named, or a literal path one of them would match (`/connector/sync/status`), is refused at startup and names the path — `http.ServeMux` panics on a duplicate registration, and a kit must not shadow a route the platform probes.
 
 ### Fetching a published artifact
 

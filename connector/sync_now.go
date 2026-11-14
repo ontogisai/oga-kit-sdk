@@ -17,19 +17,21 @@ import (
 //
 // A poll binding otherwise drains only on its ticker, so an operator who has just
 // changed the source waits a whole PollInterval and cannot see whether the last
-// poll worked. The ticker and POST /sync/{binding} share one drain per binding:
-// whichever starts first holds the binding until it finishes, and the other is
-// told so (a tick is skipped, a request answers 409). Sync is therefore never
-// called concurrently for one binding, and the cursor stays with the binding
-// rather than with whoever drains it.
+// poll worked. The ticker and POST /connector/sync/{binding} share one drain
+// per binding: whichever starts first holds the binding until it finishes, and
+// the other is told so (a tick is skipped, a request answers 409). Sync is
+// therefore never called concurrently for one binding, and the cursor stays
+// with the binding rather than with whoever drains it.
 
 // PathSync is the route of a poll binding's sync now (POST) and of its latest
-// drain's status (GET). [SyncPath] builds it for one binding.
-const PathSync = "/sync/{binding}"
+// drain's status (GET). [SyncPath] builds it for one binding. Namespaced under
+// /connector/ like [PathTestConnection], so it cannot be confused with the
+// egress contract's /egress/sync when one image serves both roles.
+const PathSync = "/connector/sync/{binding}"
 
 // SyncPath is [PathSync] for one binding id, escaped for a URL.
 func SyncPath(binding string) string {
-	return "/sync/" + url.PathEscape(binding)
+	return "/connector/sync/" + url.PathEscape(binding)
 }
 
 // SyncOutcome is the state of a binding's latest drain.
@@ -51,7 +53,7 @@ const (
 	// SyncTriggerPoll is the binding's ticker, including the first drain after
 	// Connect.
 	SyncTriggerPoll SyncTrigger = "poll"
-	// SyncTriggerManual is POST /sync/{binding}.
+	// SyncTriggerManual is POST /connector/sync/{binding}.
 	SyncTriggerManual SyncTrigger = "manual"
 )
 
@@ -225,9 +227,10 @@ func (s *server) drainHeld(ctx context.Context, b Binding, run *pollRun, cursor 
 	run.finish(next, err)
 }
 
-// handleSyncNow serves POST /sync/{binding}. It starts one drain of a poll
-// binding and answers 202 with its status, or 409 with the running drain's
-// status when one is already running (from the ticker or an earlier request).
+// handleSyncNow serves POST /connector/sync/{binding}. It starts one drain of
+// a poll binding and answers 202 with its status, or 409 with the running
+// drain's status when one is already running (from the ticker or an earlier
+// request).
 //
 // The drain runs after the response, on the server's lifetime context: a caller
 // that disconnects does not cut it short, and shutdown cancels it and waits for
@@ -284,7 +287,8 @@ func (s *server) waitDrains() {
 	s.drains.Wait()
 }
 
-// handleSyncStatus serves GET /sync/{binding}: the poll binding's latest drain.
+// handleSyncStatus serves GET /connector/sync/{binding}: the poll binding's
+// latest drain.
 func (s *server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	_, run, ok := s.pollTarget(r.PathValue("binding"))
 	if !ok {

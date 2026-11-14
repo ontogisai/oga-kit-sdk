@@ -124,7 +124,7 @@ type Config struct {
 
 	// PollInterval is the cadence between poll batches per binding.
 	// Default 30s. Bindings with no poll mode are not polled. POST
-	// /sync/{binding} drains a poll binding between ticks (sync_now.go).
+	// /connector/sync/{binding} drains a poll binding between ticks (sync_now.go).
 	PollInterval time.Duration
 
 	// Logger for lifecycle messages. Defaults to kitlog.Default() (the
@@ -555,9 +555,10 @@ func patternPath(pattern string) string {
 // isReservedPath reports whether a kit pattern's path p touches a reserved
 // contract path: a reserved path would match it, segment by segment, with a
 // wildcard matching any one non-empty segment. That covers the same route under
-// another wildcard name ("/sync/{id}", which ServeMux refuses to register beside
-// "/sync/{binding}") and a literal one ("/sync/status", which ServeMux would
-// route to the kit instead of to that binding's status).
+// another wildcard name ("/connector/sync/{id}", which ServeMux refuses to
+// register beside "/connector/sync/{binding}") and a literal one
+// ("/connector/sync/status", which ServeMux would route to the kit instead of
+// to that binding's status).
 func isReservedPath(p string) bool {
 	for r := range reservedPaths {
 		if pathMatches(r, p) {
@@ -645,7 +646,7 @@ func (s *server) mux() http.Handler {
 
 // pollBinding runs the poll loop for one binding until ctx is cancelled. The
 // binding's cursor and drain status live in its pollRun, which it shares with
-// POST /sync/{binding} (sync_now.go).
+// POST /connector/sync/{binding} (sync_now.go).
 func (s *server) pollBinding(ctx context.Context, b Binding) {
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
