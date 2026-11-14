@@ -20,7 +20,7 @@ func TestValidate_SourceConnectors_Valid(t *testing.T) {
 		Image: "ghcr.io/ontogisai/oga-kit-built-environment/fm-wo-connector@sha256:abc",
 		Bindings: []SourceBindingSpec{
 			{ID: "wo-status", ExternalSystem: "contract_wo_mgmt", SourceType: "wo_status_feed", Modes: []string{"webhook"}},
-			{ID: "bms", ExternalSystem: "acme_bms", SourceType: "bms_point_stream", Modes: []string{"poll"},
+			{ID: "wo-metrics", ExternalSystem: "contract_wo_mgmt", SourceType: "wo_metric_stream", Modes: []string{"poll"},
 				TimeseriesMapping: &TimeseriesMappingSpec{EntityIDFrom: "source_id", MetricTag: "metric", UnitTag: "unit"}},
 		},
 	}})
@@ -203,5 +203,71 @@ spec:
 `
 	if _, err := Parse(strings.NewReader(y)); err == nil {
 		t.Fatal("expected strict parse to reject the removed ingestion_templates field")
+	}
+}
+
+// TestValidate_SourceConnectors_OneSourceSystem: a connector's bindings name one
+// external_system (record ownership): the platform owns what it writes as
+// {kit}/{external_system}, so two would leave its records with no owner.
+func TestValidate_SourceConnectors_OneSourceSystem(t *testing.T) {
+	m := baseManifestWithConnectors([]SourceConnectorSpec{{
+		Name:  "mixed",
+		Image: "ghcr.io/ontogisai/kit/mixed@sha256:abc",
+		Bindings: []SourceBindingSpec{
+			{ID: "a", ExternalSystem: "system_a", SourceType: "feed_a"},
+			{ID: "b", ExternalSystem: "system_b", SourceType: "feed_b"},
+		},
+	}})
+	err := Validate(m)
+	if err == nil || !strings.Contains(err.Error(), "one source system") {
+		t.Fatalf("want a refusal naming one source system, got %v", err)
+	}
+	m.Spec.SourceConnectors[0].Bindings[1].ExternalSystem = " system_a "
+	if err := Validate(m); err != nil {
+		t.Fatalf("the same system, padded: want valid, got %v", err)
+	}
+}
+
+func TestValidate_Loaders_RequireASourceSystem(t *testing.T) {
+	m := baseManifestWithConnectors(nil)
+	m.Spec.Loaders = []LoaderSpec{
+		{Name: "types", Kind: LoaderKindOntology, ExternalSystem: "source_tool"},
+		{Name: "records"},
+	}
+	err := Validate(m)
+	if err == nil || !strings.Contains(err.Error(), "spec.loaders[1] (records): external_system is required") {
+		t.Fatalf("want the loader without a source system refused, got %v", err)
+	}
+	m.Spec.Loaders[1].ExternalSystem = "source_tool"
+	if err := Validate(m); err != nil {
+		t.Fatalf("want valid, got %v", err)
+	}
+}
+
+// TestParse_Loaders: spec.loaders decodes under the strict decoder, every field
+// the platform reads included.
+func TestParse_Loaders(t *testing.T) {
+	m, err := Parse(strings.NewReader(`api_version: ontogis.ai/v1
+kind: DomainKitManifest
+metadata: {name: kit, version: 1.0.0}
+spec:
+  platform_version: ">=1.0.0"
+  loaders:
+    - name: types
+      kind: ontology
+      description: {en-US: Types}
+      container: {image: "ghcr.io/ontogisai/kit/types@sha256:abc", port: 8401}
+      external_system: source_tool
+      format: rdf
+      formats: [rdf, ttl]
+      data_path: ontology/types.ttl
+      ontology_types_file: build/types.json
+      governed_predicates_file: build/predicates.json
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if l := m.Spec.Loaders; len(l) != 1 || l[0].ExternalSystem != "source_tool" || l[0].Kind != LoaderKindOntology || l[0].Container.Port != 8401 {
+		t.Fatalf("loaders = %+v", l)
 	}
 }

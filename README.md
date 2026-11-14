@@ -202,6 +202,7 @@ spec:
   loaders:
     - name: example-data-loader
       kind: data
+      external_system: upstream          # see "The source system"
       governed_predicates_file: generated/example-loader-predicates.json
 ```
 
@@ -428,6 +429,15 @@ source_connectors:
 // silently 404s every delivery.
 b.Mode = connector.ModeFromStrings(spec.Modes)
 ```
+
+### The source system
+
+Every loader and every source-connector binding names the system its records come from, in `external_system`. The platform records each entity, edge and type a feed writes as owned by `{kit}/{external_system}`, so:
+
+- **A connector serves one source system.** All its bindings declare the same `external_system`.
+- **A loader and a connector fed by the same source declare the same value.** They write the same records; under two values the platform would record them as two owners.
+
+`manifest.Validate` refuses a loader without the field and a connector whose bindings name more than one system (from release 1.5.0), as the platform's install and upgrade do (`OGA-DKIT-VAL-1057`). A platform release that knows the loader field is required first: an older platform refuses it as an unknown key.
 
 ### Sync now
 
