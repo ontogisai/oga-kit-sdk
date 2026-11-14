@@ -137,6 +137,20 @@ type SyncResult struct {
 
 	// Emitted is the record count this batch produced (observability only).
 	Emitted int
+
+	// WaitForCommit asks the server to wait, after committing this batch,
+	// until the platform has finished the batch's job, before it calls Sync
+	// for the next page or advances the cursor. The platform writes each
+	// committed batch on its own, in no order relative to the others, so set
+	// it on a page whose records the next pages depend on, such as the
+	// parents their edges point at.
+	//
+	// The wait goes through Config.StatusClient and is bounded by
+	// Config.CommitWait. A failed job, a wait that times out, or no
+	// StatusClient fails the Sync: the cursor does not advance, and the next
+	// poll tick runs the page again. A batch with no records commits nothing
+	// and waits for nothing. Pages without it are committed without waiting.
+	WaitForCommit bool
 }
 
 // Health is a per-binding health report.

@@ -14,10 +14,10 @@ import (
 	"github.com/ontogisai/oga-kit-sdk/internal/redact"
 )
 
-// HTTPCommitClient is the production CommitClient. It calls the
-// Platform Gateway's loader endpoint for prepare_upload + complete
-// (POST {gateway}/loader/v1/{op}, the call's arguments as the body), and
-// PUTs directly to MinIO/S3 for the presigned-upload step.
+// HTTPCommitClient is the production CommitClient and StatusClient. It calls
+// the Platform Gateway's loader endpoint for prepare_upload, complete and
+// status (POST {gateway}/loader/v1/{op}, the call's arguments as the body),
+// and PUTs directly to MinIO/S3 for the presigned-upload step.
 //
 // Before v0.102.0-beta the client sent the operations as MCP tool calls
 // ({"tool":"loader.complete","params":{...}} to /mcp/tools/call). The
@@ -116,6 +116,7 @@ func NewHTTPCommitClient(gatewayURL, tenantID, kitID string, opts ...HTTPCommitC
 const (
 	loaderPrepareUploadPath = "/loader/v1/prepare_upload"
 	loaderCompletePath      = "/loader/v1/complete"
+	loaderStatusPath        = "/loader/v1/status"
 )
 
 // maxErrorBodyRead is how much of an error answer is read. An error message
@@ -199,6 +200,27 @@ func (c *HTTPCommitClient) Complete(ctx context.Context, req *CompleteRequest) (
 	}
 	if out.JobID == "" {
 		return nil, errors.New("loader.complete: response missing job_id")
+	}
+	return &out, nil
+}
+
+// Status calls loader.status for jobID, the [Receipt.JobID] of an earlier
+// commit. To wait for a job to finish, use [WaitForJob].
+func (c *HTTPCommitClient) Status(ctx context.Context, jobID string) (*JobStatus, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, errors.New("transfer.Status: jobID is required")
+	}
+	raw, err := c.postJSON(ctx, loaderStatusPath, map[string]string{"job_id": jobID})
+	if err != nil {
+		return nil, err
+	}
+	var out JobStatus
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode loader.status response: %w", err)
+	}
+	if out.Status == "" {
+		return nil, errors.New("loader.status: response missing status")
 	}
 	return &out, nil
 }

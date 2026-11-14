@@ -6,12 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 )
 
-// FakeCommitClient is an in-memory CommitClient suitable for tests.
-// It captures every prepare_upload, presigned-PUT, and complete call
+// FakeCommitClient is an in-memory CommitClient and StatusClient suitable for
+// tests. It captures every prepare_upload, presigned-PUT, and complete call
 // so tests can assert on the artifact body, the transport mode, and
 // the request shapes without standing up a real gateway.
 //
@@ -24,6 +25,10 @@ type FakeCommitClient struct {
 	// "job-2", ...) when nil.
 	JobIDFn func() string
 
+	// StatusFn answers Status. When nil, a job this client minted is
+	// completed and any other job id is an error.
+	StatusFn func(ctx context.Context, jobID string) (*JobStatus, error)
+
 	// FailPrepare, FailPut, FailComplete inject failures from the
 	// next call. Each toggle resets after firing once.
 	FailPrepare, FailPut, FailComplete error
@@ -31,6 +36,8 @@ type FakeCommitClient struct {
 	prepareCalls  int
 	putCalls      int
 	completeCalls int
+	statusCalls   int
+	minted        map[string]bool
 
 	lastUploadURL   string
 	lastUploadToken string
@@ -102,12 +109,33 @@ func (f *FakeCommitClient) Complete(_ context.Context, req *CompleteRequest) (*C
 	}
 	if jobID == "" {
 		f.jobCounter++
-		jobID = "job-" + hex.EncodeToString(randBytes(4))
+		jobID = fmt.Sprintf("job-%d", f.jobCounter)
 	}
+	if f.minted == nil {
+		f.minted = map[string]bool{}
+	}
+	f.minted[jobID] = true
 	return &CompleteResponse{
 		JobID:  jobID,
 		Status: "running",
 	}, nil
+}
+
+// Status answers through StatusFn when it is set. Otherwise a job id this
+// client minted is completed, and any other is an error.
+func (f *FakeCommitClient) Status(ctx context.Context, jobID string) (*JobStatus, error) {
+	f.mu.Lock()
+	f.statusCalls++
+	fn, known := f.StatusFn, f.minted[jobID]
+	f.mu.Unlock()
+	// Called without the lock, so StatusFn may call back into the client.
+	if fn != nil {
+		return fn(ctx, jobID)
+	}
+	if !known {
+		return nil, fmt.Errorf("FakeCommitClient: job %q was not minted by this client", jobID)
+	}
+	return &JobStatus{JobID: jobID, Status: JobCompleted}, nil
 }
 
 // PrepareCalls reports how many times PrepareUpload was called.
@@ -129,6 +157,13 @@ func (f *FakeCommitClient) CompleteCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.completeCalls
+}
+
+// StatusCalls reports how many times Status was called.
+func (f *FakeCommitClient) StatusCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statusCalls
 }
 
 // LastBody returns the most recent artifact body the client received,
