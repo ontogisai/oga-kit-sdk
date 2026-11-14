@@ -54,14 +54,17 @@ type RelationshipEndpoint struct {
 	// one-element chain naming the leaf); a present chain ends at the first
 	// ancestor the ontology does not define.
 	//
-	// Route a relationship target by this chain, not by the catalog bundled in
+	// Route a relationship endpoint by this chain, not by the catalog bundled in
 	// your kit: the tenant's ontology also holds the classes your source added
 	// after the kit was released, which reach it through ontology sync. When your
 	// handler needs the ancestry and it is absent, fail that relationship rather
 	// than infer one.
 	//
-	// PUSH LANE ONLY. On the withdrawal lane it is absent: retract by the
-	// relationship's own [Relationship.Correlation], which routes nothing.
+	// Sent on both lanes, under the same rules. On the withdrawal lane, retract
+	// by the relationship's own [Relationship.Correlation]; use the chain where
+	// your handler routes an endpoint there, for example to choose the record it
+	// reads the relationship back through when the other endpoint arrives
+	// without a Correlation.
 	//
 	// Mirrors the platform's internal/egress.RelationshipEndpoint.TypeAncestry.
 	TypeAncestry []string `json:"type_ancestry,omitempty"`
