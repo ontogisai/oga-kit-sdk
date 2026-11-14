@@ -347,12 +347,15 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 	case err := <-serveErr:
 		cancel()
 		wg.Wait()
+		s.waitDrains()
 		return err
 	}
 
-	// Drain: stop poll loops, then shut the HTTP server down.
+	// Drain: stop poll loops and sync-now drains (both run on runCtx, cancelled
+	// here, so each stops at its next page), then shut the HTTP server down.
 	cancel()
 	wg.Wait()
+	s.waitDrains()
 
 	shutdownCtx, scancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer scancel()
@@ -360,10 +363,6 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 		cfg.Logger.Error("source connector shutdown error", "error", err)
 		return err
 	}
-
-	// Sync-now drains run on runCtx, cancelled above, so each stops at its next
-	// page. Waited for only now: after Shutdown no request can start another.
-	s.drains.Wait()
 
 	// Drain the async queue AFTER Shutdown returns: no handler can enqueue any
 	// more, so closing the channel is safe and the worker sees a fixed set of
@@ -395,9 +394,12 @@ type server struct {
 	// drain is running, and the latest drain's status (sync_now.go).
 	polls map[string]*pollRun
 	// runCtx is the server's lifetime context, which a sync-now drain runs on.
-	// drains tracks those drains so shutdown can wait for them.
-	runCtx context.Context
-	drains sync.WaitGroup
+	// drains tracks those drains so shutdown can wait for them; drainsMu and
+	// drainsClosed gate their start, so none starts once the wait has begun.
+	runCtx       context.Context
+	drains       sync.WaitGroup
+	drainsMu     sync.Mutex
+	drainsClosed bool
 
 	// connectPending is true from the moment ListenAndServe binds the listener
 	// until the initial Connect attempt has COMPLETED (whether it succeeded or

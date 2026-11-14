@@ -245,18 +245,43 @@ func (s *server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 			http.StatusServiceUnavailable)
 		return
 	}
-	if s.runCtx.Err() != nil {
+	st, started, closed := s.startManualDrain(b, run)
+	switch {
+	case closed:
 		http.Error(w, "connector is shutting down", http.StatusServiceUnavailable)
-		return
+	case !started:
+		writeSyncStatus(w, http.StatusConflict, st)
+	default:
+		s.cfg.Logger.Info("source connector sync now started", "binding", b.ID)
+		writeSyncStatus(w, http.StatusAccepted, st)
+	}
+}
+
+// startManualDrain claims b and starts its sync-now drain, returning the
+// started drain's status. It returns started=false with the running drain's
+// status when one is running, and closed=true, starting nothing, once shutdown
+// has begun. The claim and the start happen under drainsMu, so no drain starts
+// after waitDrains has closed the gate.
+func (s *server) startManualDrain(b Binding, run *pollRun) (st SyncStatus, started, closed bool) {
+	s.drainsMu.Lock()
+	defer s.drainsMu.Unlock()
+	if s.drainsClosed || s.runCtx.Err() != nil {
+		return SyncStatus{}, false, true
 	}
 	cursor, st, started := run.begin(SyncTriggerManual)
-	if !started {
-		writeSyncStatus(w, http.StatusConflict, st)
-		return
+	if started {
+		s.drains.Go(func() { s.drainHeld(s.runCtx, b, run, cursor) })
 	}
-	s.drains.Go(func() { s.drainHeld(s.runCtx, b, run, cursor) })
-	s.cfg.Logger.Info("source connector sync now started", "binding", b.ID)
-	writeSyncStatus(w, http.StatusAccepted, st)
+	return st, started, false
+}
+
+// waitDrains stops sync-now drains from starting and waits for the running
+// ones. Shutdown calls it on every path, after cancelling runCtx.
+func (s *server) waitDrains() {
+	s.drainsMu.Lock()
+	s.drainsClosed = true
+	s.drainsMu.Unlock()
+	s.drains.Wait()
 }
 
 // handleSyncStatus serves GET /sync/{binding}: the poll binding's latest drain.

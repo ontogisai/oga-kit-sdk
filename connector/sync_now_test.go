@@ -510,3 +510,54 @@ func TestSyncNow_Refused503OnceShutdownBegins(t *testing.T) {
 		t.Errorf("Sync calls = %d, want 0", n)
 	}
 }
+
+// waitDrains closes the gate before it waits: a request arriving while a drain
+// finishes is refused, and the wait returns only when that drain has returned.
+func TestWaitDrains_RefusesNewDrainsAndWaitsForTheRunningOne(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	fc := &fakeConnector{
+		bindings: []Binding{{ID: "pull", Mode: ModePoll}},
+		syncFn: func(context.Context, Binding, string, *Emitter) (*SyncResult, error) {
+			calls.Add(1)
+			<-release
+			return &SyncResult{}, nil
+		},
+	}
+	factory, _ := commitFactory()
+	s := newTestServer(fc, factory)
+	srv := httptest.NewServer(s.mux())
+	defer srv.Close()
+	url := srv.URL + SyncPath("pull")
+
+	if code, _ := syncRequest(t, http.MethodPost, url); code != http.StatusAccepted {
+		t.Fatalf("POST = %d, want 202", code)
+	}
+	waited := make(chan struct{})
+	go func() { s.waitDrains(); close(waited) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		code, _ := syncRequest(t, http.MethodPost, url)
+		if code == http.StatusServiceUnavailable {
+			break
+		}
+		if code != http.StatusConflict {
+			t.Fatalf("POST while draining for shutdown = %d, want 409 until the gate closes, then 503", code)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("POST still answers 409 after 5s: the gate never closed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-waited:
+		t.Fatal("waitDrains returned while a drain was still running")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-waited
+	if n := calls.Load(); n != 1 {
+		t.Errorf("Sync calls = %d, want 1: no drain started after the gate closed", n)
+	}
+}
