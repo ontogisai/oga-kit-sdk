@@ -116,3 +116,46 @@ spec:
 		t.Errorf("the error should name the offending key, got: %v", err)
 	}
 }
+
+// remove_unlinked_records is accepted inside edge_completeness and defaults to off.
+func TestParse_EdgeCompletenessRemoveUnlinkedRecords(t *testing.T) {
+	t.Parallel()
+	doc := func(extra string) string {
+		return `
+api_version: v1
+kind: DomainKit
+metadata:
+  name: test-kit
+  version: 1.0.0
+spec:
+  platform_version: ">=0.1.0"
+  source_connectors:
+    - name: asset-sync
+      bindings:
+        - id: wo
+          external_system: wo_mgmt
+          source_type: wo_status_feed
+      container:
+        image: ghcr.io/acme/asset-sync@sha256:abc
+      edge_completeness:
+        mode: per_source
+        governed_predicates_file: predicates/forward.json
+` + extra
+	}
+	for _, tc := range []struct {
+		extra string
+		want  bool
+	}{
+		{"", false},
+		{"        remove_unlinked_records: true\n", true},
+		{"        remove_unlinked_records: false\n", false},
+	} {
+		m, err := Parse(strings.NewReader(doc(tc.extra)))
+		if err != nil {
+			t.Fatalf("%q: strict parse must accept the block: %v", tc.extra, err)
+		}
+		if got := m.Spec.SourceConnectors[0].EdgeCompleteness.RemoveUnlinkedRecords; got != tc.want {
+			t.Errorf("%q: RemoveUnlinkedRecords = %v, want %v", tc.extra, got, tc.want)
+		}
+	}
+}
