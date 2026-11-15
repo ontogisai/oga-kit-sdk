@@ -214,6 +214,8 @@ The governed-predicates file is a JSON array (`["feeds", "hasLocation", "hasPoin
 - **Generate the file, do not hand-write it.** Build it from whatever already defines your feed's vocabulary and add a CI check that regenerates and diffs it. A predicate you emit but do not list is silently ungoverned — its stale edges are never closed, and the platform reports it as predicate drift. A predicate you list but no longer emit is worse: the platform will close its edges.
 - **An operator can narrow the list for one run, never widen it.** `--governed-predicates` refuses a predicate the loader does not declare.
 
+**Removing what the source deleted.** A connector whose source deletes records without saying so can also declare `remove_unlinked_records: true` in its `edge_completeness` block. When one of its artifacts leaves a record it wrote with no live edge, and the artifact neither carries nor names that record, the platform removes it, as softly as a source-asserted removal; carrying it again revives it. The volume guard counts these removals with the closures, and the tenant's removal kill switch stops them. Leave it off for a source that marks removals explicitly (`transfer.LifecycleRemoved`): for that source a missing record is an export defect, not a deletion.
+
 ⚠ **Two obligations the platform cannot verify.**
 
 1. **Collapse inverse pairs before you emit.** If the upstream declares a relationship from both ends (`feeds` on the damper, `isFedBy` on the AHU), that is *one* canonical edge. Emit it under a single canonical source whichever end declared it — the platform honours the submitted set verbatim and never re-derives an owner from the declaring asset. Without the collapse, you will close edges the other endpoint still declares.

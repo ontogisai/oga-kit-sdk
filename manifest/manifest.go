@@ -403,6 +403,19 @@ type EdgeCompletenessSpec struct {
 	// emitted becomes a predicate the platform will close. Accepts a flat JSON array
 	// or {"predicates": [...]}.
 	GovernedPredicatesFile string `yaml:"governed_predicates_file,omitempty"`
+	// RemoveUnlinkedRecords declares that a record this feed wrote and no longer
+	// carries has been deleted at the source once nothing links to it (OGA-1271).
+	// The platform then removes such a record when one of this feed's artifacts
+	// leaves it with no live edge: the feed owns it, the artifact neither carries
+	// nor names it, and no edge in either direction, under any predicate, reaches
+	// it. Removal is soft and recoverable, like a source-asserted removal.
+	//
+	// Off by default. Declare it only for a source that deletes records without
+	// telling you, so that a record's absence from the export IS its deletion. A
+	// source that marks removals explicitly (transfer.LifecycleRemoved) must not
+	// declare it: a record missing from its export is an export defect, and this
+	// would delete it.
+	RemoveUnlinkedRecords bool `yaml:"remove_unlinked_records,omitempty"`
 }
 
 // EffectiveImage returns the connector's container image, preferring the
