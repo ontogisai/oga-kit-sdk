@@ -147,7 +147,7 @@ func TestReport_IngestionOntologyFieldsDecode(t *testing.T) {
   "delivery_id": "ingestion:tnt1:load-2",
   "tenant_id": "tnt1",
   "status": "completed",
-  "submission": {"job_id": "load-2", "kind": "data", "submitted_by": "example-connector", "upstream_ref": "v8"},
+  "submission": {"job_id": "load-2", "kind": "data", "submitted_by": "example-connector", "record_owner": "example-kit/example_system", "upstream_ref": "v8"},
   "counts": {"vertices_created": 4, "vertices_removed": 2, "vertices_revived": 1, "edges_closed_by_removal": 3, "records_quarantined": 4},
   "ontology_wait": "bound",
   "ontology_change": {"status": "awaiting_review", "change_request_id": "cr-2", "upstream_version": "v8",
@@ -160,6 +160,9 @@ func TestReport_IngestionOntologyFieldsDecode(t *testing.T) {
 	var rep Report
 	if err := json.Unmarshal([]byte(raw), &rep); err != nil {
 		t.Fatal(err)
+	}
+	if rep.Submission == nil || rep.Submission.RecordOwner != "example-kit/example_system" {
+		t.Fatalf("submission = %+v", rep.Submission)
 	}
 	if rep.OntologyWait != OntologyWaitBound {
 		t.Fatalf("ontology_wait = %q", rep.OntologyWait)
