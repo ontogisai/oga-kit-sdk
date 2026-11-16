@@ -500,6 +500,13 @@ type Submission struct {
 	// connector that submitted it.
 	SubmittedBy string `json:"submitted_by,omitempty"`
 
+	// RecordOwner is the owner of what the submission wrote, {kit}/{external_system}:
+	// the value the platform resolved from the verified submitter when it took the
+	// artifact in, and stamped on every record and edge the job wrote (record
+	// ownership). Absent on a report of a job the platform took in before it kept
+	// the owner, and from an older platform.
+	RecordOwner string `json:"record_owner,omitempty"`
+
 	// UpstreamRef is the opaque handle the submitter set, echoed back
 	// BYTE-FOR-BYTE. The platform never parsed it. Absent if none was supplied —
 	// never synthesised.
