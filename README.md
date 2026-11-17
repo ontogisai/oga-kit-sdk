@@ -395,6 +395,8 @@ The registrar leaves the underlying writer open — the SDK closes it once at re
 
 Loaders never trust `tenant_id` from a request body. The platform's gateway sets the `X-Tenant-ID` header authoritatively when starting the loader sidecar; the SDK's HTTP server reads it from the header on every `POST /load`, validates any body claim matches, and overwrites `LoadRequest.TenantID` with the header value before invoking the kit handler.
 
+Agents (from release 1.9.0) answer an A2A message only when `X-Tenant-ID` is the agent's own tenant, `OGA_TENANT_ID`. Any other message, including one with no header, gets HTTP 403 with JSON-RPC error `-32001` and never reaches the runtime; an agent started without `OGA_TENANT_ID` refuses every message. The platform's callers all set the header (the agent's gateway route from the caller's token, Frontier, the event router, the Platform Gateway), so a kit test that posts to its agent directly must set it too. The agent card and the probes need no header.
+
 ## Memory ceiling guidance
 
 Above `transfer.InlineBodyLimit` (700 KiB) the writer spools the artifact to an unlinked temp file in `TMPDIR` and uploads it from there, holding only a 256 KiB write buffer and one encoded record in memory. Loader memory is therefore bounded by what the kit's parser holds, not by what it has emitted. The emitted bytes go to disk instead, so a sidecar needs a writable `TMPDIR` with room for the artifact (the platform mounts one at `/tmp`); a writer that cannot create its spool fails the write rather than falling back to memory.
@@ -871,6 +873,7 @@ ship a malformed manifest get a clear error during install.
 | `agent/` | `AgentRuntime` interface, `DefaultRuntime`, `ListenAndServe` |
 | `gateway/` | `PlatformGatewayClient` (MCP, LLM, workflows, inter-agent, registry) |
 | `auth/` | `TokenManager` (workload token from the bootstrap identity), `WorkloadTokenProviderFromEnv`, `CredentialWatcher` |
+| `sidecarenv/` | Names of the environment variables the platform sets on every sidecar (`OGA_TENANT_ID`, `AGENT_REGISTRATION_ID`, `PLATFORM_GATEWAY_URL`, the bootstrap identity, ...) |
 | `testing/mcpmock` | Mock MCP server |
 | `testing/loadermock` | Programmable mock loader sidecar |
 

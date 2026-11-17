@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ontogisai/oga-kit-sdk/kitlog"
+	"github.com/ontogisai/oga-kit-sdk/sidecarenv"
 )
 
 // EnvTokenManagerConfig configures NewTokenManagerFromEnv.
@@ -54,7 +55,7 @@ func NewTokenManagerFromEnv(ctx context.Context, cfg EnvTokenManagerConfig) (*To
 		return nil, nil
 	}
 
-	regID := os.Getenv("AGENT_REGISTRATION_ID")
+	regID := os.Getenv(sidecarenv.RegistrationID)
 	if regID == "" {
 		regID = cfg.AgentRegistrationID
 	}

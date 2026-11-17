@@ -1,5 +1,7 @@
 package kitlog
 
+import "github.com/ontogisai/oga-kit-sdk/sidecarenv"
+
 // Field keys — the ONE spelling for every structured field a kit log carries.
 // Referencing these constants (never a string literal) is what prevents field
 // drift across SDK packages and across the SDK↔platform boundary.
@@ -19,14 +21,21 @@ const (
 	KeyError = "error"
 )
 
-// Environment variable names kitlog reads. The identity vars reuse the exact
-// names the rest of the SDK already reads (gateway/client_env.go,
-// auth/token_manager_env.go); the OGA_LOG_* vars are new and logging-specific.
+// The sidecar identity variables kitlog reads. Their names are in sidecarenv,
+// the one place every SDK package takes them from.
 const (
-	EnvTenantID       = "OGA_TENANT_ID"         // existing (gateway.NewClientFromEnv)
-	EnvRegistrationID = "AGENT_REGISTRATION_ID" // existing (auth.NewTokenManagerFromEnv)
-	EnvKitID          = "OGA_KIT_ID"            // sidecar-manager to inject
-	EnvComponent      = "OGA_COMPONENT"         // sidecar-manager to inject (optional)
-	EnvLogLevel       = "OGA_LOG_LEVEL"         // debug|info|warn|error (default info)
-	EnvLogFormat      = "OGA_LOG_FORMAT"        // json|text (default json)
+	// Deprecated: use sidecarenv.TenantID.
+	EnvTenantID = sidecarenv.TenantID
+	// Deprecated: use sidecarenv.RegistrationID.
+	EnvRegistrationID = sidecarenv.RegistrationID
+	// Deprecated: use sidecarenv.KitID.
+	EnvKitID = sidecarenv.KitID
+	// Deprecated: use sidecarenv.Component.
+	EnvComponent = sidecarenv.Component
+)
+
+// The logging variables, which only kitlog reads.
+const (
+	EnvLogLevel  = "OGA_LOG_LEVEL"  // debug|info|warn|error (default info)
+	EnvLogFormat = "OGA_LOG_FORMAT" // json|text (default json)
 )

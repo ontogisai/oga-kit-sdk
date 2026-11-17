@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/ontogisai/oga-kit-sdk/sidecarenv"
 )
 
 // baseLogger holds the logger installed by Init(); nil until Init() runs.
@@ -85,10 +87,10 @@ func FromEnv() *slog.Logger {
 // Order is stable: tenant_id, kit_id, component, registration_id.
 func CommonFieldsFromEnv() []slog.Attr {
 	return commonFields(
-		os.Getenv(EnvTenantID),
-		os.Getenv(EnvKitID),
-		os.Getenv(EnvComponent),
-		os.Getenv(EnvRegistrationID),
+		os.Getenv(sidecarenv.TenantID),
+		os.Getenv(sidecarenv.KitID),
+		os.Getenv(sidecarenv.Component),
+		os.Getenv(sidecarenv.RegistrationID),
 	)
 }
 

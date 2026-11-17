@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/ontogisai/oga-kit-sdk/sidecarenv"
 )
 
 // WorkloadTokenProviderFromEnv builds a workload-token provider for a sidecar
@@ -48,7 +50,7 @@ func WorkloadTokenProviderFromEnv(ctx context.Context, gatewayURL string) (provi
 	tm, err := NewTokenManager(ctx, &TokenManagerConfig{
 		Bootstrap:           bp,
 		IssueURL:            strings.TrimRight(gatewayURL, "/") + "/auth/token/issue",
-		AgentRegistrationID: os.Getenv("AGENT_REGISTRATION_ID"),
+		AgentRegistrationID: os.Getenv(sidecarenv.RegistrationID),
 	})
 	if err != nil {
 		return nil, noop, fmt.Errorf("mint workload token: %w", err)

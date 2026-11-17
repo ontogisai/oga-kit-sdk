@@ -12,20 +12,25 @@ import (
 // kitlog must read ONLY the identity/level/format env vars and must never
 // reference the bootstrap-secret env names. This guard scans the package's own
 // non-test source at test time: every os.Getenv(...) argument must be one of
-// the allowlisted Env* constants, and the forbidden secret env names must not
-// appear anywhere in the package source.
+// the allowlisted names (the sidecar identity names from sidecarenv, and
+// kitlog's own level and format), and the bootstrap-credential names, spelled
+// as literals or as their sidecarenv constants, must not appear anywhere in
+// the package source.
 //
 // Validates: Requirements 7.1, 7.2.
 func TestProp_NoSecretLeakage(t *testing.T) {
 	allowed := map[string]bool{
-		"EnvTenantID":       true,
-		"EnvRegistrationID": true,
-		"EnvKitID":          true,
-		"EnvComponent":      true,
-		"EnvLogLevel":       true,
-		"EnvLogFormat":      true,
+		"sidecarenv.TenantID":       true,
+		"sidecarenv.RegistrationID": true,
+		"sidecarenv.KitID":          true,
+		"sidecarenv.Component":      true,
+		"EnvLogLevel":               true,
+		"EnvLogFormat":              true,
 	}
-	forbidden := []string{"AGENT_BOOTSTRAP_SECRET", "AGENT_SA_TOKEN_PATH"}
+	forbidden := []string{
+		"AGENT_BOOTSTRAP_SECRET", "AGENT_SA_TOKEN_PATH",
+		"sidecarenv.BootstrapSecret", "sidecarenv.SATokenPath",
+	}
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
