@@ -873,6 +873,7 @@ ship a malformed manifest get a clear error during install.
 | `agent/` | `AgentRuntime` interface, `DefaultRuntime`, `ListenAndServe` |
 | `gateway/` | `PlatformGatewayClient` (MCP, LLM, workflows, inter-agent, registry) |
 | `auth/` | `TokenManager` (workload token from the bootstrap identity), `WorkloadTokenProviderFromEnv`, `CredentialWatcher` |
+| `sidecarenv/` | Names of the environment variables the platform sets on every sidecar (`OGA_TENANT_ID`, `AGENT_REGISTRATION_ID`, `PLATFORM_GATEWAY_URL`, the bootstrap identity, ...) |
 | `testing/mcpmock` | Mock MCP server |
 | `testing/loadermock` | Programmable mock loader sidecar |
 

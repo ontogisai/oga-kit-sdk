@@ -14,17 +14,17 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/ontogisai/oga-kit-sdk/kitlog"
+	"github.com/ontogisai/oga-kit-sdk/sidecarenv"
 )
 
 // ListenAndServe starts an HTTP server that serves the A2A protocol for any
 // AgentRuntime implementation. It handles graceful shutdown on SIGTERM/SIGINT.
-// It answers a message only for the agent's own tenant, OGA_TENANT_ID
+// It answers a message only for the agent's own tenant, sidecarenv.TenantID
 // (requireAgentTenant).
 func ListenAndServe(ctx context.Context, port string, runtime AgentRuntime) {
-	tenantID := os.Getenv(kitlog.EnvTenantID)
+	tenantID := os.Getenv(sidecarenv.TenantID)
 	if tenantID == "" {
-		slog.Warn("agent has no tenant (" + kitlog.EnvTenantID + " is not set): every A2A message will be refused")
+		slog.Warn("agent has no tenant: every A2A message will be refused", "unset_env", sidecarenv.TenantID)
 	}
 	mux := newAgentMux(runtime, tenantID)
 

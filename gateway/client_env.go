@@ -7,16 +7,12 @@ import (
 	"strings"
 
 	"github.com/ontogisai/oga-kit-sdk/auth"
+	"github.com/ontogisai/oga-kit-sdk/sidecarenv"
 )
 
-// Environment variables read by NewClientFromEnv. These are injected by the
-// platform Sidecar Manager into every sidecar container: agents, MCP tool
-// servers and loaders alike.
-const (
-	envGatewayURL     = "PLATFORM_GATEWAY_URL"
-	envTenantID       = "OGA_TENANT_ID"
-	defaultGatewayURL = "http://localhost:8050"
-)
+// defaultGatewayURL is the gateway NewClientFromEnv dials when
+// sidecarenv.GatewayURL is unset.
+const defaultGatewayURL = "http://localhost:8050"
 
 // noopCloser is returned when there is no token manager to stop (no bootstrap
 // identity), so callers can always defer Close without a nil check.
@@ -53,11 +49,11 @@ func (c tokenManagerCloser) Close() error {
 // sends no Authorization header, and the Platform Gateway refuses its requests
 // with 401: the gateway has no tokenless mode.
 func NewClientFromEnv(ctx context.Context) (*PlatformGatewayClient, io.Closer, error) {
-	gatewayURL := os.Getenv(envGatewayURL)
+	gatewayURL := os.Getenv(sidecarenv.GatewayURL)
 	if gatewayURL == "" {
 		gatewayURL = defaultGatewayURL
 	}
-	client := NewPlatformGatewayClient(gatewayURL, os.Getenv(envTenantID))
+	client := NewPlatformGatewayClient(gatewayURL, os.Getenv(sidecarenv.TenantID))
 
 	tm, err := auth.NewTokenManagerFromEnv(ctx, auth.EnvTokenManagerConfig{
 		GatewayURL: strings.TrimRight(gatewayURL, "/"),

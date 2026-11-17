@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/ontogisai/oga-kit-sdk/sidecarenv"
 )
 
 // Bootstrap kinds — must match the platform gateway's mint endpoint contract
@@ -75,22 +77,23 @@ func (b SecretBootstrap) Token(_ context.Context) (string, string, error) {
 // requests with 401). An unknown kind, or a kind whose credential variable is
 // unset, is an error.
 func BootstrapFromEnv() (BootstrapProvider, error) {
-	switch os.Getenv("AGENT_BOOTSTRAP_KIND") {
+	kind := os.Getenv(sidecarenv.BootstrapKind)
+	switch kind {
 	case BootstrapKindK8sSA:
-		path := os.Getenv("AGENT_SA_TOKEN_PATH")
+		path := os.Getenv(sidecarenv.SATokenPath)
 		if path == "" {
-			return nil, fmt.Errorf("AGENT_BOOTSTRAP_KIND=k8s_sa but AGENT_SA_TOKEN_PATH is unset")
+			return nil, fmt.Errorf("%s=%s but %s is unset", sidecarenv.BootstrapKind, kind, sidecarenv.SATokenPath)
 		}
 		return K8sSABootstrap{Path: path}, nil
 	case BootstrapKindSecret:
-		secret := os.Getenv("AGENT_BOOTSTRAP_SECRET")
+		secret := os.Getenv(sidecarenv.BootstrapSecret)
 		if secret == "" {
-			return nil, fmt.Errorf("AGENT_BOOTSTRAP_KIND=secret but AGENT_BOOTSTRAP_SECRET is unset")
+			return nil, fmt.Errorf("%s=%s but %s is unset", sidecarenv.BootstrapKind, kind, sidecarenv.BootstrapSecret)
 		}
 		return SecretBootstrap{Secret: secret}, nil
 	case "":
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("unknown AGENT_BOOTSTRAP_KIND %q", os.Getenv("AGENT_BOOTSTRAP_KIND"))
+		return nil, fmt.Errorf("unknown %s %q", sidecarenv.BootstrapKind, kind)
 	}
 }
