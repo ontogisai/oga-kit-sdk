@@ -53,6 +53,7 @@ var platformTools = []string{
 	"kg_doc_status",
 	"kg_doc_upload",
 	"kg_entity_versions",
+	"kg_geo_address",
 	"kg_geo_near",
 	"kg_geo_pos",
 	"kg_geo_track",
