@@ -59,6 +59,7 @@ var platformTools = []string{
 	"kg_geo_track",
 	"kg_geo_within",
 	"kg_geo_zone_visits",
+	"kg_geo_zones",
 	"kg_geotemporal",
 	"kg_get_entity",
 	"kg_get_type_hierarchy",
