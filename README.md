@@ -412,7 +412,7 @@ The SDK has no opinion about how the kit parses — only about how records leave
 
 ## Source connectors
 
-A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/connector/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding.
+A loader runs when an operator asks it to. A **Source Connector** runs continuously: it either **polls** an upstream system on a cadence, or the upstream **pushes** to it via the platform's webhook ingress (`/ingest/webhook/{token}` → the connector's `POST /webhook/{binding}`). `connector.ListenAndServe` serves that contract — the webhook routes, `/connector/sync/{binding}`, `/healthz`, `/livez`, `/connector/test-connection` — plus one poll loop per poll-enabled binding, unless the platform owns the schedule ([The platform's poll schedule](#the-platforms-poll-schedule)).
 
 Declare the bindings in the kit manifest and collapse them to the runtime mode with `connector.ModeFromStrings`:
 
@@ -445,7 +445,7 @@ Every loader and every source-connector binding names the system its records com
 
 ### Sync now
 
-A poll binding drains on its ticker, and also when the platform asks (an operator's "sync now", from release 1.4.0):
+A poll binding drains on its ticker (or on the platform's schedule, from release 1.14.0: [below](#the-platforms-poll-schedule)), and also when the platform asks (an operator's "sync now", from release 1.4.0):
 
 | Route | Answer |
 |---|---|

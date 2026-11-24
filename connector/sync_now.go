@@ -16,7 +16,8 @@ import (
 // Sync now: run one drain of a poll binding on demand, and report the binding's
 // latest drain (OGA-1270).
 //
-// A poll binding otherwise drains only on its ticker, so an operator who has just
+// Without a platform-owned schedule ([PlatformOwnsPolling]) a poll binding
+// otherwise drains only on its ticker, so an operator who has just
 // changed the source waits a whole PollInterval and cannot see whether the last
 // poll worked. The ticker and POST /connector/sync/{binding} share one drain
 // per binding: whichever starts first holds the binding until it finishes, and
