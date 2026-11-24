@@ -972,9 +972,10 @@ type MonitorSpec struct {
 // validateSourceConnectors checks each kit-declared Source Connector
 // (spec.source_connectors[]): name + image present, at least one binding, each
 // binding has id + external_system + source_type with valid modes, binding
-// IDs are unique within the connector, and ontology_cleanup, when set, is the one
-// accepted mode. Connector names must be unique within the kit. Mirrors the field-level rules the platform installer applies so kit
-// authors get the same errors locally as at install time.
+// IDs are unique within the connector, and ontology_cleanup, when set, is the
+// one accepted mode. Connector names must be unique within the kit. Mirrors the
+// field-level rules the platform installer applies so kit authors get the same
+// errors locally as at install time.
 func validateSourceConnectors(conns []SourceConnectorSpec) error {
 	if len(conns) == 0 {
 		return nil
