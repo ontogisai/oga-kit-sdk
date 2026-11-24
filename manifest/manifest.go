@@ -372,7 +372,28 @@ type SourceConnectorSpec struct {
 	// Absent means no report is delivered, and nothing else changes: the platform
 	// still records the outcome for `loader.status` and the operator surfaces.
 	ReceivesOutcomeReport bool `yaml:"receives_outcome_report,omitempty"`
+	// OntologyCleanup opts this connector in to the platform removing the
+	// classes it stops publishing (connector class lifecycle). The only accepted
+	// value is [OntologyCleanupRemoveEmptyOmitted]; absent or empty is off.
+	//
+	// When it is set, a platform maintenance job proposes removing an entity
+	// type that this connector's source owns, that is absent from the source's
+	// last confirmed ontology snapshot, and that no live entity, no remaining
+	// type and no active policy uses. The removal is a Change Request on the
+	// source's stream, gated and applied like a connector snapshot; it never
+	// removes or changes a record.
+	//
+	// Off by default, which keeps an omitted class: a class missing from a
+	// catalogue export is not a statement that its assets are gone. Declare it
+	// for a connector whose classes follow a tree the customer edits, so that a
+	// renamed or deleted category's class leaves the ontology once it is empty.
+	OntologyCleanup string `yaml:"ontology_cleanup,omitempty"`
 }
+
+// OntologyCleanupRemoveEmptyOmitted is the one accepted
+// [SourceConnectorSpec.OntologyCleanup] value: remove a class the source no
+// longer publishes once nothing uses it.
+const OntologyCleanupRemoveEmptyOmitted = "remove_empty_omitted"
 
 // EdgeCompletenessSpec is a continuous feed's standing declaration that it submits
 // complete edge sets, and the vocabulary that declaration covers (OGA-930).
@@ -950,10 +971,11 @@ type MonitorSpec struct {
 
 // validateSourceConnectors checks each kit-declared Source Connector
 // (spec.source_connectors[]): name + image present, at least one binding, each
-// binding has id + external_system + source_type with valid modes, and binding
-// IDs are unique within the connector. Connector names must be unique within
-// the kit. Mirrors the field-level rules the platform installer applies so kit
-// authors get the same errors locally as at install time.
+// binding has id + external_system + source_type with valid modes, binding
+// IDs are unique within the connector, and ontology_cleanup, when set, is the
+// one accepted mode. Connector names must be unique within the kit. Mirrors the
+// field-level rules the platform installer applies so kit authors get the same
+// errors locally as at install time.
 func validateSourceConnectors(conns []SourceConnectorSpec) error {
 	if len(conns) == 0 {
 		return nil
@@ -976,6 +998,10 @@ func validateSourceConnectors(conns []SourceConnectorSpec) error {
 		}
 		if len(c.Bindings) == 0 {
 			return fmt.Errorf("spec.source_connectors[%d]: at least one binding is required", i)
+		}
+		if c.OntologyCleanup != "" && c.OntologyCleanup != OntologyCleanupRemoveEmptyOmitted {
+			return fmt.Errorf("spec.source_connectors[%d]: ontology_cleanup = %q is invalid; the only accepted value is %q",
+				i, c.OntologyCleanup, OntologyCleanupRemoveEmptyOmitted)
 		}
 		seenBind := make(map[string]int, len(c.Bindings))
 		system := ""
