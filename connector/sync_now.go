@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 // Sync now: run one drain of a poll binding on demand, and report the binding's
 // latest drain (OGA-1270).
 //
-// A poll binding otherwise drains only on its ticker, so an operator who has just
+// Without a platform-owned schedule ([PlatformOwnsPolling]) a poll binding
+// otherwise drains only on its ticker, so an operator who has just
 // changed the source waits a whole PollInterval and cannot see whether the last
 // poll worked. The ticker and POST /connector/sync/{binding} share one drain
 // per binding: whichever starts first holds the binding until it finishes, and
@@ -51,11 +53,46 @@ type SyncTrigger string
 
 const (
 	// SyncTriggerPoll is the binding's ticker, including the first drain after
-	// Connect.
+	// Connect. Never reported when the platform owns the schedule.
 	SyncTriggerPoll SyncTrigger = "poll"
 	// SyncTriggerManual is POST /connector/sync/{binding}.
 	SyncTriggerManual SyncTrigger = "manual"
+	// SyncTriggerSchedule is POST /connector/sync/{binding}?trigger=schedule:
+	// a drain the platform's poll schedule started. A connector answers it
+	// with this trigger, which is how the platform tells that the connector
+	// honours its schedule: an older SDK ignores the parameter and answers
+	// [SyncTriggerManual].
+	SyncTriggerSchedule SyncTrigger = "schedule"
 )
+
+// SyncTriggerParam is the query parameter of POST [PathSync] that names what
+// started the drain. Only [SyncTriggerSchedule] is recognised; any other value,
+// or none, is a manual drain.
+const SyncTriggerParam = "trigger"
+
+// The platform owns a connector's poll schedule when it sets [EnvPollOwner] to
+// [PollOwnerPlatform] in the connector's environment. The connector then runs no
+// poll loop: every drain arrives as POST [PathSync], so the platform decides
+// when, how often and whether a binding polls. Without it, each poll binding
+// drains on its own ticker at Config.PollInterval, as before.
+const (
+	EnvPollOwner      = "OGA_CONNECTOR_POLL_OWNER"
+	PollOwnerPlatform = "platform"
+)
+
+// PlatformOwnsPolling reports whether the platform owns this connector's poll
+// schedule ([EnvPollOwner]).
+func PlatformOwnsPolling() bool {
+	return os.Getenv(EnvPollOwner) == PollOwnerPlatform
+}
+
+// triggerOf maps a sync-now request to its trigger.
+func triggerOf(r *http.Request) SyncTrigger {
+	if SyncTrigger(r.URL.Query().Get(SyncTriggerParam)) == SyncTriggerSchedule {
+		return SyncTriggerSchedule
+	}
+	return SyncTriggerManual
+}
 
 // MaxStatusJobIDs bounds [SyncStatus.JobIDs]. A first drain of a large source can
 // commit thousands of batches; the status keeps the latest ones, which bracket a
@@ -228,7 +265,8 @@ func (s *server) drainHeld(ctx context.Context, b Binding, run *pollRun, cursor 
 }
 
 // handleSyncNow serves POST /connector/sync/{binding}. It starts one drain of
-// a poll binding and answers 202 with its status, or 409 with the running
+// a poll binding, triggered as the request's [SyncTriggerParam] says, and
+// answers 202 with its status, or 409 with the running
 // drain's status when one is already running (from the ticker or an earlier
 // request).
 //
@@ -248,30 +286,31 @@ func (s *server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 			http.StatusServiceUnavailable)
 		return
 	}
-	st, started, closed := s.startManualDrain(b, run)
+	trigger := triggerOf(r)
+	st, started, closed := s.startManualDrain(b, run, trigger)
 	switch {
 	case closed:
 		http.Error(w, "connector is shutting down", http.StatusServiceUnavailable)
 	case !started:
 		writeSyncStatus(w, http.StatusConflict, st)
 	default:
-		s.cfg.Logger.Info("source connector sync now started", "binding", b.ID)
+		s.cfg.Logger.Info("source connector sync now started", "binding", b.ID, "trigger", string(trigger))
 		writeSyncStatus(w, http.StatusAccepted, st)
 	}
 }
 
-// startManualDrain claims b and starts its sync-now drain, returning the
+// startManualDrain claims b and starts its sync-now drain under trigger, returning the
 // started drain's status. It returns started=false with the running drain's
 // status when one is running, and closed=true, starting nothing, once shutdown
 // has begun. The claim and the start happen under drainsMu, so no drain starts
 // after waitDrains has closed the gate.
-func (s *server) startManualDrain(b Binding, run *pollRun) (st SyncStatus, started, closed bool) {
+func (s *server) startManualDrain(b Binding, run *pollRun, trigger SyncTrigger) (st SyncStatus, started, closed bool) {
 	s.drainsMu.Lock()
 	defer s.drainsMu.Unlock()
 	if s.drainsClosed || s.runCtx.Err() != nil {
 		return SyncStatus{}, false, true
 	}
-	cursor, st, started := run.begin(SyncTriggerManual)
+	cursor, st, started := run.begin(trigger)
 	if started {
 		s.drains.Go(func() { s.drainHeld(s.runCtx, b, run, cursor) })
 	}

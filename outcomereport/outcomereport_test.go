@@ -402,3 +402,46 @@ func TestReport_StringNamesTheUnit(t *testing.T) {
 		t.Errorf("egress summary missing the run: %s", eg.String())
 	}
 }
+
+// The short-lived breakdown (OGA-1372): a total under counts, its per-type
+// breakdown summing to it, and the changed key names; all absent from an older
+// platform, which decodes as zero and empty.
+func TestReport_ShortLivedFieldsDecode(t *testing.T) {
+	t.Parallel()
+	const body = `{
+	  "schema_version": 1, "stage": "ingestion", "delivery_id": "ingestion:t:j",
+	  "tenant_id": "t", "status": "completed",
+	  "counts": {"vertices_updated": 12, "vertices_short_lived": 9},
+	  "short_lived_by_type": {"ex:Asset": 7, "ex:Sensor": 2},
+	  "short_lived_keys": ["attributes", "last_seen"]
+	}`
+	var rep Report
+	if err := json.Unmarshal([]byte(body), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	total := 0
+	for _, v := range rep.ShortLivedByType {
+		total += v
+	}
+	if got := rep.CountOrZero(CountVerticesShortLived); got != 9 || total != got {
+		t.Errorf("short-lived count %d, by-type sum %d, want both 9", got, total)
+	}
+	if strings.Join(rep.ShortLivedKeys, ",") != "attributes,last_seen" {
+		t.Errorf("short-lived keys = %v", rep.ShortLivedKeys)
+	}
+
+	var older Report
+	if err := json.Unmarshal([]byte(`{"schema_version": 1, "stage": "ingestion", "delivery_id": "d", "tenant_id": "t", "status": "completed"}`), &older); err != nil {
+		t.Fatalf("unmarshal older: %v", err)
+	}
+	if older.CountOrZero(CountVerticesShortLived) != 0 || older.ShortLivedByType != nil || older.ShortLivedKeys != nil {
+		t.Errorf("an older report = %+v, want no short-lived fields", older)
+	}
+	out, err := json.Marshal(older)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if s := string(out); strings.Contains(s, "short_lived") {
+		t.Errorf("a report with no short-lived updates encodes them: %s", s)
+	}
+}
