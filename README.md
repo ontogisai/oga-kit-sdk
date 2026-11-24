@@ -443,6 +443,20 @@ Every loader and every source-connector binding names the system its records com
 
 `manifest.Validate` refuses a loader without the field and a connector whose bindings name more than one system (from release 1.5.0), as the platform's install and upgrade do (`OGA-DKIT-VAL-1057`). A platform release that knows the loader field is required first: an older platform refuses it as an unknown key.
 
+### Classes the source stops publishing
+
+A connector that sends its classes through the platform's ontology-snapshot intake can let the platform remove the ones it stops publishing. Declare it on the connector's manifest entry (from release 1.15.0):
+
+```yaml
+source_connectors:
+  - name: my-sync
+    ontology_cleanup: remove_empty_omitted   # absent = off
+```
+
+A platform maintenance job then proposes removing an entity type that the connector's source owns, that is absent from the source's last confirmed snapshot, and that no live entity, no remaining type and no active policy uses. The proposal is a Change Request on the source's stream, gated and applied like a snapshot, and it never removes or changes a record. `remove_empty_omitted` is the only accepted value; `manifest.Validate` refuses any other.
+
+Off by default, so a class missing from a snapshot is kept. Declare it for a connector whose classes follow a tree the customer edits (a category renamed or deleted at the source), not for a catalogue whose exports may be partial. A platform release that knows the field is required first: an older platform refuses it as an unknown key.
+
 ### Sync now
 
 A poll binding drains on its ticker (or on the platform's schedule, from release 1.14.0: [below](#the-platforms-poll-schedule)), and also when the platform asks (an operator's "sync now", from release 1.4.0):
