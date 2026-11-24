@@ -241,6 +241,18 @@ const (
 	CountEdgesClosedByRemoval = "edges_closed_by_removal"
 )
 
+// CountVerticesShortLived is the ingestion count of updates that replaced a
+// SHORT-LIVED version: one the platform's short-lived age had not yet passed
+// when the update arrived. It is a subset of the vertices_updated count, SPARSE
+// like the rest of that stage's counts, and absent from an older platform. A
+// feed whose updates are mostly short-lived re-versions its records at its own
+// cadence (a value the source rewrites on every read, such as telemetry kept in
+// a record's attributes), which the platform's version-churn guard reports.
+const CountVerticesShortLived = "vertices_short_lived"
+
+// MaxShortLivedKeys bounds [Report.ShortLivedKeys].
+const MaxShortLivedKeys = 50
+
 // OntologyWait (ingestion, data submissions only) says whether the platform
 // held the submission back for an ontology snapshot the same source was
 // applying, and how the wait ended. The platform holds a data submission while
@@ -405,6 +417,15 @@ type Report struct {
 	// [Report.QuarantinedEdgesByReason], which is keyed by ERROR CODE — a
 	// different key space, so the two must never be merged into one tally.
 	QuarantinedByType map[string]int `json:"quarantined_by_type,omitempty"`
+	// ShortLivedByType breaks [CountVerticesShortLived] down per ENTITY TYPE
+	// (ingestion). Complete: it sums to that count. Absent when there were none.
+	ShortLivedByType map[string]int `json:"short_lived_by_type,omitempty"`
+	// ShortLivedKeys are the property KEYS whose values changed in a sample of
+	// the submission's short-lived updates (ingestion), sorted, at most
+	// [MaxShortLivedKeys]. Names only: no value is ever reported. A SAMPLE,
+	// so a key that changed only outside it is missing; absent when there were
+	// no short-lived updates or from an older platform.
+	ShortLivedKeys []string `json:"short_lived_keys,omitempty"`
 
 	// QuarantinedEdgesByReason breaks the EDGE-stage ingestion quarantine down per
 	// platform error code (an unresolvable endpoint, a cross-tenant endpoint, a

@@ -125,6 +125,8 @@ type Config struct {
 	// PollInterval is the cadence between poll batches per binding.
 	// Default 30s. Bindings with no poll mode are not polled. POST
 	// /connector/sync/{binding} drains a poll binding between ticks (sync_now.go).
+	// Unused when the platform owns the schedule ([PlatformOwnsPolling]): the
+	// platform's interval applies instead.
 	PollInterval time.Duration
 
 	// Logger for lifecycle messages. Defaults to kitlog.Default() (the
@@ -339,10 +341,17 @@ func ListenAndServe(ctx context.Context, cfg *Config, impl SourceConnector) erro
 		go retryConnect(runCtx, cfg, impl)
 	}
 
-	// Poll loops (one per poll-enabled binding).
+	// Poll loops (one per poll-enabled binding), unless the platform owns the
+	// schedule: it then drains each binding through POST /connector/sync/{binding}
+	// (sync_now.go), and a loop here would poll a second time.
 	var wg sync.WaitGroup
+	platformOwned := PlatformOwnsPolling()
+	if platformOwned {
+		cfg.Logger.Info("source connector: the platform owns the poll schedule; no poll loop runs",
+			"env", EnvPollOwner)
+	}
 	for _, b := range bindings {
-		if !b.Mode.pollEnabled() {
+		if platformOwned || !b.Mode.pollEnabled() {
 			continue
 		}
 		wg.Go(func() { s.pollBinding(runCtx, b) })

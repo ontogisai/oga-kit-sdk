@@ -454,9 +454,13 @@ A poll binding drains on its ticker, and also when the platform asks (an operato
 
 Both answer `404` for an unknown or webhook-only binding. The ticker and `POST` share one drain per binding: a tick that finds a sync-now drain running is skipped, so `Sync` is never called concurrently for one binding and the cursor stays with the binding.
 
-The status is the latest drain, running or finished: `outcome` (`running`, `succeeded`, `failed`), `trigger` (`poll` or `manual`), `started_at`, `finished_at`, `records` and `batches` committed, the committed `job_ids` (the latest 100) and, for a failed drain, `error` (cut at 512 bytes; a transport error's URL keeps only its location, without query or userinfo). Batches committed before a failure stay committed, and the next drain starts again from the page that failed. A drain whose `Sync` reports `HasMore` without moving the cursor is failed. The status is kept in memory, so a restarted connector reports no drain until its first one; webhook deliveries do not appear in it.
+The status is the latest drain, running or finished: `outcome` (`running`, `succeeded`, `failed`), `trigger` (`poll`, `manual` or `schedule`), `started_at`, `finished_at`, `records` and `batches` committed, the committed `job_ids` (the latest 100) and, for a failed drain, `error` (cut at 512 bytes; a transport error's URL keeps only its location, without query or userinfo). Batches committed before a failure stay committed, and the next drain starts again from the page that failed. A drain whose `Sync` reports `HasMore` without moving the cursor is failed. The status is kept in memory, so a restarted connector reports no drain until its first one; webhook deliveries do not appear in it.
 
 Nothing to implement: the server drives your `Sync` as it does on a tick. Make sure `Sync` honours its context, which shutdown cancels.
+
+#### The platform's poll schedule
+
+From release 1.14.0 the platform can own a poll binding's schedule. It sets `OGA_CONNECTOR_POLL_OWNER=platform` (`connector.EnvPollOwner`) in the connector's environment; the server then runs no poll loop, not even the first drain after `Connect`, and `Config.PollInterval` is unused. Each drain arrives as `POST /connector/sync/{binding}?trigger=schedule` and is reported with `trigger` `schedule` (`connector.SyncTriggerSchedule`), which is how the platform knows the connector honours its schedule: an older SDK answers `manual` and keeps its own ticker. Any other `trigger` value, or none, is an operator's sync now (`manual`). Without the variable the binding drains on its ticker as before, so a connector built on 1.14.0 still polls on an older platform. Nothing to implement: keep `PollInterval` for the older platform.
 
 ### Ordering pages: wait for a commit
 
