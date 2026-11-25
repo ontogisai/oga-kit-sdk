@@ -880,6 +880,44 @@ The `manifest.Validate` function automatically calls the same helper
 on `KitMetadata.DisplayName` and `KitMetadata.Description` — kits that
 ship a malformed manifest get a clear error during install.
 
+## Kit description (restricted Markdown)
+
+The console shows `metadata.description` on the kit cards. Each locale's
+value is restricted Markdown (CommonMark):
+
+| Allowed | Not allowed |
+|---|---|
+| Paragraphs, bullet and numbered lists, **bold**, *italic*, `inline code`, `https` links | Raw HTML, images, tables, headings |
+
+- **First paragraph = summary.** The card shows it: one or two sentences,
+  about 300 characters at most. Put details in later paragraphs or bullets.
+  The length is guidance; `Validate` does not check it.
+- **Use YAML's literal block style (`|`).** The folded style (`>-`) joins
+  lines and breaks lists.
+- **Every locale** follows the same convention.
+- `manifest.Validate` rejects a description containing a raw HTML tag,
+  naming the field and locale. HTML inside a code span (`` `<id>` ``) or
+  escaped (`\<`) is text and passes. A plain-text description is valid and
+  renders as one paragraph.
+
+```yaml
+metadata:
+  description:
+    en-US: |
+      Rosters clinical staff and finds qualified replacements when a shift
+      is left uncovered.
+
+      - Models **staff**, *shifts* and departments
+      - Ranks replacements by skills and working-time rules
+      - See the [kit guide](https://example.com/kit-guide)
+    vi-VN: |
+      Lập lịch trực cho nhân sự lâm sàng và tìm người thay thế phù hợp
+      khi một ca trực bị bỏ trống.
+
+      - Mô hình hóa **nhân sự**, *ca trực* và khoa
+      - Xếp hạng người thay thế theo kỹ năng và quy định giờ làm việc
+```
+
 ## Package Structure
 
 | Package | Purpose |
