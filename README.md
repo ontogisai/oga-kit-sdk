@@ -904,18 +904,16 @@ value is restricted Markdown (CommonMark):
 metadata:
   description:
     en-US: |
-      Rosters clinical staff and finds qualified replacements when a shift
-      is left uncovered.
+      An example kit that models sites and the things located at them.
 
-      - Models **staff**, *shifts* and departments
-      - Ranks replacements by skills and working-time rules
+      - Adds **ontology classes** for sites and their contents
+      - Ships a data loader that imports `ex:Asset` records
       - See the [kit guide](https://example.com/kit-guide)
     vi-VN: |
-      Lập lịch trực cho nhân sự lâm sàng và tìm người thay thế phù hợp
-      khi một ca trực bị bỏ trống.
+      Bộ kit mẫu mô hình hóa các địa điểm và những gì đặt tại đó.
 
-      - Mô hình hóa **nhân sự**, *ca trực* và khoa
-      - Xếp hạng người thay thế theo kỹ năng và quy định giờ làm việc
+      - Thêm **các lớp ontology** cho địa điểm và nội dung của chúng
+      - Có một data loader nhập các bản ghi `ex:Asset`
 ```
 
 ## Package Structure

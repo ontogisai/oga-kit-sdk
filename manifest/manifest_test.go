@@ -1038,6 +1038,23 @@ func TestValidate_DescriptionRejectsRawHTML(t *testing.T) {
 	}
 }
 
+// TestValidate_DescriptionErrorOmitsAttributes pins that the error names
+// the tag but never quotes its attributes, which are kit content.
+func TestValidate_DescriptionErrorOmitsAttributes(t *testing.T) {
+	err := Validate(descriptionManifest(map[string]string{
+		"en-US": `See <a href="https://example.com/private-path">this</a>.`,
+	}))
+	if err == nil {
+		t.Fatal("expected raw HTML error, got nil")
+	}
+	if !strings.Contains(err.Error(), `"<a …>"`) {
+		t.Errorf("error %q does not name the <a> tag", err)
+	}
+	if strings.Contains(err.Error(), "private-path") {
+		t.Errorf("error %q quotes the tag's attributes", err)
+	}
+}
+
 // TestValidate_DescriptionAcceptsPlainTextAndMarkdown covers what stays
 // valid: plain text (every existing kit), the allowed Markdown, and "<"
 // that CommonMark does not treat as HTML.
@@ -1048,8 +1065,8 @@ func TestValidate_DescriptionAcceptsPlainTextAndMarkdown(t *testing.T) {
 	}{
 		{"plain text", "Pre-built domain ontology covering the built environment lifecycle."},
 		{"long plain text", strings.Repeat("A long legacy description. ", 100)},
-		{"allowed markdown", "Rosters clinical staff and finds replacements.\n\n" +
-			"- **Staff** and *shifts*\n- Inline `code`\n\n1. First\n2. See [docs](https://example.com)\n"},
+		{"allowed markdown", "Models sites and the things located at them.\n\n" +
+			"- **Sites** and *assets*\n- Inline `code`\n\n1. First\n2. See [docs](https://example.com)\n"},
 		{"less-than in text", "Alerts when the temperature is < 5 or x<y."},
 		{"arrow", "Source <- target and a -> b"},
 		{"url autolink", "Docs at <https://example.com/kit>."},
@@ -1058,7 +1075,7 @@ func TestValidate_DescriptionAcceptsPlainTextAndMarkdown(t *testing.T) {
 		{"tag in double-backtick span", "Write ``a `<b>` c`` literally."},
 		{"tag in fenced code", "Example:\n\n```\n<div>x</div>\n```\n"},
 		{"escaped tag", `Write \<b> to mean bold.`},
-		{"vietnamese", "Bộ kit lập lịch trực cho các khoa lâm sàng."},
+		{"vietnamese", "Bộ kit mẫu mô hình hóa các địa điểm và tài sản."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

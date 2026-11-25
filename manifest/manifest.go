@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
@@ -920,6 +921,10 @@ func validateNoRawHTML(fieldName string, m map[string]string) error {
 	sort.Strings(keys)
 	for _, k := range keys {
 		if tag := rawHTMLPattern.FindString(markdownOutsideCode(m[k])); tag != "" {
+			// Name the tag, never its attributes: they are kit content.
+			if i := strings.IndexFunc(tag, unicode.IsSpace); i > 0 {
+				tag = tag[:i] + " …>"
+			}
 			if r := []rune(tag); len(r) > 40 {
 				tag = string(r[:40]) + "…"
 			}
