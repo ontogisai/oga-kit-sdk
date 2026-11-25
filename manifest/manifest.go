@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/text/language"
 	"gopkg.in/yaml.v3"
@@ -38,6 +39,20 @@ type KitMetadata struct {
 
 	// Description is a detailed description, keyed by full BCP-47 locale
 	// tag — same convention as DisplayName.
+	//
+	// Each locale's value is restricted Markdown (CommonMark), shown on the
+	// console's kit cards:
+	//   - Allowed: paragraphs, bullet and numbered lists, bold, italic,
+	//     inline code and https links.
+	//   - Not allowed: raw HTML, images, tables and headings. Validate
+	//     rejects a raw HTML tag; the console renders with raw HTML off.
+	//   - The first paragraph is the summary the card shows: one or two
+	//     sentences, about 300 characters at most. Details go in later
+	//     paragraphs or bullets. The length is guidance, not validated.
+	//   - Write the value with YAML's literal block style (|). The folded
+	//     style (>-) joins lines and breaks lists.
+	//
+	// A plain-text description is valid Markdown and renders as one paragraph.
 	Description map[string]string `yaml:"description"`
 
 	// Authors lists the kit authors.
@@ -725,6 +740,9 @@ func Validate(m *KitManifest) error {
 	if err := validateLocaleKeys("metadata.description", m.Metadata.Description); err != nil {
 		return err
 	}
+	if err := validateNoRawHTML("metadata.description", m.Metadata.Description); err != nil {
+		return err
+	}
 	if m.Spec.PlatformVersion == "" {
 		return fmt.Errorf("spec.platform_version is required")
 	}
@@ -880,6 +898,103 @@ func validateLocaleKeys(fieldName string, m map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// rawHTMLPattern matches the starts of CommonMark raw HTML: an open tag
+// (<div>, <br/>, <a href="x">), a closing tag (</div>), a comment (<!--),
+// a processing instruction (<?), a declaration (<!DOCTYPE) or CDATA.
+// Autolinks (<https://example.com>, <a@b.example>) and a bare "<" in text
+// ("x < 5") do not match.
+var rawHTMLPattern = regexp.MustCompile(
+	`<(?:[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>|/[A-Za-z][A-Za-z0-9-]*\s*>|!--|\?|![A-Za-z]|!\[CDATA\[)`,
+)
+
+// validateNoRawHTML rejects a locale value that contains a raw HTML tag
+// (see KitMetadata.Description). Text inside a code span and a
+// backslash-escaped "<" are Markdown text, not HTML, so they pass.
+// Iteration order is sorted so the error is stable.
+func validateNoRawHTML(fieldName string, m map[string]string) error {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if tag := rawHTMLPattern.FindString(markdownOutsideCode(m[k])); tag != "" {
+			// Name the tag, never its attributes: they are kit content.
+			if i := strings.IndexFunc(tag, unicode.IsSpace); i > 0 {
+				tag = tag[:i] + " …>"
+			}
+			if r := []rune(tag); len(r) > 40 {
+				tag = string(r[:40]) + "…"
+			}
+			return fmt.Errorf(
+				"%s: locale %q contains raw HTML %q; write the description in Markdown "+
+					"(paragraphs, lists, bold, italic, inline code, https links)",
+				fieldName, k, tag,
+			)
+		}
+	}
+	return nil
+}
+
+// markdownOutsideCode returns s with every CommonMark code span and every
+// backslash escape replaced by a space, so only text the renderer could
+// treat as HTML remains. A code span opens with a run of n backticks and
+// closes at the next run of exactly n; an unclosed run is literal text.
+func markdownOutsideCode(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '\\' && i+1 < len(s) && isASCIIPunct(s[i+1]) {
+			b.WriteByte(' ')
+			i += 2
+			continue
+		}
+		if c != '`' {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		n := backtickRun(s, i)
+		end := -1
+		for j := i + n; j < len(s); {
+			if s[j] != '`' {
+				j++
+				continue
+			}
+			r := backtickRun(s, j)
+			if r == n {
+				end = j + r
+				break
+			}
+			j += r
+		}
+		if end < 0 {
+			b.WriteString(s[i : i+n])
+			i += n
+			continue
+		}
+		b.WriteByte(' ')
+		i = end
+	}
+	return b.String()
+}
+
+// backtickRun returns the length of the run of backticks starting at s[i].
+func backtickRun(s string, i int) int {
+	n := 0
+	for i+n < len(s) && s[i+n] == '`' {
+		n++
+	}
+	return n
+}
+
+// isASCIIPunct reports whether c is ASCII punctuation, the set CommonMark
+// lets a backslash escape.
+func isASCIIPunct(c byte) bool {
+	return strings.IndexByte("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", c) >= 0
 }
 
 // validateKitPolicies enforces the per-entry rules of spec.policies (OGA-277):

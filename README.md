@@ -880,6 +880,42 @@ The `manifest.Validate` function automatically calls the same helper
 on `KitMetadata.DisplayName` and `KitMetadata.Description` — kits that
 ship a malformed manifest get a clear error during install.
 
+## Kit description (restricted Markdown)
+
+The console shows `metadata.description` on the kit cards. Each locale's
+value is restricted Markdown (CommonMark):
+
+| Allowed | Not allowed |
+|---|---|
+| Paragraphs, bullet and numbered lists, **bold**, *italic*, `inline code`, `https` links | Raw HTML, images, tables, headings |
+
+- **First paragraph = summary.** The card shows it: one or two sentences,
+  about 300 characters at most. Put details in later paragraphs or bullets.
+  The length is guidance; `Validate` does not check it.
+- **Use YAML's literal block style (`|`).** The folded style (`>-`) joins
+  lines and breaks lists.
+- **Every locale** follows the same convention.
+- `manifest.Validate` rejects a description containing a raw HTML tag,
+  naming the field and locale. HTML inside a code span (`` `<id>` ``) or
+  escaped (`\<`) is text and passes. A plain-text description is valid and
+  renders as one paragraph.
+
+```yaml
+metadata:
+  description:
+    en-US: |
+      An example kit that models sites and the things located at them.
+
+      - Adds **ontology classes** for sites and their contents
+      - Ships a data loader that imports `ex:Asset` records
+      - See the [kit guide](https://example.com/kit-guide)
+    vi-VN: |
+      Bộ kit mẫu mô hình hóa các địa điểm và những gì đặt tại đó.
+
+      - Thêm **các lớp ontology** cho địa điểm và nội dung của chúng
+      - Có một data loader nhập các bản ghi `ex:Asset`
+```
+
 ## Package Structure
 
 | Package | Purpose |

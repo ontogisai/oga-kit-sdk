@@ -986,3 +986,102 @@ func TestIsValidModelingMode(t *testing.T) {
 		}
 	}
 }
+
+// descriptionManifest returns a valid manifest whose metadata.description
+// holds the given locale values.
+func descriptionManifest(desc map[string]string) *KitManifest {
+	return &KitManifest{
+		APIVersion: "ontogis.ai/v1",
+		Kind:       "DomainKitManifest",
+		Metadata:   KitMetadata{Name: "k", Version: "1.0.0", Description: desc},
+		Spec:       KitSpec{PlatformVersion: ">=1.0.0"},
+	}
+}
+
+// TestValidate_DescriptionRejectsRawHTML pins the restricted-Markdown rule
+// on metadata.description: a raw HTML tag is refused, naming the field
+// and the locale.
+func TestValidate_DescriptionRejectsRawHTML(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"open tag", "A kit for <b>buildings</b>."},
+		{"closing tag only", "Ends here</div>"},
+		{"self-closing", "Line one<br/>line two"},
+		{"attributes", `See <a href="https://example.com">this</a>.`},
+		{"event handler", "<img src=x onerror=alert(1)>"},
+		{"multi-line tag", "<div\n  class=\"x\">text"},
+		{"script block", "Summary.\n\n<script>alert(1)</script>"},
+		{"comment", "Summary <!-- hidden -->"},
+		{"processing instruction", "Summary <?php echo 1 ?>"},
+		{"declaration", "<!DOCTYPE html>"},
+		{"cdata", "<![CDATA[x]]>"},
+		{"escaped backslash then tag", `A \\<b>bold</b> claim`},
+		{"tag beside an unclosed backtick", "a ` b <i>c</i>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := Validate(descriptionManifest(map[string]string{
+				"en-US": "Plain summary.",
+				"vi-VN": tt.value,
+			}))
+			if err == nil {
+				t.Fatalf("expected raw HTML error for %q, got nil", tt.value)
+			}
+			for _, want := range []string{"metadata.description", `"vi-VN"`, "raw HTML"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestValidate_DescriptionErrorOmitsAttributes pins that the error names
+// the tag but never quotes its attributes, which are kit content.
+func TestValidate_DescriptionErrorOmitsAttributes(t *testing.T) {
+	err := Validate(descriptionManifest(map[string]string{
+		"en-US": `See <a href="https://example.com/private-path">this</a>.`,
+	}))
+	if err == nil {
+		t.Fatal("expected raw HTML error, got nil")
+	}
+	if !strings.Contains(err.Error(), `"<a …>"`) {
+		t.Errorf("error %q does not name the <a> tag", err)
+	}
+	if strings.Contains(err.Error(), "private-path") {
+		t.Errorf("error %q quotes the tag's attributes", err)
+	}
+}
+
+// TestValidate_DescriptionAcceptsPlainTextAndMarkdown covers what stays
+// valid: plain text (every existing kit), the allowed Markdown, and "<"
+// that CommonMark does not treat as HTML.
+func TestValidate_DescriptionAcceptsPlainTextAndMarkdown(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"plain text", "Pre-built domain ontology covering the built environment lifecycle."},
+		{"long plain text", strings.Repeat("A long legacy description. ", 100)},
+		{"allowed markdown", "Models sites and the things located at them.\n\n" +
+			"- **Sites** and *assets*\n- Inline `code`\n\n1. First\n2. See [docs](https://example.com)\n"},
+		{"less-than in text", "Alerts when the temperature is < 5 or x<y."},
+		{"arrow", "Source <- target and a -> b"},
+		{"url autolink", "Docs at <https://example.com/kit>."},
+		{"email autolink", "Contact <support@example.com>."},
+		{"tag in code span", "Use `<entity_id>` as the key."},
+		{"tag in double-backtick span", "Write ``a `<b>` c`` literally."},
+		{"tag in fenced code", "Example:\n\n```\n<div>x</div>\n```\n"},
+		{"escaped tag", `Write \<b> to mean bold.`},
+		{"vietnamese", "Bộ kit mẫu mô hình hóa các địa điểm và tài sản."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := Validate(descriptionManifest(map[string]string{"en-US": tt.value})); err != nil {
+				t.Errorf("Validate(%q): %v", tt.value, err)
+			}
+		})
+	}
+}
