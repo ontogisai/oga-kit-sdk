@@ -558,43 +558,6 @@ func (c *PlatformGatewayClient) InvokeAgentStream(ctx context.Context, agentName
 	return ch, nil
 }
 
-// RegistrationRequest is the request for self-registration.
-//
-// Deprecated: the platform gateway has no registry endpoint; see RegisterSelf.
-type RegistrationRequest struct {
-	AgentID      string   `json:"agent_id"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	URL          string   `json:"url"`
-	Capabilities []string `json:"capabilities,omitempty"`
-}
-
-// RegisterSelf registers this agent in the Agent Registry.
-//
-// Deprecated: the platform registers a kit's agents when the kit is installed,
-// and the platform gateway has no /registry/register endpoint, so this call
-// fails. Remove the call; it will be deleted in a later major version.
-func (c *PlatformGatewayClient) RegisterSelf(ctx context.Context, reg *RegistrationRequest) error {
-	_, err := c.post(ctx, "/registry/register", reg)
-	if err != nil {
-		return fmt.Errorf("register self: %w", err)
-	}
-	return nil
-}
-
-// DeregisterSelf removes this agent from the Agent Registry.
-//
-// Deprecated: the platform removes a kit's agents when the kit is uninstalled,
-// and the platform gateway has no /registry/deregister endpoint, so this call
-// fails. Remove the call; it will be deleted in a later major version.
-func (c *PlatformGatewayClient) DeregisterSelf(ctx context.Context) error {
-	_, err := c.post(ctx, "/registry/deregister", nil)
-	if err != nil {
-		return fmt.Errorf("deregister self: %w", err)
-	}
-	return nil
-}
-
 // post sends a POST request to the gateway and returns the response body.
 func (c *PlatformGatewayClient) post(ctx context.Context, path string, body any) (json.RawMessage, error) {
 	var bodyReader io.Reader
